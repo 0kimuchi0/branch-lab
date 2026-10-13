@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState, type FormEvent, type KeyboardEvent } from 'react'
+import { parseEditorSave } from '../git/commands'
 
 export interface LogEntry {
   readonly id: number
@@ -12,21 +13,77 @@ interface TerminalProps {
   readonly onRun: (command: string) => void
   readonly onReset: () => void
   readonly resetLabel: string
+  /** エディタが開いている間は入力できない (Git がエディタを待っているため)。 */
+  readonly editorOpen: boolean
+}
+
+/** 差分を出すコマンドかどうか (出力の +/- 行に色を付ける)。 */
+function showsDiff(command: string): boolean {
+  return /^(git\s+)?(diff|show|stash\s+show)\b/.test(command)
+}
+
+function diffLineClass(line: string): string | undefined {
+  if (line.startsWith('diff --git') || line.startsWith('commit ')) return 'diff-header'
+  if (line.startsWith('+++') || line.startsWith('---')) return 'diff-file'
+  if (line.startsWith('@@')) return 'diff-hunk'
+  if (line.startsWith('+')) return 'diff-add'
+  if (line.startsWith('-')) return 'diff-del'
+  return undefined
+}
+
+function Output({ entry }: { readonly entry: LogEntry }) {
+  const className = entry.ok ? 'log-output' : 'log-output log-error'
+  if (!entry.ok || !showsDiff(entry.command)) {
+    return <pre className={className}>{entry.output}</pre>
+  }
+  return (
+    <pre className={className}>
+      {entry.output.split('\n').map((line, index) => (
+        <span key={index} className={diffLineClass(line)}>
+          {line}
+          {'\n'}
+        </span>
+      ))}
+    </pre>
+  )
+}
+
+/** ログのコマンド行。エディタの保存は、保存した内容を折りたたんで表示する。 */
+function CommandLine({ command }: { readonly command: string }) {
+  const saved = parseEditorSave(command)
+  if (!saved) {
+    return (
+      <div className="log-command">
+        <span className="prompt">$</span> {command}
+      </div>
+    )
+  }
+  if (saved.text === null) {
+    return <div className="log-command log-editor">(エディタを変更せずに閉じました)</div>
+  }
+  return (
+    <details className="log-command log-editor">
+      <summary>(エディタで編集して保存しました)</summary>
+      <pre>{saved.text}</pre>
+    </details>
+  )
 }
 
 const EXAMPLES = [
   'echo "hello" >> README.md',
   'git add .',
   'git commit -m "update"',
-  'git commit --allow-empty',
+  'git commit --allow-empty -m "empty"',
   'git switch -c feature',
   'git switch main',
   'git merge feature',
   'git rebase main',
+  'git rebase -i HEAD~2',
   'git status',
+  'git diff',
 ] as const
 
-export function Terminal({ log, onRun, onReset, resetLabel }: TerminalProps) {
+export function Terminal({ log, onRun, onReset, resetLabel, editorOpen }: TerminalProps) {
   const [value, setValue] = useState('')
   const [cursor, setCursor] = useState<number | null>(null)
   const logRef = useRef<HTMLDivElement>(null)
@@ -36,7 +93,8 @@ export function Terminal({ log, onRun, onReset, resetLabel }: TerminalProps) {
     if (el) el.scrollTop = el.scrollHeight
   }, [log])
 
-  const history = log.map((entry) => entry.command)
+  // エディタの保存はコマンドの履歴 (↑↓) に入れない
+  const history = log.map((entry) => entry.command).filter((command) => parseEditorSave(command) === null)
 
   const submit = (event: FormEvent) => {
     event.preventDefault()
@@ -78,14 +136,8 @@ export function Terminal({ log, onRun, onReset, resetLabel }: TerminalProps) {
         )}
         {log.map((entry) => (
           <div key={entry.id} className="log-entry">
-            <div className="log-command">
-              <span className="prompt">$</span> {entry.command}
-            </div>
-            {entry.output && (
-              <pre className={entry.ok ? 'log-output' : 'log-output log-error'}>
-                {entry.output}
-              </pre>
-            )}
+            <CommandLine command={entry.command} />
+            {entry.output && <Output entry={entry} />}
           </div>
         ))}
       </div>
@@ -97,6 +149,7 @@ export function Terminal({ log, onRun, onReset, resetLabel }: TerminalProps) {
             type="button"
             className="chip"
             onClick={() => onRun(example)}
+            disabled={editorOpen}
           >
             {example}
           </button>
@@ -115,7 +168,8 @@ export function Terminal({ log, onRun, onReset, resetLabel }: TerminalProps) {
             setCursor(null)
           }}
           onKeyDown={handleKeyDown}
-          placeholder='git commit -m "メッセージ"'
+          placeholder={editorOpen ? 'エディタを閉じるまで入力できません' : 'git commit -m "メッセージ"'}
+          disabled={editorOpen}
           aria-label="Git コマンド"
           autoFocus
           autoCapitalize="off"
@@ -123,7 +177,7 @@ export function Terminal({ log, onRun, onReset, resetLabel }: TerminalProps) {
           autoCorrect="off"
           spellCheck={false}
         />
-        <button type="submit" className="primary">
+        <button type="submit" className="primary" disabled={editorOpen}>
           実行
         </button>
         <button type="button" onClick={onReset}>

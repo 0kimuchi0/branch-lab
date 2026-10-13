@@ -4,7 +4,9 @@ import {
   continueOperation,
   merge,
   rebase,
+  rebaseInteractive,
   revert,
+  saveEditor,
   skipOperation,
 } from './history'
 import {
@@ -35,7 +37,18 @@ import {
   type Repo,
   type ResetMode,
 } from './model'
+import { gitDiff, show } from './inspect'
 import { fetch, pull, push, teammateCommit } from './remote'
+import {
+  stashApply,
+  stashBranch,
+  stashClear,
+  stashDrop,
+  stashList,
+  stashPop,
+  stashPush,
+  stashShow,
+} from './stash'
 
 export interface CommandResult {
   readonly repo: Repo
@@ -50,14 +63,17 @@ export const HELP_TEXT = [
   '',
   'Git のコマンド (先頭の git は省略できます。rm だけは git rm と区別します):',
   '  status / log [--oneline] [--all]',
+  '  diff [--staged] [<コミット> [<コミット>]] [--stat] [-- <ファイル>] / show [<コミット>]',
   '  add <ファイル>... / add .        restore [--staged] <ファイル>...',
-  '  commit -m "メッセージ" [-a] [--allow-empty] [--amend]',
+  '  commit [-m "メッセージ"] [-a] [--allow-empty] [--amend] [--no-edit]',
+  '  (-m を付けないとエディタが開きます。merge・revert・--continue なども同じです)',
   '  branch [<名前> [<起点>]] / branch -d <名前> / branch -m <新しい名前>',
   '  switch <名前> / switch -c <名前> / switch --detach <コミット>',
   '  checkout <名前|コミット> / checkout -b <名前>',
-  '  merge <ブランチ> [--no-ff] / rebase <ブランチ>',
-  '  cherry-pick [--allow-empty] <コミット>... / revert <コミット>...',
+  '  merge <ブランチ> [--no-ff] [--no-edit] / rebase [-i] <ブランチ>',
+  '  cherry-pick [-e] [--allow-empty] <コミット>... / revert [--no-edit] <コミット>...',
   '  reset [--soft | --mixed | --hard] [<コミット>]',
+  '  stash [push [-m "…"] [-u] [-k]] / stash list / show [-p] / apply / pop [--index] / drop / clear / branch',
   '  push [-u] [-f] [origin <ブランチ>] / fetch / pull [--rebase | --no-rebase]',
   '  (merge / rebase / cherry-pick / revert は --continue・--abort が使えます)',
   '',
@@ -94,7 +110,10 @@ export function tokenize(input: string): string[] {
 
 interface ParsedArgs {
   readonly flags: ReadonlySet<string>
+  /** 値をとるオプションの最後の値。 */
   readonly values: ReadonlyMap<string, string>
+  /** 値をとるオプションのすべての値 (git commit -m を複数書いた場合など)。 */
+  readonly allValues: ReadonlyMap<string, readonly string[]>
   readonly positional: readonly string[]
   /** -- より後ろの引数 (なければ null)。 */
   readonly paths: readonly string[] | null
@@ -114,6 +133,7 @@ function parseArgs(
 ): ParsedArgs {
   const flags = new Set<string>()
   const values = new Map<string, string>()
+  const allValues = new Map<string, string[]>()
   const positional: string[] = []
   let paths: string[] | null = null
   const normalize = (name: string) => spec.aliases?.[name] ?? name
@@ -138,13 +158,14 @@ function parseArgs(
       const value = inline ?? args[++i]
       if (value === undefined) throw new GitError(`error: ${rawName} には値が必要です`)
       values.set(name, value)
+      allValues.set(name, [...(allValues.get(name) ?? []), value])
     } else if (spec.flags?.includes(name) && inline === undefined) {
       flags.add(name)
     } else {
       throw new GitError(`error: 未対応のオプションです: ${arg}`)
     }
   }
-  return { flags, values, positional, paths }
+  return { flags, values, allValues, positional, paths }
 }
 
 function usage(text: string): never {
@@ -180,8 +201,10 @@ function runCommit(repo: Repo, args: readonly string[]): OperationResult {
     values: ['-m'],
     aliases: { '--all': '-a', '--message': '-m' },
   })
-  atMost(parsed, 0, 'git commit [-a] [-m "メッセージ"] [--allow-empty] [--amend]')
-  const message = parsed.values.get('-m')
+  atMost(parsed, 0, 'git commit [-a] [-m "メッセージ"] [--allow-empty] [--amend] [--no-edit]')
+  // -m を複数書くと、それぞれが段落になる
+  const messages = parsed.allValues.get('-m')
+  const message = messages?.map((part) => part.trim()).join('\n\n')
   if (message !== undefined && message.trim() === '') {
     throw new GitError('メッセージが空のため、コミットを中止しました')
   }
@@ -190,6 +213,7 @@ function runCommit(repo: Repo, args: readonly string[]): OperationResult {
     all: parsed.flags.has('-a'),
     allowEmpty: parsed.flags.has('--allow-empty'),
     amend: parsed.flags.has('--amend'),
+    noEdit: parsed.flags.has('--no-edit'),
   })
 }
 
@@ -325,6 +349,62 @@ function runRestore(repo: Repo, args: readonly string[]): OperationResult {
   return restore(repo, paths, { staged, ...(source === undefined ? {} : { source }) })
 }
 
+function runStash(repo: Repo, args: readonly string[]): OperationResult {
+  const [sub = 'push', ...rest] = args[0]?.startsWith('-') ? ['push', ...args] : args
+  switch (sub) {
+    case 'push':
+    case 'save': {
+      const parsed = parseArgs(rest, {
+        flags: ['-u', '-k'],
+        values: ['-m'],
+        aliases: { '--include-untracked': '-u', '--keep-index': '-k', '--message': '-m' },
+      })
+      if (parsed.paths !== null || (sub === 'push' && parsed.positional.length > 0)) {
+        throw new GitError('ファイルを指定した git stash push はこのアプリでは未対応です')
+      }
+      const message = parsed.values.get('-m') ?? (sub === 'save' ? parsed.positional.join(' ') : undefined)
+      return stashPush(repo, {
+        ...(message ? { message } : {}),
+        includeUntracked: parsed.flags.has('-u'),
+        keepIndex: parsed.flags.has('-k'),
+      })
+    }
+    case 'list':
+      parseArgs(rest, { flags: [] })
+      return stashList(repo)
+    case 'show': {
+      const parsed = parseArgs(rest, { flags: ['-p', '--stat'], aliases: { '--patch': '-p' } })
+      atMost(parsed, 1, 'git stash show [-p] [stash@{n}]')
+      return stashShow(repo, parsed.positional[0], { patch: parsed.flags.has('-p') })
+    }
+    case 'apply':
+    case 'pop': {
+      const parsed = parseArgs(rest, { flags: ['--index'] })
+      atMost(parsed, 1, `git stash ${sub} [--index] [stash@{n}]`)
+      const options = { index: parsed.flags.has('--index') }
+      return sub === 'pop'
+        ? stashPop(repo, parsed.positional[0], options)
+        : stashApply(repo, parsed.positional[0], options)
+    }
+    case 'drop': {
+      const parsed = parseArgs(rest, { flags: [] })
+      atMost(parsed, 1, 'git stash drop [stash@{n}]')
+      return stashDrop(repo, parsed.positional[0])
+    }
+    case 'clear':
+      parseArgs(rest, { flags: [] })
+      return stashClear(repo)
+    case 'branch': {
+      const parsed = parseArgs(rest, { flags: [] })
+      const [name, ref] = parsed.positional
+      if (name === undefined || parsed.positional.length > 2) usage('git stash branch <ブランチ> [stash@{n}]')
+      return stashBranch(repo, name, ref)
+    }
+    default:
+      throw new GitError(`error: 未対応の stash のサブコマンドです: ${sub}`)
+  }
+}
+
 function parseRemoteArgs(positional: readonly string[], text: string): string | undefined {
   const [remote, branch, ...rest] = positional
   if (rest.length > 0) usage(text)
@@ -351,7 +431,7 @@ function runPush(repo: Repo, args: readonly string[]): OperationResult {
 
 function runPull(repo: Repo, args: readonly string[]): OperationResult {
   const parsed = parseArgs(args, {
-    flags: ['--rebase', '--no-rebase', '--ff-only'],
+    flags: ['--rebase', '--no-rebase', '--ff-only', '--no-edit'],
     aliases: { '-r': '--rebase' },
   })
   const branch = parseRemoteArgs(parsed.positional, 'git pull [--rebase | --no-rebase] [origin]')
@@ -365,6 +445,7 @@ function runPull(repo: Repo, args: readonly string[]): OperationResult {
     ...(parsed.flags.has('--rebase') ? { rebase: true } : {}),
     ...(parsed.flags.has('--no-rebase') ? { rebase: false } : {}),
     fastForwardOnly: parsed.flags.has('--ff-only'),
+    noEdit: parsed.flags.has('--no-edit'),
   })
 }
 
@@ -381,6 +462,28 @@ function runGit(repo: Repo, name: string, args: readonly string[]): OperationRes
         oneline: parsed.flags.has('--oneline'),
         all: parsed.flags.has('--all'),
         ...(start === undefined ? {} : { start }),
+      })
+    }
+    case 'diff': {
+      const parsed = parseArgs(args, {
+        flags: ['--staged', '--name-only', '--stat'],
+        aliases: { '--cached': '--staged' },
+      })
+      return gitDiff(repo, {
+        staged: parsed.flags.has('--staged'),
+        commits: parsed.positional,
+        ...(parsed.paths ? { paths: parsed.paths } : {}),
+        nameOnly: parsed.flags.has('--name-only'),
+        stat: parsed.flags.has('--stat'),
+      })
+    }
+    case 'show': {
+      const parsed = parseArgs(args, { flags: ['--name-only', '--stat'] })
+      atMost(parsed, 1, 'git show [<コミット>]')
+      return show(repo, parsed.positional[0], {
+        ...(parsed.paths ? { paths: parsed.paths } : {}),
+        nameOnly: parsed.flags.has('--name-only'),
+        stat: parsed.flags.has('--stat'),
       })
     }
     case 'add': {
@@ -416,30 +519,46 @@ function runGit(repo: Repo, name: string, args: readonly string[]): OperationRes
       const message = parsed.values.get('-m')
       return merge(repo, parsed.positional[0] as string, {
         ...(message === undefined ? {} : { message }),
+        noEdit: parsed.flags.has('--no-edit'),
         noFastForward: parsed.flags.has('--no-ff'),
         fastForwardOnly: parsed.flags.has('--ff-only'),
       })
     }
     case 'rebase': {
-      const parsed = parseArgs(args, { flags: CONTROL_FLAGS })
+      const parsed = parseArgs(args, {
+        flags: [...CONTROL_FLAGS, '-i'],
+        aliases: { '--interactive': '-i' },
+      })
       const control = sequencerControl(repo, 'rebase', parsed)
       if (control) return control
-      if (parsed.positional.length !== 1) usage('git rebase <ブランチ>')
-      return rebase(repo, parsed.positional[0] as string)
+      if (parsed.positional.length !== 1) usage('git rebase [-i] <ブランチ>')
+      const upstream = parsed.positional[0] as string
+      return parsed.flags.has('-i') ? rebaseInteractive(repo, upstream) : rebase(repo, upstream)
     }
     case 'cherry-pick': {
-      const parsed = parseArgs(args, { flags: [...CONTROL_FLAGS, '--allow-empty'] })
+      const parsed = parseArgs(args, {
+        flags: [...CONTROL_FLAGS, '--allow-empty', '-e'],
+        aliases: { '--edit': '-e' },
+      })
       return (
         sequencerControl(repo, 'cherry-pick', parsed) ??
-        cherryPick(repo, parsed.positional, { allowEmpty: parsed.flags.has('--allow-empty') })
+        cherryPick(repo, parsed.positional, {
+          allowEmpty: parsed.flags.has('--allow-empty'),
+          edit: parsed.flags.has('-e'),
+        })
       )
     }
     case 'revert': {
       const parsed = parseArgs(args, { flags: [...CONTROL_FLAGS, '--no-edit'] })
-      return sequencerControl(repo, 'revert', parsed) ?? revert(repo, parsed.positional)
+      return (
+        sequencerControl(repo, 'revert', parsed) ??
+        revert(repo, parsed.positional, { noEdit: parsed.flags.has('--no-edit') })
+      )
     }
     case 'reset':
       return runReset(repo, args)
+    case 'stash':
+      return runStash(repo, args)
     case 'push':
       return runPush(repo, args)
     case 'fetch': {
@@ -495,12 +614,60 @@ function runShell(repo: Repo, name: string, tokens: readonly Token[]): Operation
   }
 }
 
+/** エディタを保存して閉じる操作を表すコマンド。ログと共有 URL にはこの形で残る。 */
+export const EDITOR_SAVE = ':wq'
+
+/**
+ * エディタを保存して閉じるコマンドを作る。text を省略すると開いたときの内容のまま閉じる。
+ * '#' で始まる行は Git が読み飛ばすので、ログと共有 URL を短くするために取り除いて記録する。
+ */
+export function editorSaveCommand(text?: string): string {
+  if (text === undefined) return EDITOR_SAVE
+  const kept = text
+    .split('\n')
+    .filter((line) => !line.startsWith('#'))
+    .join('\n')
+    .replace(/\s+$/, '')
+  return `${EDITOR_SAVE} ${JSON.stringify(kept)}`
+}
+
+/** エディタを保存したコマンドなら、保存した内容 (開いたときのままなら null) を返す。 */
+export function parseEditorSave(command: string): { text: string | null } | null {
+  if (command === EDITOR_SAVE) return { text: null }
+  if (!command.startsWith(`${EDITOR_SAVE} `)) return null
+  try {
+    const text: unknown = JSON.parse(command.slice(EDITOR_SAVE.length + 1))
+    return typeof text === 'string' ? { text } : null
+  } catch {
+    return null
+  }
+}
+
+function runEditorSave(repo: Repo, input: string): CommandResult {
+  const parsed = parseEditorSave(input.trim())
+  if (!parsed) return { repo, output: `使い方: ${EDITOR_SAVE} "保存する内容"`, ok: false }
+  try {
+    return { ...saveEditor(repo, parsed.text ?? undefined), ok: true }
+  } catch (error) {
+    if (error instanceof GitError) return { repo, output: error.message, ok: false }
+    throw error
+  }
+}
+
 /**
  * 入力された 1 行のコマンドを実行する。
  * git のコマンドは先頭の "git" を省略できる (rm だけはシェルの rm として扱う)。
  * Git の規則に反する操作は例外にせず、ok: false と説明文で返す。
  */
 export function executeCommand(repo: Repo, input: string): CommandResult {
+  if (input.startsWith(EDITOR_SAVE)) return runEditorSave(repo, input)
+  if (repo.editor && input.trim() !== '') {
+    return {
+      repo,
+      output: `エディタで ${repo.editor.file} を開いています。先に「保存して閉じる」を押してください`,
+      ok: false,
+    }
+  }
   const tokens = lex(input)
   const isGit = tokens[0]?.value === 'git' && !tokens[0].quoted
   if (isGit) tokens.shift()

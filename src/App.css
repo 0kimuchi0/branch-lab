@@ -436,6 +436,116 @@
   word-break: break-all;
 }
 
+.editor {
+  padding: 10px 12px 12px;
+  border: 2px solid var(--accent);
+  border-radius: 12px;
+  background: var(--surface);
+}
+
+.editor-header {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 4px 8px;
+}
+
+.editor-header h2 {
+  margin: 0;
+  font-size: 0.95rem;
+}
+
+.editor-hint {
+  margin: 4px 0 8px;
+  color: var(--text-muted);
+  font-size: 0.8rem;
+}
+
+.editor textarea {
+  width: 100%;
+  padding: 8px 10px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--graph-bg);
+  color: var(--text);
+  font-family: ui-monospace, 'SF Mono', Menlo, Consolas, monospace;
+  font-size: 0.85rem;
+  line-height: 1.5;
+  resize: vertical;
+}
+
+.editor-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  margin-top: 8px;
+}
+
+.editor-actions button {
+  padding: 5px 14px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface);
+  color: var(--text);
+  cursor: pointer;
+}
+
+.editor-actions button.primary {
+  border-color: var(--accent);
+  background: var(--accent);
+  color: var(--accent-text);
+  font-weight: 600;
+}
+
+.log-editor {
+  color: var(--text-muted);
+}
+
+.log-editor summary {
+  cursor: pointer;
+}
+
+.log-editor pre {
+  margin: 2px 0 0 12px;
+  white-space: pre-wrap;
+}
+
+.chip:disabled,
+.terminal-form button:disabled,
+.terminal-form input:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.area-stash {
+  margin-top: 12px;
+}
+
+.stash-list {
+  margin: 0;
+  padding: 6px 12px;
+  list-style: none;
+  font-size: 0.85rem;
+}
+
+.stash-list li + li {
+  margin-top: 4px;
+}
+
+.stash-list code {
+  color: var(--accent);
+}
+
+.stash-files {
+  display: block;
+  margin-left: 16px;
+  color: var(--text-muted);
+  font-family: ui-monospace, 'SF Mono', Menlo, Consolas, monospace;
+  font-size: 0.78rem;
+}
+
 .operation-banner {
   margin-bottom: 10px;
   padding: 8px 12px;
@@ -607,6 +717,27 @@
   margin: 2px 0 0;
   white-space: pre-wrap;
   color: var(--text-muted);
+}
+
+.diff-header {
+  color: var(--text);
+  font-weight: 600;
+}
+
+.diff-file {
+  color: var(--text);
+}
+
+.diff-hunk {
+  color: var(--lane-5);
+}
+
+.diff-add {
+  color: var(--lane-2);
+}
+
+.diff-del {
+  color: var(--error);
 }
 
 .log-error {

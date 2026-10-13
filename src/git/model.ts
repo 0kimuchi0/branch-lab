@@ -29,6 +29,40 @@ export type Head =
   | { readonly type: 'branch'; readonly name: string }
   | { readonly type: 'detached'; readonly id: CommitId }
 
+/** rebase -i の todo の 1 行 (cherry-pick・revert・通常の rebase はすべて pick)。 */
+export type TodoAction = 'pick' | 'reword' | 'edit' | 'squash' | 'fixup'
+
+export interface TodoItem {
+  readonly action: TodoAction
+  readonly id: CommitId
+}
+
+/** squash / fixup でまとめているコミットのメッセージ (fixup のものは skip)。 */
+export interface SquashPart {
+  readonly message: string
+  readonly skip: boolean
+}
+
+export type SequenceType = 'cherry-pick' | 'revert' | 'rebase'
+
+export interface SequenceOperation {
+  readonly type: SequenceType
+  /** 適用中 (コンフリクトなどで止まっている) の項目。確定済みなら null。 */
+  readonly current: TodoItem | null
+  /** これから適用する項目。 */
+  readonly todo: readonly TodoItem[]
+  /** 操作を始める前の HEAD。--abort で戻る先。 */
+  readonly origHead: CommitId
+  /** 操作を始めたときのブランチ (detached HEAD なら null)。rebase はこのブランチを付け替える。 */
+  readonly branch: string | null
+  /** もともと空のコミットも複製するか (rebase と cherry-pick --allow-empty)。 */
+  readonly keepEmpty: boolean
+  /** 各コミットのメッセージをエディタで編集するか (revert の既定、cherry-pick -e)。 */
+  readonly edit: boolean
+  /** squash / fixup でまとめている途中のメッセージ。 */
+  readonly squash: readonly SquashPart[] | null
+}
+
 /** 途中で止まっている操作 (コンフリクトの解消待ちなど)。 */
 export type Operation =
   | {
@@ -36,19 +70,60 @@ export type Operation =
       readonly theirs: CommitId
       readonly message: string
     }
+  | SequenceOperation
+
+/** エディタで書いたメッセージを付けて作るコミット。 */
+export interface PendingCommit {
+  readonly parents: readonly CommitId[]
+  readonly tree: Tree
+  readonly source?: CommitId
+  readonly reverts?: CommitId
+}
+
+/** エディタを保存して閉じたあとに続ける処理。 */
+export type AfterEdit =
+  /** コミットを作り、operation をこの値にする。 */
+  | { readonly kind: 'commit'; readonly commit: PendingCommit; readonly operation: Operation | null }
+  /**
+   * コミットを作り、cherry-pick / revert / rebase の続きを実行する。
+   * stop なら続きは実行せずに止まる (rebase -i の edit)。
+   */
   | {
-      readonly type: 'cherry-pick' | 'revert' | 'rebase'
-      /** 適用中のコミット。commit で確定済みなら null。 */
-      readonly current: CommitId | null
-      /** これから適用するコミット。 */
-      readonly todo: readonly CommitId[]
-      /** 操作を始める前の HEAD。--abort で戻る先。 */
-      readonly origHead: CommitId
-      /** rebase の対象ブランチ (detached HEAD なら null)。 */
-      readonly branch: string | null
-      /** もともと空のコミットも複製するか (rebase と cherry-pick --allow-empty)。 */
-      readonly keepEmpty: boolean
+      readonly kind: 'sequence'
+      readonly commit: PendingCommit
+      readonly operation: SequenceOperation
+      readonly stop?: boolean
     }
+  /** rebase -i の todo を読んで rebase を始める。 */
+  | {
+      readonly kind: 'todo'
+      readonly onto: CommitId
+      readonly origHead: CommitId
+      readonly branch: string | null
+      readonly commits: readonly CommitId[]
+    }
+
+/** 開いているエディタ。Git がエディタを開いて、閉じられるのを待っている状態。 */
+export interface Editor {
+  /** 編集しているファイルの名前 (表示用)。 */
+  readonly file: 'COMMIT_EDITMSG' | 'MERGE_MSG' | 'git-rebase-todo'
+  /** エディタを開いたときの内容。 */
+  readonly text: string
+  readonly after: AfterEdit
+}
+
+/** git stash で退避した変更。 */
+export interface StashEntry {
+  /** 退避したときの HEAD。 */
+  readonly base: CommitId
+  /** stash list に出す説明 (WIP on main: C3 ... や On main: <メッセージ>)。 */
+  readonly message: string
+  readonly index: Tree
+  /** 追跡しているファイルの、作業ディレクトリの内容。 */
+  readonly workdir: Tree
+  /** -u で退避した、追跡していないファイル。 */
+  readonly untracked: Tree
+}
 
 export interface Remote {
   readonly name: string
@@ -65,6 +140,10 @@ export interface Repo {
   readonly workdir: Tree
   readonly operation: Operation | null
   readonly conflicts: readonly Conflict[]
+  /** 開いているエディタ。開いている間は、保存して閉じる以外の操作はできない。 */
+  readonly editor: Editor | null
+  /** git stash のスタック。先頭が stash@{0} (最新)。 */
+  readonly stash: readonly StashEntry[]
   readonly remote: Remote
   /** リモート追跡ブランチ (origin/main など)。キーはリモート上のブランチ名。 */
   readonly remoteBranches: Readonly<Record<string, CommitId>>
@@ -105,6 +184,8 @@ export function createRepo(): Repo {
     workdir: tree,
     operation: null,
     conflicts: [],
+    editor: null,
+    stash: [],
     remote: { name: REMOTE_NAME, commits, branches: { [DEFAULT_BRANCH]: root.id } },
     remoteBranches: { [DEFAULT_BRANCH]: root.id },
     upstreams: { [DEFAULT_BRANCH]: DEFAULT_BRANCH },
@@ -270,6 +351,7 @@ export function hasTrackedChanges(repo: Repo): boolean {
 }
 
 export function requireNoOperation(repo: Repo): void {
+  requireNoEditor(repo)
   const op = repo.operation
   if (!op) return
   throw new GitError(
@@ -522,23 +604,78 @@ export function requireNoConflicts(repo: Repo): void {
   )
 }
 
+/** コミットメッセージの 1 行目 (件名)。 */
+export function subject(message: string): string {
+  return message.split('\n')[0] ?? ''
+}
+
 export function commitSummary(commit: Commit, branch: string | null): string {
   const where = branch ?? 'detached HEAD'
-  return `[${where} ${commit.id}] ${commit.message}`
+  return `[${where} ${commit.id}] ${subject(commit.message)}`
+}
+
+/**
+ * エディタで書いたメッセージを Git と同じように整える。
+ * '#' で始まる行と行末の空白を取り除き、連続する空行を 1 つにして、前後の空行を削る。
+ */
+export function cleanupMessage(text: string): string {
+  const lines = text
+    .split('\n')
+    .filter((line) => !line.startsWith('#'))
+    .map((line) => line.replace(/\s+$/, ''))
+  const collapsed = lines.filter((line, index) => line !== '' || (index > 0 && lines[index - 1] !== ''))
+  return collapsed.join('\n').trim()
+}
+
+/** コミットメッセージのエディタに出すテンプレート。 */
+export function messageTemplate(repo: Repo, message: string, note?: string): string {
+  return [
+    message,
+    '',
+    ...(note ? note.split('\n').map((line) => `# ${line}`) : []),
+    '# 変更内容のコミットメッセージを入力してください。\'#\' で始まる行は無視され、',
+    '# 空のメッセージの場合はコミットを中止します。',
+    '#',
+    ...statusLines(repo).map((line) => (line === '' ? '#' : `# ${line}`)),
+    '',
+  ].join('\n')
+}
+
+/** エディタを開いて、閉じられるのを待つ状態にする。 */
+export function openEditor(repo: Repo, editor: Editor): Repo {
+  return { ...repo, editor }
+}
+
+export const EDITOR_WAITING =
+  'エディタが閉じられるのを待っています... (内容を書いて「保存して閉じる」を押してください)'
+
+export function requireNoEditor(repo: Repo): void {
+  if (repo.editor) {
+    throw new GitError('エディタが開いています。先にエディタを保存して閉じてください')
+  }
 }
 
 export interface CommitOptions {
+  /** -m で指定したメッセージ。指定しなければエディタを開く。 */
   readonly message?: string
   /** -a: 追跡しているファイルの変更をすべてステージしてからコミットする。 */
   readonly all?: boolean
   readonly allowEmpty?: boolean
   readonly amend?: boolean
+  /** --no-edit: エディタを開かず、既定のメッセージ (amend なら元のメッセージ) を使う。 */
+  readonly noEdit?: boolean
 }
 
-/** ステージ (インデックス) の内容でコミットする。 */
+/** コミットを作る。output は git commit の 1 行目と同じ形。 */
+export function createCommit(repo: Repo, pending: PendingCommit, message: string): { repo: Repo; output: string } {
+  const { repo: next, commit: created } = addCommit(repo, { ...pending, message })
+  return { repo: next, output: commitSummary(created, currentBranch(next)) }
+}
+
+/** ステージ (インデックス) の内容でコミットする。メッセージがなければエディタを開く。 */
 export function commit(repo: Repo, options: CommitOptions = {}): OperationResult {
   const op = repo.operation
-  if (options.amend) requireNoOperation(repo)
+  if (options.amend && op && !(op.type === 'rebase' && op.current === null)) requireNoOperation(repo)
 
   let staged = repo
   if (options.all) {
@@ -558,14 +695,15 @@ export function commit(repo: Repo, options: CommitOptions = {}): OperationResult
     ? (staged.commits[head.parents[0] ?? '']?.tree ?? {})
     : head.tree
 
+  const picked = op && op.type !== 'merge' && op.current ? getCommit(repo, op.current.id) : null
   if (op?.type !== 'merge' && !options.allowEmpty && treesEqual(staged.index, parentTree)) {
     if (options.amend) {
       throw new GitError('コミットの内容が親と同じになります。--allow-empty を付けてください')
     }
-    if (op && op.current !== null) {
+    if (picked) {
       throw new GitError(
-        `${op.current} の変更はすでに含まれているため、コミットが空になります。\n` +
-          `git ${op.type} --skip で飛ばすか、git commit --allow-empty で空のコミットを作ってください`,
+        `${picked.id} の変更はすでに含まれているため、コミットが空になります。\n` +
+          `git ${op?.type} --skip で飛ばすか、git commit --allow-empty で空のコミットを作ってください`,
       )
     }
     const lines = statusLines(staged)
@@ -575,35 +713,43 @@ export function commit(repo: Repo, options: CommitOptions = {}): OperationResult
     throw new GitError(lines.join('\n'))
   }
 
-  const picked = op && op.type !== 'merge' && op.current ? getCommit(repo, op.current) : null
+  const pending: PendingCommit = {
+    parents,
+    tree: staged.index,
+    ...(picked && op?.type !== 'revert' ? { source: picked.source ?? picked.id } : {}),
+    ...(picked && op?.type === 'revert' ? { reverts: picked.id } : {}),
+  }
   const defaultMessage =
     options.amend ? head.message
     : op?.type === 'merge' ? op.message
     : picked && op?.type === 'revert' ? revertMessage(picked)
     : picked ? picked.message
-    : `Commit ${staged.nextId}`
-  const message = options.message?.trim() || defaultMessage
-
-  const { repo: next, commit: created } = addCommit(staged, {
-    parents,
-    message,
-    tree: staged.index,
-    ...(picked && op?.type !== 'revert' ? { source: picked.source ?? picked.id } : {}),
-    ...(picked && op?.type === 'revert' ? { reverts: picked.id } : {}),
-  })
+    : ''
   const finishedOp: Operation | null =
     !op ? null
     : op.type === 'merge' ? null
+    : op.current === null ? op
     : op.todo.length === 0 && op.type !== 'rebase' ? null
     : { ...op, current: null }
-  return {
-    repo: { ...next, operation: finishedOp },
-    output: commitSummary(created, currentBranch(next)),
+
+  const message = options.message?.trim()
+  if (message || (options.noEdit && defaultMessage)) {
+    const created = createCommit(staged, pending, message || defaultMessage)
+    return { repo: { ...created.repo, operation: finishedOp }, output: created.output }
   }
+  if (options.noEdit) {
+    throw new GitError('メッセージが空のため、コミットを中止しました (-m でメッセージを指定してください)')
+  }
+  const editor: Editor = {
+    file: op?.type === 'merge' ? 'MERGE_MSG' : 'COMMIT_EDITMSG',
+    text: messageTemplate(staged, defaultMessage),
+    after: { kind: 'commit', commit: pending, operation: finishedOp },
+  }
+  return { repo: openEditor(staged, editor), output: EDITOR_WAITING }
 }
 
 export function revertMessage(commit: Commit): string {
-  return `Revert "${commit.message}"`
+  return `Revert "${subject(commit.message)}"\n\nThis reverts commit ${commit.id}.`
 }
 
 // ---- ブランチ ----
@@ -778,7 +924,7 @@ export function detachHead(repo: Repo, ref: string): OperationResult {
     repo: next,
     output: joinLines(
       leavingBehindWarning(repo, next),
-      `HEAD は ${id} (${getCommit(repo, id).message}) を直接指しています (detached HEAD)`,
+      `HEAD は ${id} (${subject(getCommit(repo, id).message)}) を直接指しています (detached HEAD)`,
     ),
   }
 }
@@ -819,7 +965,7 @@ export function reset(
   if (mode === 'hard') {
     return {
       repo: next,
-      output: `HEAD is now at ${targetId} ${getCommit(repo, targetId).message}`,
+      output: `HEAD is now at ${targetId} ${subject(getCommit(repo, targetId).message)}`,
     }
   }
   if (mode === 'mixed') {
@@ -943,7 +1089,9 @@ function statusLines(repo: Repo): string[] {
         : 'すべてのコンフリクトが解消されました。"git commit" でマージを完了してください',
     )
   } else if (op && op.current !== null) {
-    lines.push(`${op.type} の途中です (${op.current} を適用中)`)
+    lines.push(`${op.type} の途中です (${op.current.id} を適用中)`)
+  } else if (op?.type === 'rebase') {
+    lines.push('コミットを修正できます。終わったら "git rebase --continue" を実行してください')
   }
   if (op) lines.push(`(中止するには "git ${op.type} --abort")`)
 
@@ -999,12 +1147,12 @@ export function log(
     const names = refNames(repo, id)
     const decoration = names.length > 0 ? ` (${names.join(', ')})` : ''
     if (options.oneline) {
-      lines.push(`${id}${decoration} ${commit.message}`)
+      lines.push(`${id}${decoration} ${subject(commit.message)}`)
     } else {
       if (lines.length > 0) lines.push('')
       lines.push(`commit ${id}${decoration}`)
       if (commit.parents.length > 1) lines.push(`Merge: ${commit.parents.join(' ')}`)
-      lines.push('', `    ${commit.message}`)
+      lines.push('', ...commit.message.split('\n').map((line) => (line === '' ? '' : `    ${line}`)))
     }
   }
   return { repo, output: lines.join('\n') }

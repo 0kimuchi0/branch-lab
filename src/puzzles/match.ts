@@ -72,9 +72,9 @@ function branchesMatch(
   })
 }
 
-/** 途中で止まっている操作やコンフリクトマーカーがなく、目標と同じ履歴になっているか。 */
+/** 途中で止まっている操作・開いているエディタ・コンフリクトマーカーがなく、目標と同じ履歴になっているか。 */
 export function matchesGoal(actual: Repo, goal: Repo, options: MatchOptions): boolean {
-  if (actual.operation !== null) return false
+  if (actual.operation !== null || actual.editor !== null) return false
   const headId = actual.head.type === 'branch' ? actual.branches[actual.head.name] : actual.head.id
   const headTree = headId === undefined ? undefined : actual.commits[headId]?.tree
   if (headTree && Object.values(headTree).some((content) => content.includes('<<<<<<<'))) {

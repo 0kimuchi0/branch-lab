@@ -31,7 +31,7 @@ describe('workdirFiles / stagedFiles', () => {
   it('コンフリクトしたファイルは両方でコンフリクトとして表示する', () => {
     const repo = run([
       'git switch -c feature', 'echo "f" > README.md', 'git commit -am f',
-      'git switch main', 'echo "m" > README.md', 'git commit -am m', 'git merge feature',
+      'git switch main', 'echo "m" > README.md', 'git commit -am m', 'git merge --no-edit feature',
     ])
     expect(states(workdirFiles(repo))).toEqual({ 'README.md': 'conflict' })
     expect(states(stagedFiles(repo))).toEqual({ 'README.md': 'conflict' })

@@ -1,15 +1,16 @@
 /**
- * 履歴を組み替える操作 (merge・cherry-pick・revert・rebase) と、
- * コンフリクトで止まったときの --continue / --abort / --skip。
+ * 履歴を組み替える操作 (merge・cherry-pick・revert・rebase・rebase -i) と、
+ * コンフリクトで止まったときの --continue / --abort / --skip、エディタを閉じたあとの続き。
  */
 import {
+  EDITOR_WAITING,
   GitError,
   REMOTE_NAME,
-  addCommit,
   ancestors,
   carryChanges,
+  cleanupMessage,
   commit,
-  commitSummary,
+  createCommit,
   currentBranch,
   getCommit,
   hasTrackedChanges,
@@ -17,19 +18,27 @@ import {
   headTree,
   isAncestor,
   mergeBase,
+  messageTemplate,
+  openEditor,
   requireNoConflicts,
   requireNoOperation,
   resolveRef,
   revertMessage,
+  subject,
+  type Commit,
   type CommitId,
+  type Editor,
   type Operation,
   type OperationResult,
+  type PendingCommit,
   type Repo,
+  type SequenceOperation,
+  type SequenceType,
+  type SquashPart,
+  type TodoAction,
+  type TodoItem,
 } from './model'
 import { mergeTrees, treesEqual, withFile, type Conflict, type Tree } from './tree'
-
-type SequenceType = 'cherry-pick' | 'revert' | 'rebase'
-type SequenceOperation = Extract<Operation, { type: SequenceType }>
 
 /**
  * コンフリクトで止まった状態にする。作業ディレクトリにはマーカー付きの内容を、
@@ -56,7 +65,7 @@ function conflictLines(conflicts: readonly Conflict[]): string[] {
 
 // ---- merge ----
 
-function mergeMessage(repo: Repo, ref: string): string {
+export function mergeMessage(repo: Repo, ref: string): string {
   const current = currentBranch(repo)
   const into = current === null || current === 'main' ? '' : ` into ${current}`
   if (ref in repo.branches) return `Merge branch '${ref}'${into}`
@@ -65,7 +74,12 @@ function mergeMessage(repo: Repo, ref: string): string {
 }
 
 export interface MergeOptions {
+  /** -m で指定したメッセージ。 */
   readonly message?: string
+  /** --no-edit: エディタを開かずに既定のメッセージを使う。 */
+  readonly noEdit?: boolean
+  /** -m がないときの既定のメッセージ (git pull が使う)。 */
+  readonly defaultMessage?: string
   /** --no-ff: fast-forward できる場合もマージコミットを作る。 */
   readonly noFastForward?: boolean
   /** --ff-only: fast-forward できない場合は中止する。 */
@@ -104,12 +118,15 @@ export function merge(repo: Repo, ref: string, options: MergeOptions = {}): Oper
     ours: 'HEAD',
     theirs: ref,
   })
-  const message = options.message?.trim() || mergeMessage(repo, ref)
+  const defaultMessage = options.defaultMessage ?? mergeMessage(repo, ref)
   const carried = carryChanges(repo, result.tree, 'merge')
 
   if (result.conflicts.length > 0) {
     const stopped = applyConflicted(
-      { ...repo, operation: { type: 'merge', theirs, message } },
+      {
+        ...repo,
+        operation: { type: 'merge', theirs, message: options.message?.trim() || defaultMessage },
+      },
       carried,
       result.conflicts,
     )
@@ -123,65 +140,26 @@ export function merge(repo: Repo, ref: string, options: MergeOptions = {}): Oper
     }
   }
 
-  const { repo: next, commit: created } = addCommit(repo, {
-    parents: [ours, theirs],
-    message,
-    tree: result.tree,
-  })
-  return {
-    repo: { ...next, ...carried },
-    output: `Merge made by the 'ort' strategy.\n${commitSummary(created, currentBranch(next))}`,
+  const merged: Repo = { ...repo, ...carried }
+  const pending: PendingCommit = { parents: [ours, theirs], tree: result.tree }
+  const message = options.message?.trim()
+  if (message || options.noEdit) {
+    const created = createCommit(merged, pending, message || defaultMessage)
+    return { repo: created.repo, output: `Merge made by the 'ort' strategy.\n${created.output}` }
   }
+  const editor: Editor = {
+    file: 'MERGE_MSG',
+    text: messageTemplate(
+      merged,
+      defaultMessage,
+      'マージする理由を説明してください (特に、更新された上流をトピックブランチにマージする場合)。',
+    ),
+    after: { kind: 'commit', commit: pending, operation: null },
+  }
+  return { repo: openEditor(merged, editor), output: EDITOR_WAITING }
 }
 
 // ---- cherry-pick / revert / rebase ----
-
-interface PickResult {
-  readonly repo: Repo
-  readonly status: 'committed' | 'empty' | 'conflict'
-  readonly lines: readonly string[]
-}
-
-/** 1 つのコミットの変更を HEAD に適用する (revert なら逆向きに)。 */
-function applyOne(repo: Repo, type: SequenceType, id: CommitId, keepEmpty: boolean): PickResult {
-  const picked = getCommit(repo, id)
-  if (picked.parents.length > 1) {
-    throw new GitError(
-      `error: ${id} はマージコミットですが、-m オプションが指定されていません (このアプリでは未対応です)`,
-    )
-  }
-  const parentTree =
-    picked.parents[0] === undefined ? {} : getCommit(repo, picked.parents[0]).tree
-  const [base, theirs] = type === 'revert' ? [picked.tree, parentTree] : [parentTree, picked.tree]
-  const label =
-    type === 'revert' ? `parent of ${id} (${picked.message})` : `${id} (${picked.message})`
-  const ours = headTree(repo)
-  const result = mergeTrees(base, ours, theirs, { ours: 'HEAD', theirs: label })
-  const carried = carryChanges(repo, result.tree, type)
-
-  if (result.conflicts.length > 0) {
-    return {
-      repo: applyConflicted(repo, carried, result.conflicts),
-      status: 'conflict',
-      lines: conflictLines(result.conflicts),
-    }
-  }
-  // もともと空のコミットは keepEmpty なら複製し、変更が取り込み済みで空になったものは除く
-  if (treesEqual(result.tree, ours) && !(keepEmpty && treesEqual(picked.tree, parentTree))) {
-    return { repo, status: 'empty', lines: [] }
-  }
-  const { repo: next, commit: created } = addCommit(repo, {
-    parents: [headCommitId(repo)],
-    message: type === 'revert' ? revertMessage(picked) : picked.message,
-    tree: result.tree,
-    ...(type === 'revert' ? { reverts: id } : { source: picked.source ?? id }),
-  })
-  return {
-    repo: { ...next, ...carried },
-    status: 'committed',
-    lines: [commitSummary(created, currentBranch(next))],
-  }
-}
 
 const STOP_HINTS: Readonly<Record<SequenceType, string>> = {
   'cherry-pick':
@@ -195,40 +173,210 @@ const STOP_HINTS: Readonly<Record<SequenceType, string>> = {
     '(飛ばすには git rebase --skip、中止して元に戻すには git rebase --abort)',
 }
 
-/** todo のコミットを順に適用する。コンフリクトか (cherry-pick・revert で) 空になったら止まる。 */
-function runSequence(repo: Repo, op: SequenceOperation, lines: string[]): OperationResult {
-  let current = repo
-  let todo = op.todo
-  while (todo.length > 0) {
-    const [id, ...rest] = todo as [CommitId, ...CommitId[]]
-    const result = applyOne({ ...current, operation: null }, op.type, id, op.keepEmpty)
-    lines.push(...result.lines)
-    if (result.status === 'conflict') {
-      lines.push(`error: ${id} (${getCommit(repo, id).message}) を適用できませんでした`)
-      lines.push(STOP_HINTS[op.type])
-      return {
-        repo: { ...result.repo, operation: { ...op, current: id, todo: rest } },
-        output: lines.join('\n'),
-      }
+const EDIT_STOP = [
+  'git commit --amend でコミットを修正できます。',
+  '修正が終わったら git rebase --continue を実行してください。',
+]
+
+function mergeCommitError(id: CommitId): GitError {
+  return new GitError(
+    `error: ${id} はマージコミットですが、-m オプションが指定されていません (このアプリでは未対応です)`,
+  )
+}
+
+function parentTreeOf(repo: Repo, picked: Commit): Tree {
+  return picked.parents[0] === undefined ? {} : getCommit(repo, picked.parents[0]).tree
+}
+
+/** squash のエディタに出す、まとめるコミットのメッセージ。 */
+function squashTemplate(parts: readonly SquashPart[]): string {
+  const lines = [`# これは ${parts.length} 個のコミットの組み合わせです。`]
+  parts.forEach((part, index) => {
+    if (part.skip) {
+      lines.push(
+        `# ${index + 1} 番目のコミットのメッセージはスキップされます:`,
+        '#',
+        ...part.message.split('\n').map((line) => `# ${line}`),
+        '',
+      )
+    } else {
+      lines.push(`# ${index + 1} 番目のコミットのメッセージ:`, '', part.message, '')
     }
-    if (result.status === 'empty') {
-      if (op.type === 'rebase') {
-        lines.push(`${id} の変更はすでに含まれているため、取り除きました`)
-      } else {
-        lines.push(
-          `${id} の変更はすでに含まれているため、コミットが空になります。`,
-          `git ${op.type} --skip で飛ばすか、git commit --allow-empty で空のコミットを作ってください`,
-        )
-        return {
-          repo: { ...result.repo, operation: { ...op, current: id, todo: rest } },
-          output: lines.join('\n'),
-        }
-      }
+  })
+  return lines.join('\n')
+}
+
+type Step =
+  | {
+      readonly status: 'continue'
+      readonly repo: Repo
+      readonly op: SequenceOperation
+      readonly lines: readonly string[]
     }
-    current = result.repo
-    todo = rest
+  | { readonly status: 'stop'; readonly repo: Repo; readonly lines: readonly string[] }
+
+function waitForEditor(repo: Repo, stoppedOp: SequenceOperation, editor: Editor): Step {
+  return {
+    status: 'stop',
+    repo: openEditor({ ...repo, operation: stoppedOp }, editor),
+    lines: [EDITOR_WAITING],
   }
-  return finishSequence(current, op, lines)
+}
+
+/**
+ * 適用した結果の tree で、todo の 1 項目を確定させる。op.todo はこの項目より後ろの残り。
+ * pick はそのままコミットし、reword・squash の最後・--continue のあと・revert (既定) ではエディタを開く。
+ */
+function completeItem(
+  repo: Repo,
+  op: SequenceOperation,
+  item: TodoItem,
+  tree: Tree,
+  fromContinue: boolean,
+): Step {
+  const picked = getCommit(repo, item.id)
+  const head = getCommit(repo, headCommitId(repo))
+  const stoppedOp: SequenceOperation = { ...op, current: item }
+
+  if (item.action === 'squash' || item.action === 'fixup') {
+    const parts: SquashPart[] = [
+      ...(op.squash ?? [{ message: head.message, skip: false }]),
+      { message: picked.message, skip: item.action === 'fixup' },
+    ]
+    // まとめた結果は、直前のコミットを置き換える
+    const pending: PendingCommit = { parents: head.parents, tree }
+    const next = op.todo[0]
+    if (next?.action === 'squash' || next?.action === 'fixup') {
+      const kept = parts.filter((part) => !part.skip).map((part) => part.message)
+      const created = createCommit(repo, pending, kept.join('\n\n'))
+      return { status: 'continue', repo: created.repo, op: { ...op, current: null, squash: parts }, lines: [] }
+    }
+    const nextOp: SequenceOperation = { ...op, current: null, squash: null }
+    if (parts.every((part, index) => index === 0 || part.skip)) {
+      const created = createCommit(repo, pending, parts[0]?.message ?? head.message)
+      return { status: 'continue', repo: created.repo, op: nextOp, lines: [] }
+    }
+    return waitForEditor(repo, stoppedOp, {
+      file: 'COMMIT_EDITMSG',
+      text: `${squashTemplate(parts)}\n${messageTemplate({ ...repo, index: tree }, '').trimStart()}`,
+      after: { kind: 'sequence', commit: pending, operation: nextOp },
+    })
+  }
+
+  const pending: PendingCommit = {
+    parents: [head.id],
+    tree,
+    ...(op.type === 'revert' ? { reverts: picked.id } : { source: picked.source ?? picked.id }),
+  }
+  const message = op.type === 'revert' ? revertMessage(picked) : picked.message
+  const nextOp: SequenceOperation = { ...op, current: null }
+
+  if (item.action === 'reword' || fromContinue || op.edit) {
+    return waitForEditor(repo, stoppedOp, {
+      file: 'COMMIT_EDITMSG',
+      text: messageTemplate({ ...repo, index: tree }, message),
+      after: { kind: 'sequence', commit: pending, operation: nextOp, stop: item.action === 'edit' },
+    })
+  }
+
+  const created = createCommit(repo, pending, message)
+  if (item.action === 'edit') {
+    return {
+      status: 'stop',
+      repo: { ...created.repo, operation: nextOp },
+      lines: [created.output, `${picked.id} (${subject(picked.message)}) で停止しました`, ...EDIT_STOP],
+    }
+  }
+  return { status: 'continue', repo: created.repo, op: nextOp, lines: [created.output] }
+}
+
+/** todo の先頭の項目を HEAD に適用する (revert なら逆向きに)。 */
+function applyItem(repo: Repo, op: SequenceOperation, item: TodoItem): Step {
+  const picked = getCommit(repo, item.id)
+  if (picked.parents.length > 1) throw mergeCommitError(item.id)
+  const headId = headCommitId(repo)
+  const rest: SequenceOperation = { ...op, todo: op.todo.slice(1), current: null }
+
+  // rebase で親が変わらないコミットは、作り直さずにそのまま使う (Git と同じ fast-forward)
+  if (
+    op.type === 'rebase' &&
+    (item.action === 'pick' || item.action === 'edit') &&
+    picked.parents[0] === headId
+  ) {
+    const moved: Repo = {
+      ...repo,
+      head: { type: 'detached', id: picked.id },
+      index: picked.tree,
+      workdir: picked.tree,
+    }
+    if (item.action === 'edit') {
+      return {
+        status: 'stop',
+        repo: { ...moved, operation: rest },
+        lines: [`${picked.id} (${subject(picked.message)}) で停止しました`, ...EDIT_STOP],
+      }
+    }
+    return { status: 'continue', repo: moved, op: rest, lines: [] }
+  }
+
+  const parentTree = parentTreeOf(repo, picked)
+  const [base, theirs] = op.type === 'revert' ? [picked.tree, parentTree] : [parentTree, picked.tree]
+  const label =
+    op.type === 'revert'
+      ? `parent of ${item.id} (${subject(picked.message)})`
+      : `${item.id} (${subject(picked.message)})`
+  const ours = headTree(repo)
+  const result = mergeTrees(base, ours, theirs, { ours: 'HEAD', theirs: label })
+  const carried = carryChanges(repo, result.tree, op.type)
+  const stoppedOp: SequenceOperation = { ...rest, current: item }
+
+  if (result.conflicts.length > 0) {
+    return {
+      status: 'stop',
+      repo: { ...applyConflicted(repo, carried, result.conflicts), operation: stoppedOp },
+      lines: [
+        ...conflictLines(result.conflicts),
+        `error: ${item.id} (${subject(picked.message)}) を適用できませんでした`,
+        STOP_HINTS[op.type],
+      ],
+    }
+  }
+
+  const squashing = item.action === 'squash' || item.action === 'fixup'
+  const originallyEmpty = treesEqual(picked.tree, parentTree)
+  if (treesEqual(result.tree, ours) && !squashing && !(op.keepEmpty && originallyEmpty)) {
+    if (op.type === 'rebase') {
+      return {
+        status: 'continue',
+        repo,
+        op: rest,
+        lines: [`${item.id} の変更はすでに含まれているため、取り除きました`],
+      }
+    }
+    return {
+      status: 'stop',
+      repo: { ...repo, operation: stoppedOp },
+      lines: [
+        `${item.id} の変更はすでに含まれているため、コミットが空になります。`,
+        `git ${op.type} --skip で飛ばすか、git commit --allow-empty で空のコミットを作ってください`,
+      ],
+    }
+  }
+  return completeItem({ ...repo, ...carried }, rest, item, result.tree, false)
+}
+
+/** todo の項目を順に適用する。コンフリクト・エディタ・edit で止まる。 */
+function runSequence(repo: Repo, op: SequenceOperation, lines: string[]): OperationResult {
+  let current: Repo = { ...repo, operation: null }
+  let state = op
+  while (state.todo.length > 0) {
+    const step = applyItem(current, state, state.todo[0] as TodoItem)
+    lines.push(...step.lines)
+    if (step.status === 'stop') return { repo: step.repo, output: lines.join('\n') }
+    current = step.repo
+    state = step.op
+  }
+  return finishSequence(current, state, lines)
 }
 
 function finishSequence(repo: Repo, op: SequenceOperation, lines: string[]): OperationResult {
@@ -256,7 +404,7 @@ function startPicks(
   repo: Repo,
   type: 'cherry-pick' | 'revert',
   refs: readonly string[],
-  keepEmpty: boolean,
+  options: { readonly keepEmpty: boolean; readonly edit: boolean },
 ): OperationResult {
   requireNoOperation(repo)
   if (refs.length === 0) {
@@ -264,21 +412,19 @@ function startPicks(
   }
   const ids = refs.map((ref) => resolveRef(repo, ref))
   for (const id of ids) {
-    if (getCommit(repo, id).parents.length > 1) {
-      throw new GitError(
-        `error: ${id} はマージコミットですが、-m オプションが指定されていません (このアプリでは未対応です)`,
-      )
-    }
+    if (getCommit(repo, id).parents.length > 1) throw mergeCommitError(id)
   }
   return runSequence(
     repo,
     {
       type,
       current: null,
-      todo: ids,
+      todo: ids.map((id): TodoItem => ({ action: 'pick', id })),
       origHead: headCommitId(repo),
       branch: currentBranch(repo),
-      keepEmpty,
+      keepEmpty: options.keepEmpty,
+      edit: options.edit,
+      squash: null,
     },
     [],
   )
@@ -288,14 +434,21 @@ function startPicks(
 export function cherryPick(
   repo: Repo,
   refs: readonly string[],
-  options: { readonly allowEmpty?: boolean } = {},
+  options: { readonly allowEmpty?: boolean; readonly edit?: boolean } = {},
 ): OperationResult {
-  return startPicks(repo, 'cherry-pick', refs, options.allowEmpty ?? false)
+  return startPicks(repo, 'cherry-pick', refs, {
+    keepEmpty: options.allowEmpty ?? false,
+    edit: options.edit ?? false,
+  })
 }
 
-/** git revert: 指定したコミットの変更を打ち消す新しいコミットを作る。 */
-export function revert(repo: Repo, refs: readonly string[]): OperationResult {
-  return startPicks(repo, 'revert', refs, false)
+/** git revert: 指定したコミットの変更を打ち消す新しいコミットを作る。既定ではエディタでメッセージを編集する。 */
+export function revert(
+  repo: Repo,
+  refs: readonly string[],
+  options: { readonly noEdit?: boolean } = {},
+): OperationResult {
+  return startPicks(repo, 'revert', refs, { keepEmpty: false, edit: !options.noEdit })
 }
 
 /** HEAD にあって upstream にないコミットを、古いものから順に並べる (マージコミットは除く)。 */
@@ -313,15 +466,46 @@ function commitsToReplay(repo: Repo, head: CommitId, upstream: CommitId): Commit
   return order.filter((id) => getCommit(repo, id).parents.length <= 1)
 }
 
-/** git rebase <upstream>: 現在のブランチのコミットを upstream の先に付け替える。 */
-export function rebase(repo: Repo, upstreamRef: string): OperationResult {
-  requireNoOperation(repo)
+function requireCleanForRebase(repo: Repo): void {
   if (hasTrackedChanges(repo)) {
     throw new GitError(
       'error: リベースできません: コミットしていない変更があります。\n' +
         '変更をコミットするか restore で取り消してください。',
     )
   }
+}
+
+/** rebase を始める。HEAD を onto に切り離し、最後にブランチを付け替える。 */
+function startRebase(
+  repo: Repo,
+  onto: CommitId,
+  origHead: CommitId,
+  branch: string | null,
+  items: readonly TodoItem[],
+): OperationResult {
+  const tree = getCommit(repo, onto).tree
+  const { index, workdir } = carryChanges({ ...repo, editor: null }, tree, 'rebase')
+  const detached: Repo = { ...repo, head: { type: 'detached', id: onto }, index, workdir, editor: null }
+  return runSequence(
+    detached,
+    {
+      type: 'rebase',
+      current: null,
+      todo: items,
+      origHead,
+      branch,
+      keepEmpty: true,
+      edit: false,
+      squash: null,
+    },
+    [],
+  )
+}
+
+/** git rebase <upstream>: 現在のブランチのコミットを upstream の先に付け替える。 */
+export function rebase(repo: Repo, upstreamRef: string): OperationResult {
+  requireNoOperation(repo)
+  requireCleanForRebase(repo)
   const upstream = resolveRef(repo, upstreamRef)
   const head = headCommitId(repo)
   const branch = currentBranch(repo)
@@ -341,16 +525,130 @@ export function rebase(repo: Repo, upstreamRef: string): OperationResult {
       output: `Fast-forwarded ${branch ?? 'HEAD'} to ${upstreamRef}.`,
     }
   }
+  const items = commitsToReplay(repo, head, upstream).map((id): TodoItem => ({ action: 'pick', id }))
+  return startRebase(repo, upstream, head, branch, items)
+}
 
-  const todo = commitsToReplay(repo, head, upstream)
-  // rebase 中は HEAD を upstream に切り離し、最後にブランチを付け替える
-  const { index, workdir } = carryChanges(repo, getCommit(repo, upstream).tree, 'rebase')
-  const detached: Repo = { ...repo, head: { type: 'detached', id: upstream }, index, workdir }
-  return runSequence(
-    detached,
-    { type: 'rebase', current: null, todo, origHead: head, branch, keepEmpty: true },
-    [],
-  )
+const TODO_HELP = [
+  '# コマンド:',
+  '# p, pick <コミット> = コミットをそのまま使う',
+  '# r, reword <コミット> = コミットを使うが、メッセージを編集する',
+  '# e, edit <コミット> = コミットを使うが、修正のために止まる',
+  '# s, squash <コミット> = コミットを使うが、直前のコミットにまとめる',
+  '# f, fixup <コミット> = squash と同じだが、このコミットのメッセージは捨てる',
+  '# d, drop <コミット> = コミットを取り除く',
+  '#',
+  '# 行は並べ替えられます。上から順に実行されます。',
+  '# 行を消すと、そのコミットは失われます。',
+  '# すべての行を消すと、rebase は中止されます。',
+]
+
+/** git rebase -i <upstream>: todo をエディタで編集してから rebase する。 */
+export function rebaseInteractive(repo: Repo, upstreamRef: string): OperationResult {
+  requireNoOperation(repo)
+  requireCleanForRebase(repo)
+  const onto = resolveRef(repo, upstreamRef)
+  const head = headCommitId(repo)
+  const commits = commitsToReplay(repo, head, onto)
+  const lines =
+    commits.length === 0
+      ? ['noop']
+      : commits.map((id) => `pick ${id} ${subject(getCommit(repo, id).message)}`)
+  const editor: Editor = {
+    file: 'git-rebase-todo',
+    text: [
+      ...lines,
+      '',
+      `# ${onto}..${head} を ${onto} の上にリベースします (${commits.length} 個のコマンド)`,
+      '#',
+      ...TODO_HELP,
+      '',
+    ].join('\n'),
+    after: { kind: 'todo', onto, origHead: head, branch: currentBranch(repo), commits },
+  }
+  return { repo: openEditor(repo, editor), output: EDITOR_WAITING }
+}
+
+const TODO_ACTIONS: Readonly<Record<string, TodoAction | 'drop'>> = {
+  p: 'pick',
+  pick: 'pick',
+  r: 'reword',
+  reword: 'reword',
+  e: 'edit',
+  edit: 'edit',
+  s: 'squash',
+  squash: 'squash',
+  f: 'fixup',
+  fixup: 'fixup',
+  d: 'drop',
+  drop: 'drop',
+}
+
+/** 編集した todo を読む。書き方が正しくなければ GitError。 */
+export function parseTodo(repo: Repo, text: string): TodoItem[] {
+  const items: TodoItem[] = []
+  text.split('\n').forEach((raw, index) => {
+    const line = raw.trim()
+    if (line === '' || line.startsWith('#') || line === 'noop') return
+    const [word = '', ref] = line.split(/\s+/)
+    const action = TODO_ACTIONS[word]
+    if (action === undefined) {
+      throw new GitError(`error: ${index + 1} 行目のコマンド '${word}' はわかりません: ${line}`)
+    }
+    if (ref === undefined) {
+      throw new GitError(`error: ${index + 1} 行目にコミットがありません: ${line}`)
+    }
+    const id = resolveRef(repo, ref)
+    if (getCommit(repo, id).parents.length > 1) throw mergeCommitError(id)
+    if (action === 'drop') return
+    if ((action === 'squash' || action === 'fixup') && items.length === 0) {
+      throw new GitError(`error: 直前のコミットがないので '${action}' できません`)
+    }
+    items.push({ action, id })
+  })
+  return items
+}
+
+// ---- エディタを閉じたあと ----
+
+/**
+ * エディタを保存して閉じる。text は保存した内容 (省略すると開いたときのまま)。
+ * 待っていた処理 (コミットの作成、rebase の続きなど) を実行する。
+ */
+export function saveEditor(repo: Repo, text?: string): OperationResult {
+  const editor = repo.editor
+  if (!editor) throw new GitError('エディタは開いていません')
+  const content = text ?? editor.text
+  const after = editor.after
+
+  if (after.kind === 'todo') {
+    const items = parseTodo(repo, content)
+    if (items.length === 0) {
+      return { repo: { ...repo, editor: null }, output: 'Nothing to do (todo が空のため、rebase を中止しました)' }
+    }
+    return startRebase(repo, after.onto, after.origHead, after.branch, items)
+  }
+
+  const message = cleanupMessage(content)
+  const closed: Repo = { ...repo, editor: null }
+  if (message === '') {
+    // コミットは作らずに止まる。シーケンスの途中なら --continue でやり直せる
+    return {
+      repo: closed,
+      output: 'メッセージが空のため、コミットを中止しました (Aborting commit due to empty commit message.)',
+    }
+  }
+  const created = createCommit(closed, after.commit, message)
+  if (after.kind === 'commit') {
+    return { repo: { ...created.repo, operation: after.operation }, output: created.output }
+  }
+  if (after.stop) {
+    return {
+      repo: { ...created.repo, operation: after.operation },
+      output: [created.output, ...EDIT_STOP].join('\n'),
+    }
+  }
+  return runSequence(created.repo, after.operation, [created.output])
 }
 
 // ---- --continue / --abort / --skip ----
@@ -367,34 +665,41 @@ export function continueOperation(repo: Repo, type: Operation['type']): Operatio
   const op = requireOperation(repo, type)
   requireNoConflicts(repo)
   if (op.type === 'merge') return commit(repo)
-
-  const lines: string[] = []
-  let current = repo
-  if (op.current !== null) {
-    if (treesEqual(repo.index, headTree(repo))) {
-      if (op.type !== 'rebase') {
-        throw new GitError(
-          `${op.current} の変更はすでに含まれているため、コミットが空になります。\n` +
-            `git ${op.type} --skip で飛ばしてください`,
-        )
-      }
-      lines.push(`${op.current} の変更が空になったため、取り除きました`)
-    } else {
-      const result = commit(repo)
-      lines.push(result.output)
-      current = result.repo
+  if (op.current === null) {
+    if (hasTrackedChanges(repo)) {
+      throw new GitError(
+        'error: コミットしていない変更があります。git commit --amend でコミットに含めるか、restore で取り消してください',
+      )
     }
+    return runSequence(repo, op, [])
   }
-  return runSequence(current, { ...op, current: null }, lines)
+
+  const item = op.current
+  const rest: SequenceOperation = { ...op, current: null }
+  const squashing = item.action === 'squash' || item.action === 'fixup'
+  if (treesEqual(repo.index, headTree(repo)) && !squashing) {
+    if (op.type !== 'rebase') {
+      throw new GitError(
+        `${item.id} の変更はすでに含まれているため、コミットが空になります。\n` +
+          `git ${op.type} --skip で飛ばしてください`,
+      )
+    }
+    return runSequence(repo, rest, [`${item.id} の変更が空になったため、取り除きました`])
+  }
+  const step = completeItem({ ...repo, operation: null }, rest, item, repo.index, true)
+  if (step.status === 'stop') return { repo: step.repo, output: step.lines.join('\n') }
+  return runSequence(step.repo, step.op, [...step.lines])
 }
 
 export function skipOperation(repo: Repo, type: SequenceType): OperationResult {
   const op = requireOperation(repo, type) as SequenceOperation
   const tree = headTree(repo)
   const cleaned: Repo = { ...repo, index: tree, workdir: tree, conflicts: [] }
-  return runSequence(cleaned, { ...op, current: null }, [
-    op.current === null ? '' : `${op.current} を飛ばしました`,
-  ].filter(Boolean))
+  return runSequence(
+    cleaned,
+    { ...op, current: null, squash: null },
+    op.current === null ? [] : [`${op.current.id} を飛ばしました`],
+  )
 }
 
 export function abortOperation(repo: Repo, type: Operation['type']): OperationResult {

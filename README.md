@@ -18,7 +18,7 @@ npm run build    # 型チェックと本番ビルド
 画面上部のタブで 2 つのモードを切り替えられます。
 
 - **自由に試す**: clone 直後のリポジトリで、好きなコマンドを試せます。
-- **お題**: 「マージする」「コンフリクトを解消する」「他の人の変更を取り込んで push」など 10 問。
+- **お題**: 「マージする」「コンフリクトを解消する」「コミットをまとめる」「作業を退避して急ぎの修正」など 12 問。
   目標のグラフと同じ履歴を作れたら正解です。コミット ID やメッセージが違っても、
   履歴の形と各コミットの由来 (コピーや revert を含む) が同じなら正解になります。
   クリアした記録はブラウザに保存されます。
@@ -49,19 +49,34 @@ URL のハッシュ (`#s=...`) には状態そのものではなく、モード�
 | コマンド | 内容 |
 | --- | --- |
 | `status` / `log [--oneline] [--all]` | 状態と履歴を表示する |
+| `diff [--staged] [<コミット> [<コミット>]] [--stat] [--name-only] [-- <ファイル>]` | 差分を表示する (`A..B` も可) |
+| `show [<コミット>]` | コミットの内容と差分を表示する |
 | `add <ファイル>...` / `add .` / `add -A` | 変更をステージする |
 | `restore [--staged] [--source=<コミット>] <ファイル>` | 作業ディレクトリ (または ステージ) を戻す |
 | `rm [--cached] [-f] <ファイル>` | ステージと作業ディレクトリから消す |
-| `commit -m "…" [-a] [--allow-empty] [--amend]` | ステージの内容でコミットする |
+| `commit [-m "…"] [-a] [--allow-empty] [--amend] [--no-edit]` | ステージの内容でコミットする (`-m` がなければエディタが開く) |
 | `branch [<名前> [<起点>]]` / `-d` / `-D` / `-m` / `-u` | ブランチの一覧・作成・削除・名前の変更・upstream の設定 |
 | `switch <名前>` / `-c <名前>` / `--detach <コミット>` | ブランチを切り替える (origin にだけあるブランチは追跡ブランチを作る) |
 | `checkout <名前\|コミット>` / `-b <名前>` / `-- <ファイル>` | switch と restore を兼ねる昔からのコマンド |
-| `merge <ブランチ> [--no-ff] [--ff-only]` | fast-forward またはマージコミットでマージする |
-| `rebase <ブランチ>` | 現在のブランチのコミットを付け替える |
-| `cherry-pick [--allow-empty] <コミット>...` | コミットの変更を複製する |
-| `revert <コミット>...` | コミットの変更を打ち消すコミットを作る |
+| `merge <ブランチ> [--no-ff] [--ff-only] [--no-edit]` | fast-forward またはマージコミットでマージする |
+| `rebase [-i] <ブランチ>` | 現在のブランチのコミットを付け替える (`-i` は todo をエディタで編集する) |
+| `cherry-pick [-e] [--allow-empty] <コミット>...` | コミットの変更を複製する |
+| `revert [--no-edit] <コミット>...` | コミットの変更を打ち消すコミットを作る |
 | `reset [--soft \| --mixed \| --hard] [<コミット>]` / `reset <ファイル>` | ブランチを移動する / ステージを戻す |
-| `push [-u] [-f] [origin [<ブランチ>]]` / `fetch` / `pull [--rebase \| --no-rebase \| --ff-only]` | origin とやりとりする |
+| `stash [push] [-m "…"] [-u] [-k]` / `stash list` / `stash show [-p]` | 変更を退避する・一覧を見る |
+| `stash apply [--index]` / `stash pop [--index]` / `stash drop` / `stash clear` / `stash branch <名前>` | 退避した変更を戻す・消す |
+| `push [-u] [-f] [origin [<ブランチ>]]` / `fetch` / `pull [--rebase \| --no-rebase \| --ff-only] [--no-edit]` | origin とやりとりする |
+
+### エディタ
+
+本物の Git と同じく、`-m` を付けない `commit`、マージコミットを作る `merge` / `pull`、`revert`、`--amend`、
+`--continue` ではエディタが開きます (`--no-edit` で開かずに既定のメッセージを使えます)。
+`#` で始まる行は無視され、メッセージを空にするとコミットを中止します。
+エディタが開いている間は、保存して閉じるまでほかのコマンドは実行できません。
+
+`git rebase -i <コミット>` では todo のエディタが開きます。各行の `pick` を `reword` (メッセージを編集)・
+`edit` (修正のために止まる)・`squash` / `fixup` (直前のコミットにまとめる)・`drop` (取り除く) に書き換えたり、
+行を並べ替えたりできます。`edit` で止まったら `git commit --amend` で直して `git rebase --continue` で続けます。
 
 `merge` / `rebase` / `cherry-pick` / `revert` がコンフリクトで止まったら、ファイルを直して `git add` し、
 `--continue` で続けます (`--abort` で中止、`--skip` で飛ばせます。merge は `git commit` で完了します)。
@@ -82,9 +97,11 @@ URL のハッシュ (`#s=...`) には状態そのものではなく、モード�
 ### 本物の Git と違うところ
 
 - コミット ID はハッシュではなく `C1`, `C2`, … の連番です。
-- エディタがないため、`-m` を省略したときのメッセージは自動で付けます (`Commit 3`、`Merge branch 'feature'` など)。
+- エディタは画面上の簡易エディタです。保存は `:wq "内容"` というコマンドとしてログと共有 URL に残ります。
 - リモートは `origin` 1 つだけで、ブラウザの中で模擬しています。
-- マージコミットの cherry-pick / revert (`-m`)、`rebase -i`、`stash`、`diff` などは未対応です。
+- `stash` は本物ではコミットとして保存されますが、ここでは別に持ち、グラフには描きません。
+- `diff` には blob の `index` 行がなく、コンフリクト中のファイルは結合差分の代わりに `* Unmerged path` と表示します。
+- マージコミットの cherry-pick / revert (`-m`)、`rebase -i` の `exec` / `break` / `label`、ファイルを指定した `stash push` などは未対応です。
 
 ## 設計
 
@@ -94,8 +111,11 @@ UI と Git の仕組みを分離しています。
 src/
   git/
     tree.ts        ファイルのスナップショットと、行単位の 3-way マージ (diff3)
-    model.ts       Git の内部モデル (コミット・ブランチ・HEAD・ステージ・作業ディレクトリ・リモート)
-    history.ts     merge / cherry-pick / revert / rebase と --continue / --abort / --skip
+    diff.ts        unified 形式の差分
+    model.ts       Git の内部モデル (コミット・ブランチ・HEAD・ステージ・作業ディレクトリ・リモート・エディタ)
+    history.ts     merge / cherry-pick / revert / rebase (-i) と --continue / --abort / --skip、エディタを閉じたあとの続き
+    inspect.ts     diff / show
+    stash.ts       stash
     remote.ts      push / fetch / pull と teammate
     commands.ts    入力文字列の解析と実行。規則違反は例外にせず結果として返す
   graph/
@@ -107,7 +127,7 @@ src/
     match.ts       履歴の形と由来で目標と比べる正解判定
   share/
     share.ts       共有 URL の作成・読み込みと、コマンドの再実行による復元
-  components/      GraphView, FileArea, Workspace (4 領域), PuzzlePanel, ShareButton, Terminal
+  components/      GraphView, FileArea, Workspace (4 領域と stash), EditorPanel, PuzzlePanel, ShareButton, Terminal
   App.tsx          モード・Repo・実行ログの状態管理
 ```
 
@@ -124,4 +144,5 @@ Vite として自動で認識されるので、設定ファイルはありませ
 
 ## 今後の拡張案
 
-- `diff` / `stash` / `rebase -i`
+- `rebase -i` の `exec` / `break`、マージコミットの cherry-pick / revert (`-m`)
+- `tag`、`reflog`

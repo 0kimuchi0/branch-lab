@@ -130,6 +130,8 @@ export interface PullOptions {
   /** true なら rebase、false なら merge。未指定で分岐している場合は Git と同じく中止する。 */
   readonly rebase?: boolean
   readonly fastForwardOnly?: boolean
+  /** --no-edit: マージコミットのメッセージをエディタで編集しない。 */
+  readonly noEdit?: boolean
 }
 
 /** git pull: fetch してから、upstream を merge (または rebase) する。 */
@@ -178,7 +180,8 @@ export function pull(repo: Repo, options: PullOptions = {}): OperationResult {
   const integrated = options.rebase
     ? rebase(fetched.repo, ref)
     : merge(fetched.repo, ref, {
-        message: `Merge branch '${upstream}' of ${REMOTE_NAME}`,
+        defaultMessage: `Merge branch '${upstream}' of ${REMOTE_NAME}`,
+        noEdit: options.noEdit ?? false,
         fastForwardOnly: options.fastForwardOnly ?? false,
       })
   lines.push(integrated.output)

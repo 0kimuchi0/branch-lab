@@ -8,6 +8,7 @@ import {
   REMOTE_NAME,
   ancestors,
   currentBranch,
+  subject,
   type Commit,
   type CommitId,
   type Repo,
@@ -164,7 +165,7 @@ export function layoutGraph(commits: Commits, refs: readonly GraphRef[]): GraphL
     const lane = lanes.get(commit.id) ?? 0
     return {
       id: commit.id,
-      message: commit.message,
+      message: subject(commit.message),
       x: PAD_X + (depths.get(commit.id) ?? 0) * X_GAP,
       y: padTop + lane * laneGap,
       lane,

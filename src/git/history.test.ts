@@ -29,19 +29,19 @@ function fail(repo: Repo, line: string): string {
 
 describe('merge', () => {
   it('fast-forward できる場合はブランチを進めるだけでコミットを作らない', () => {
-    const repo = run(['git switch -c feature', ...commitFile('f.txt', 'f'), 'git switch main', 'git merge feature'])
+    const repo = run(['git switch -c feature', ...commitFile('f.txt', 'f'), 'git switch main', 'git merge --no-edit feature'])
     expect(repo.branches['main']).toBe('C1')
     expect(Object.keys(repo.commits)).toHaveLength(2)
     expect(repo.workdir['f.txt']).toBe('f\n')
   })
 
   it('--no-ff なら fast-forward できてもマージコミットを作る', () => {
-    const repo = run(['git switch -c feature', ...commitFile('f.txt', 'f'), 'git switch main', 'git merge --no-ff feature'])
+    const repo = run(['git switch -c feature', ...commitFile('f.txt', 'f'), 'git switch main', 'git merge --no-edit --no-ff feature'])
     expect(repo.commits['C2']?.parents).toEqual(['C0', 'C1'])
   })
 
   it('分岐している場合は両方の変更を含むマージコミットを作る', () => {
-    const repo = run(['git merge feature'], diverged())
+    const repo = run(['git merge --no-edit feature'], diverged())
     const mergeCommit = repo.commits['C3']
     expect(mergeCommit?.parents).toEqual(['C2', 'C1'])
     expect(mergeCommit?.message).toBe("Merge branch 'feature'")
@@ -49,7 +49,7 @@ describe('merge', () => {
   })
 
   it('main 以外へのマージはメッセージに into が付く', () => {
-    const repo = run(['git switch feature', 'git merge main'], diverged())
+    const repo = run(['git switch feature', 'git merge --no-edit main'], diverged())
     expect(repo.commits['C3']?.message).toBe("Merge branch 'main' into feature")
   })
 
@@ -58,21 +58,21 @@ describe('merge', () => {
       'echo "1" > n.txt', 'echo "2" >> n.txt', 'echo "3" >> n.txt', 'git add .', 'git commit -m base',
       'git switch -c feature', 'echo "1!" > n.txt', 'echo "2" >> n.txt', 'echo "3" >> n.txt', 'git commit -am f',
       'git switch main', 'echo "1" > n.txt', 'echo "2" >> n.txt', 'echo "3!" >> n.txt', 'git commit -am m',
-      'git merge feature',
+      'git merge --no-edit feature',
     ])
     expect(repo.workdir['n.txt']).toBe('1!\n2\n3!\n')
     expect(repo.operation).toBeNull()
   })
 
   it('すでに取り込み済みなら何も変更しない', () => {
-    const repo = run(['git switch -c feature', 'git commit --allow-empty'])
-    const result = executeCommand(repo, 'git merge main')
+    const repo = run(['git switch -c feature', 'git commit --allow-empty -m x'])
+    const result = executeCommand(repo, 'git merge --no-edit main')
     expect(result.repo).toBe(repo)
     expect(result.output).toBe('Already up to date.')
   })
 
   it('コンフリクトしたら止まり、解消して commit すると完了する', () => {
-    const result = executeCommand(conflicting(), 'git merge feature')
+    const result = executeCommand(conflicting(), 'git merge --no-edit feature')
     expect(result.ok).toBe(true)
     expect(result.output).toContain('CONFLICT (content): README.md')
     const stopped = result.repo
@@ -82,7 +82,7 @@ describe('merge', () => {
     )
     expect(fail(stopped, 'git commit')).toContain('マージされていないファイル')
 
-    const done = run(['echo "both" > README.md', 'git add README.md', 'git commit'], stopped)
+    const done = run(['echo "both" > README.md', 'git add README.md', 'git commit --no-edit'], stopped)
     expect(done.operation).toBeNull()
     expect(done.commits['C3']).toMatchObject({ parents: ['C2', 'C1'], message: "Merge branch 'feature'" })
     expect(done.commits['C3']?.tree['README.md']).toBe('both\n')
@@ -90,20 +90,20 @@ describe('merge', () => {
 
   it('merge --abort でマージ前の状態に戻る', () => {
     const before = conflicting()
-    const repo = run(['git merge feature', 'git merge --abort'], before)
+    const repo = run(['git merge --no-edit feature', 'git merge --abort'], before)
     expect(repo.operation).toBeNull()
     expect(repo.workdir).toEqual(before.workdir)
     expect(repo.branches).toEqual(before.branches)
   })
 
   it('マージ中は他の操作をできない', () => {
-    const stopped = run(['git merge feature'], conflicting())
+    const stopped = run(['git merge --no-edit feature'], conflicting())
     expect(fail(stopped, 'git switch feature')).toContain('merge の途中です')
   })
 
   it('マージで上書きされる変更があると中止する', () => {
     const repo = run(['echo "x" > f.txt'], diverged())
-    expect(fail(repo, 'git merge feature')).toContain('追跡されていないファイル')
+    expect(fail(repo, 'git merge --no-edit feature')).toContain('追跡されていないファイル')
   })
 })
 
@@ -123,8 +123,8 @@ describe('cherry-pick', () => {
   it('コンフリクトしたら止まり、--continue で続ける', () => {
     const stopped = executeCommand(conflicting(), 'git cherry-pick C1')
     expect(stopped.output).toContain('git cherry-pick --continue')
-    expect(stopped.repo.operation).toMatchObject({ type: 'cherry-pick', current: 'C1' })
-    const done = run(['echo "both" > README.md', 'git add .', 'git cherry-pick --continue'], stopped.repo)
+    expect(stopped.repo.operation).toMatchObject({ type: 'cherry-pick', current: { action: 'pick', id: 'C1' } })
+    const done = run(['echo "both" > README.md', 'git add .', 'git cherry-pick --continue', ':wq'], stopped.repo)
     expect(done.operation).toBeNull()
     expect(done.commits['C3']).toMatchObject({ parents: ['C2'], message: 'feature 側', source: 'C1' })
   })
@@ -140,7 +140,7 @@ describe('cherry-pick', () => {
   })
 
   it('変更がすでに含まれていれば空になるので止まる', () => {
-    const repo = run(['git merge feature'], diverged())
+    const repo = run(['git merge --no-edit feature'], diverged())
     const result = executeCommand(repo, 'git cherry-pick C1')
     expect(result.output).toContain('空になります')
     expect(result.repo.operation?.type).toBe('cherry-pick')
@@ -153,21 +153,25 @@ describe('cherry-pick', () => {
   })
 
   it('マージコミットは cherry-pick できない', () => {
-    const repo = run(['git merge feature', 'git switch -c other C0'], diverged())
+    const repo = run(['git merge --no-edit feature', 'git switch -c other C0'], diverged())
     expect(fail(repo, 'git cherry-pick C3')).toContain('マージコミット')
   })
 })
 
 describe('revert', () => {
   it('指定したコミットの変更を打ち消すコミットを作る', () => {
-    const repo = run([...commitFile('a.txt', 'a'), ...commitFile('b.txt', 'b'), 'git revert C1'])
-    expect(repo.commits['C3']).toMatchObject({ parents: ['C2'], message: 'Revert "a"', reverts: 'C1' })
+    const repo = run([...commitFile('a.txt', 'a'), ...commitFile('b.txt', 'b'), 'git revert --no-edit C1'])
+    expect(repo.commits['C3']).toMatchObject({
+      parents: ['C2'],
+      message: 'Revert "a"\n\nThis reverts commit C1.',
+      reverts: 'C1',
+    })
     expect(repo.workdir).toEqual({ 'README.md': '# BranchLab\n', 'b.txt': 'b\n' })
   })
 
   it('後のコミットが同じ箇所を変えていればコンフリクトする', () => {
     const repo = run([...commitFile('a.txt', 'a'), ...commitFile('a.txt', 'b')])
-    const result = executeCommand(repo, 'git revert C1')
+    const result = executeCommand(repo, 'git revert --no-edit C1')
     expect(result.output).toContain('CONFLICT')
     expect(result.repo.operation?.type).toBe('revert')
   })
@@ -212,7 +216,7 @@ describe('rebase', () => {
     expect(stopped.branches['feature']).toBe('C1')
     expect(workspaceStatus(stopped).conflicts).toEqual([{ path: 'README.md', kind: 'both-modified' }])
 
-    const done = run(['echo "both" > README.md', 'git add README.md', 'git rebase --continue'], stopped)
+    const done = run(['echo "both" > README.md', 'git add README.md', 'git rebase --continue', ':wq'], stopped)
     expect(done.head).toEqual({ type: 'branch', name: 'feature' })
     expect(done.branches['feature']).toBe('C3')
     expect(done.commits['C3']).toMatchObject({ parents: ['C2'], message: 'feature 側' })
