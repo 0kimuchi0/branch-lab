@@ -7,9 +7,16 @@ function laneColor(lane: number): string {
   return `var(--lane-${lane % LANE_COLOR_COUNT})`
 }
 
-function truncate(text: string, max: number): string {
-  const chars = [...text]
-  return chars.length <= max ? text : `${chars.slice(0, max - 1).join('')}…`
+/** 幅の目安 (px) に収まるように切り詰める。全角文字は半角のおよそ 2 倍の幅として数える。 */
+function truncate(text: string, maxWidth: number): string {
+  let width = 0
+  let result = ''
+  for (const char of text) {
+    width += char.charCodeAt(0) > 255 ? 11 : 6.2
+    if (width > maxWidth) return `${result}…`
+    result += char
+  }
+  return text
 }
 
 interface GraphViewProps {
@@ -70,7 +77,7 @@ export function GraphView({ layout, label }: GraphViewProps) {
                 {node.id}
               </text>
               <text className="node-message" textAnchor="middle" y={34}>
-                {truncate(node.message, 14)}
+                {truncate(node.message, 84)}
               </text>
             </g>
           </g>

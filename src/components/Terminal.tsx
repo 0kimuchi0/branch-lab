@@ -11,6 +11,7 @@ interface TerminalProps {
   readonly log: readonly LogEntry[]
   readonly onRun: (command: string) => void
   readonly onReset: () => void
+  readonly resetLabel: string
 }
 
 const EXAMPLES = [
@@ -25,7 +26,7 @@ const EXAMPLES = [
   'git status',
 ] as const
 
-export function Terminal({ log, onRun, onReset }: TerminalProps) {
+export function Terminal({ log, onRun, onReset, resetLabel }: TerminalProps) {
   const [value, setValue] = useState('')
   const [cursor, setCursor] = useState<number | null>(null)
   const logRef = useRef<HTMLDivElement>(null)
@@ -126,7 +127,7 @@ export function Terminal({ log, onRun, onReset }: TerminalProps) {
           実行
         </button>
         <button type="button" onClick={onReset}>
-          リセット
+          {resetLabel}
         </button>
       </form>
     </section>

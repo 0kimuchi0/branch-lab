@@ -13,7 +13,7 @@ import {
   type Repo,
 } from '../git/model'
 
-export const X_GAP = 96
+export const X_GAP = 100
 export const Y_GAP = 96
 export const PAD_X = 90
 export const PAD_BOTTOM = 56

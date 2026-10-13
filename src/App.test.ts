@@ -2,6 +2,8 @@ import { createElement } from 'react'
 import { renderToStaticMarkup } from 'react-dom/server'
 import { describe, expect, it } from 'vitest'
 import App from './App'
+import { PuzzlePanel } from './components/PuzzlePanel'
+import { PUZZLES, buildPuzzle } from './puzzles/puzzles'
 import { GraphView } from './components/GraphView'
 import { computeLayout } from './graph/layout'
 import { run } from './test/run'
@@ -43,5 +45,22 @@ describe('描画のスモークテスト', () => {
     ])
     expect(html.match(/node-group unreachable/g)).toHaveLength(1)
     expect(html).toContain('C2: Commit 2 (どのブランチからもたどれません)')
+  })
+
+  it('お題パネルに目標のグラフと進み具合が描画される', () => {
+    const puzzles = PUZZLES.map(buildPuzzle)
+    const html = renderToStaticMarkup(
+      createElement(PuzzlePanel, {
+        puzzles,
+        index: 3,
+        solved: true,
+        solvedIds: new Set(['first-commit']),
+        onSelect: () => {},
+      }),
+    )
+    expect(html).toContain('4. マージする')
+    expect(html).toContain('1 / 10 問クリア')
+    expect(html).toContain('正解です！')
+    expect(html).toContain('目標のローカルリポジトリのコミットグラフ')
   })
 })

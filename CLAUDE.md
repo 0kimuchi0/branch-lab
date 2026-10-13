@@ -14,15 +14,27 @@ React + TypeScript + Vite、テストは Vitest。UI の文言は日本語。
 
 ## 構成と設計方針
 
-- `src/git/model.ts`: Git の内部モデル (コミットの DAG・ブランチ・HEAD)。
+- 挙動はできるだけ本物の Git に合わせる。合わせられない部分 (連番のコミット ID、エディタがないこと、
+  模擬のリモート) は README の「本物の Git と違うところ」に書く。出力は日本語に訳すが、形は Git に寄せる。
+- `src/git/tree.ts`: ファイルのスナップショット (`Tree`) と行単位の 3-way マージ。
+- `src/git/model.ts`: Git の内部モデル (コミットの DAG・ブランチ・HEAD・ステージ・作業ディレクトリ・リモート)。
   `Repo` は不変データで、すべての操作は新しい `Repo` を返す純粋関数。React には依存させない。
-- `src/git/commands.ts`: 入力文字列の解析と実行。Git の規則に反する操作は例外にせず `ok: false` で返す。
-- `src/graph/layout.ts`: `Repo` からグラフの座標を計算する純粋関数。
-  x は祖先からの深さ、y はブランチごとのレーン (main が最上段)。
-- `src/components/`: `GraphView` (SVG 描画とアニメーション)、`Terminal` (入力欄とログ)。
-- `src/App.tsx`: `Repo` と実行ログの状態管理。
+  Git の規則に反する操作は `GitError` を投げる。
+- `src/git/history.ts`: merge / cherry-pick / revert / rebase と、コンフリクトで止まった操作の再開・中止。
+- `src/git/remote.ts`: push / fetch / pull と、他の人の push を再現する teammate。
+- `src/git/commands.ts`: 入力文字列の解析と実行。`GitError` は例外にせず `ok: false` で返す。
+- `src/graph/layout.ts`: グラフの座標を計算する純粋関数。
+  x は祖先からの深さ、y はブランチごとのレーン (main が最上段)。どこからもたどれないコミットは後ろのレーンに薄く置く。
+- `src/view/workspace.ts`: 作業ディレクトリとステージに表示するファイル一覧を作る純粋関数。
+- `src/puzzles/`: お題の定義 (`puzzles.ts`) と正解判定 (`match.ts`)。
+  お題の目標は「初期状態に解答例を実行した結果」で作り、ID ではなく履歴の形と由来で比べる。
+  お題を足したら、解答例で正解になり初期状態では正解にならないことを `puzzles.test.ts` が確かめる。
+- `src/components/`: `GraphView` (SVG 描画とアニメーション)、`FileArea`、`Workspace` (4 領域)、
+  `PuzzlePanel`、`Terminal` (入力欄とログ)。
+- `src/App.tsx`: モード (自由に試す / お題)・`Repo`・実行ログの状態管理。
+- テストでコマンドを順に実行するときは `src/test/run.ts` の `run` を使う。
 
-新しい Git コマンドを足すときは、まず `model.ts` に純粋関数とテストを追加し、
+新しい Git コマンドを足すときは、まず `model.ts` (または `history.ts` / `remote.ts`) に純粋関数とテストを追加し、
 次に `commands.ts` に解析を追加する。UI の変更は最後に行う。
 
 ## TypeScript の制約
@@ -32,8 +44,5 @@ enum やコンストラクタの引数プロパティは使わず、型のイン
 
 ## 今後の予定
 
-1. `rebase` / `cherry-pick` / `revert` (`reset` は実装済み)
-2. 作業ディレクトリ・ステージ・ローカル・リモートの 4 領域表示
-3. お題モード (指定された履歴を作れたら正解)
-4. 現在の状態を URL で共有
-5. Vercel または GitHub Pages で公開
+1. 現在の状態を URL で共有
+2. Vercel または GitHub Pages で公開
