@@ -71,7 +71,7 @@ export const HELP_TEXT = [
   '  switch <名前> / switch -c <名前> / switch --detach <コミット>',
   '  checkout <名前|コミット> / checkout -b <名前>',
   '  merge <ブランチ> [--no-ff] [--no-edit] / rebase [-i] <ブランチ>',
-  '  cherry-pick [-e] [--allow-empty] <コミット>... / revert [--no-edit] <コミット>...',
+  '  cherry-pick [-e] [-m <親>] [--allow-empty] <コミット>... / revert [--no-edit] [-m <親>] <コミット>...',
   '  reset [--soft | --mixed | --hard] [<コミット>]',
   '  stash [push [-m "…"] [-u] [-k]] / stash list / show [-p] / apply / pop [--index] / drop / clear / branch',
   '  push [-u] [-f] [origin <ブランチ>] / fetch / pull [--rebase | --no-rebase]',
@@ -192,6 +192,14 @@ function sequencerControl(
 }
 
 const CONTROL_FLAGS = ['--continue', '--abort', '--skip']
+
+/** -m <親の番号> を読む。 */
+function parseMainline(parsed: ParsedArgs): number | undefined {
+  const value = parsed.values.get('-m')
+  if (value === undefined) return undefined
+  if (!/^[1-9]\d*$/.test(value)) throw new GitError(`error: -m には親の番号 (1 以上の整数) を指定してください: ${value}`)
+  return Number(value)
+}
 
 function runCommit(repo: Repo, args: readonly string[]): OperationResult {
   // -am "msg" は -a -m "msg" と同じ
@@ -538,21 +546,32 @@ function runGit(repo: Repo, name: string, args: readonly string[]): OperationRes
     case 'cherry-pick': {
       const parsed = parseArgs(args, {
         flags: [...CONTROL_FLAGS, '--allow-empty', '-e'],
-        aliases: { '--edit': '-e' },
+        values: ['-m'],
+        aliases: { '--edit': '-e', '--mainline': '-m' },
       })
+      const mainline = parseMainline(parsed)
       return (
         sequencerControl(repo, 'cherry-pick', parsed) ??
         cherryPick(repo, parsed.positional, {
           allowEmpty: parsed.flags.has('--allow-empty'),
           edit: parsed.flags.has('-e'),
+          ...(mainline === undefined ? {} : { mainline }),
         })
       )
     }
     case 'revert': {
-      const parsed = parseArgs(args, { flags: [...CONTROL_FLAGS, '--no-edit'] })
+      const parsed = parseArgs(args, {
+        flags: [...CONTROL_FLAGS, '--no-edit'],
+        values: ['-m'],
+        aliases: { '--mainline': '-m' },
+      })
+      const mainline = parseMainline(parsed)
       return (
         sequencerControl(repo, 'revert', parsed) ??
-        revert(repo, parsed.positional, { noEdit: parsed.flags.has('--no-edit') })
+        revert(repo, parsed.positional, {
+          noEdit: parsed.flags.has('--no-edit'),
+          ...(mainline === undefined ? {} : { mainline }),
+        })
       )
     }
     case 'reset':

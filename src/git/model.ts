@@ -61,6 +61,8 @@ export interface SequenceOperation {
   readonly edit: boolean
   /** squash / fixup でまとめている途中のメッセージ。 */
   readonly squash: readonly SquashPart[] | null
+  /** -m: マージコミットを cherry-pick / revert するときに基準にする親の番号 (1 始まり)。 */
+  readonly mainline: number | null
 }
 
 /** 途中で止まっている操作 (コンフリクトの解消待ちなど)。 */
@@ -722,7 +724,7 @@ export function commit(repo: Repo, options: CommitOptions = {}): OperationResult
   const defaultMessage =
     options.amend ? head.message
     : op?.type === 'merge' ? op.message
-    : picked && op?.type === 'revert' ? revertMessage(picked)
+    : picked && op?.type === 'revert' ? revertMessage(picked, op.mainline)
     : picked ? picked.message
     : ''
   const finishedOp: Operation | null =
@@ -748,8 +750,13 @@ export function commit(repo: Repo, options: CommitOptions = {}): OperationResult
   return { repo: openEditor(staged, editor), output: EDITOR_WAITING }
 }
 
-export function revertMessage(commit: Commit): string {
-  return `Revert "${subject(commit.message)}"\n\nThis reverts commit ${commit.id}.`
+/** revert のメッセージ。マージコミットを -m で revert したときは、基準にした親も書く (Git と同じ)。 */
+export function revertMessage(commit: Commit, mainline: number | null = null): string {
+  const title = `Revert "${subject(commit.message)}"`
+  const parent = mainline === null || commit.parents.length < 2 ? undefined : commit.parents[mainline - 1]
+  return parent === undefined
+    ? `${title}\n\nThis reverts commit ${commit.id}.`
+    : `${title}\n\nThis reverts commit ${commit.id}, reversing\nchanges made to ${parent}.`
 }
 
 // ---- ブランチ ----

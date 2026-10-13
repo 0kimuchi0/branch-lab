@@ -180,12 +180,25 @@ const EDIT_STOP = [
 
 function mergeCommitError(id: CommitId): GitError {
   return new GitError(
-    `error: ${id} はマージコミットですが、-m オプションが指定されていません (このアプリでは未対応です)`,
+    `error: コミット ${id} はマージコミットですが、-m オプションが指定されていません。\n` +
+      '(-m 1 なら 1 番目の親、-m 2 なら 2 番目の親を基準に変更を取り出します)',
   )
 }
 
-function parentTreeOf(repo: Repo, picked: Commit): Tree {
-  return picked.parents[0] === undefined ? {} : getCommit(repo, picked.parents[0]).tree
+/** 変更を取り出すときに基準にする親。マージコミットは -m で親を選ぶ必要がある。 */
+function checkMainline(picked: Commit, mainline: number | null): void {
+  if (mainline === null) {
+    if (picked.parents.length > 1) throw mergeCommitError(picked.id)
+    return
+  }
+  if (mainline < 1 || mainline > Math.max(1, picked.parents.length)) {
+    throw new GitError(`error: コミット ${picked.id} には ${mainline} 番目の親がありません`)
+  }
+}
+
+function parentTreeOf(repo: Repo, picked: Commit, mainline: number | null): Tree {
+  const parent = picked.parents[(mainline ?? 1) - 1]
+  return parent === undefined ? {} : getCommit(repo, parent).tree
 }
 
 /** squash のエディタに出す、まとめるコミットのメッセージ。 */
@@ -268,7 +281,7 @@ function completeItem(
     tree,
     ...(op.type === 'revert' ? { reverts: picked.id } : { source: picked.source ?? picked.id }),
   }
-  const message = op.type === 'revert' ? revertMessage(picked) : picked.message
+  const message = op.type === 'revert' ? revertMessage(picked, op.mainline) : picked.message
   const nextOp: SequenceOperation = { ...op, current: null }
 
   if (item.action === 'reword' || fromContinue || op.edit) {
@@ -293,7 +306,7 @@ function completeItem(
 /** todo の先頭の項目を HEAD に適用する (revert なら逆向きに)。 */
 function applyItem(repo: Repo, op: SequenceOperation, item: TodoItem): Step {
   const picked = getCommit(repo, item.id)
-  if (picked.parents.length > 1) throw mergeCommitError(item.id)
+  checkMainline(picked, op.mainline)
   const headId = headCommitId(repo)
   const rest: SequenceOperation = { ...op, todo: op.todo.slice(1), current: null }
 
@@ -319,7 +332,7 @@ function applyItem(repo: Repo, op: SequenceOperation, item: TodoItem): Step {
     return { status: 'continue', repo: moved, op: rest, lines: [] }
   }
 
-  const parentTree = parentTreeOf(repo, picked)
+  const parentTree = parentTreeOf(repo, picked, op.mainline)
   const [base, theirs] = op.type === 'revert' ? [picked.tree, parentTree] : [parentTree, picked.tree]
   const label =
     op.type === 'revert'
@@ -404,16 +417,14 @@ function startPicks(
   repo: Repo,
   type: 'cherry-pick' | 'revert',
   refs: readonly string[],
-  options: { readonly keepEmpty: boolean; readonly edit: boolean },
+  options: { readonly keepEmpty: boolean; readonly edit: boolean; readonly mainline: number | null },
 ): OperationResult {
   requireNoOperation(repo)
   if (refs.length === 0) {
     throw new GitError(`使い方: git ${type} <コミット>...`)
   }
   const ids = refs.map((ref) => resolveRef(repo, ref))
-  for (const id of ids) {
-    if (getCommit(repo, id).parents.length > 1) throw mergeCommitError(id)
-  }
+  for (const id of ids) checkMainline(getCommit(repo, id), options.mainline)
   return runSequence(
     repo,
     {
@@ -425,6 +436,7 @@ function startPicks(
       keepEmpty: options.keepEmpty,
       edit: options.edit,
       squash: null,
+      mainline: options.mainline,
     },
     [],
   )
@@ -434,11 +446,12 @@ function startPicks(
 export function cherryPick(
   repo: Repo,
   refs: readonly string[],
-  options: { readonly allowEmpty?: boolean; readonly edit?: boolean } = {},
+  options: { readonly allowEmpty?: boolean; readonly edit?: boolean; readonly mainline?: number } = {},
 ): OperationResult {
   return startPicks(repo, 'cherry-pick', refs, {
     keepEmpty: options.allowEmpty ?? false,
     edit: options.edit ?? false,
+    mainline: options.mainline ?? null,
   })
 }
 
@@ -446,9 +459,13 @@ export function cherryPick(
 export function revert(
   repo: Repo,
   refs: readonly string[],
-  options: { readonly noEdit?: boolean } = {},
+  options: { readonly noEdit?: boolean; readonly mainline?: number } = {},
 ): OperationResult {
-  return startPicks(repo, 'revert', refs, { keepEmpty: false, edit: !options.noEdit })
+  return startPicks(repo, 'revert', refs, {
+    keepEmpty: false,
+    edit: !options.noEdit,
+    mainline: options.mainline ?? null,
+  })
 }
 
 /** HEAD にあって upstream にないコミットを、古いものから順に並べる (マージコミットは除く)。 */
@@ -497,6 +514,7 @@ function startRebase(
       keepEmpty: true,
       edit: false,
       squash: null,
+      mainline: null,
     },
     [],
   )
