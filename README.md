@@ -21,6 +21,15 @@ npm run build    # 型チェックと本番ビルド
   履歴の形と各コミットの由来 (コピーや revert を含む) が同じなら正解になります。
   クリアした記録はブラウザに保存されます。
 
+### URL で共有する
+
+画面上部の「共有リンクをコピー」を押すと、今の状態を再現できる URL をコピーします。
+アドレスバーの URL も操作のたびに更新されるので、そのままコピーしたりリロードしたりしても同じ状態に戻ります。
+
+URL のハッシュ (`#s=...`) には状態そのものではなく、モード・お題・入力したコマンドの列が入っています。
+開いた側で同じコマンドを実行し直すので、グラフだけでなくターミナルのログも同じになります。
+コマンドは 500 個まで、1 つあたり 1000 文字まで受け付けます。
+
 ## 対応コマンド
 
 できるだけ本物の Git と同じ挙動・同じ規則にしています (例: ステージが空なら `commit` は失敗する、
@@ -94,7 +103,9 @@ src/
   puzzles/
     puzzles.ts     お題の一覧と、初期状態・目標の作成
     match.ts       履歴の形と由来で目標と比べる正解判定
-  components/      GraphView, FileArea, Workspace (4 領域), PuzzlePanel, Terminal
+  share/
+    share.ts       共有 URL の作成・読み込みと、コマンドの再実行による復元
+  components/      GraphView, FileArea, Workspace (4 領域), PuzzlePanel, ShareButton, Terminal
   App.tsx          モード・Repo・実行ログの状態管理
 ```
 
@@ -104,6 +115,5 @@ src/
 
 ## 今後の拡張案
 
-- 現在の状態を URL で共有
 - Vercel または GitHub Pages で公開
 - `diff` / `stash` / `rebase -i`

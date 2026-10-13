@@ -1,17 +1,50 @@
-import { useMemo, useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import './App.css'
 import { PuzzlePanel } from './components/PuzzlePanel'
+import { ShareButton } from './components/ShareButton'
 import { Terminal, type LogEntry } from './components/Terminal'
 import { Workspace } from './components/Workspace'
 import { executeCommand } from './git/commands'
 import { createRepo, currentBranch, headCommitId, type Repo } from './git/model'
-import { PUZZLES, buildPuzzle, isSolved } from './puzzles/puzzles'
-
-type Mode = 'free' | 'puzzle'
+import { PUZZLES, buildPuzzle, isSolved, type BuiltPuzzle } from './puzzles/puzzles'
+import {
+  decodeShare,
+  encodeShare,
+  restoreShare,
+  type Mode,
+  type RestoredState,
+  type SharedState,
+} from './share/share'
 
 interface Session {
   readonly repo: Repo
   readonly log: readonly LogEntry[]
+}
+
+type ShareNotice = 'loaded' | 'invalid' | null
+
+/** URL のハッシュに共有された状態があれば復元する。 */
+function restoreFromHash(
+  hash: string,
+  puzzles: readonly BuiltPuzzle[],
+): { restored: RestoredState | null; notice: ShareNotice } {
+  if (hash === '' || hash === '#') return { restored: null, notice: null }
+  const shared = decodeShare(hash)
+  const restored = shared && restoreShare(shared, puzzles)
+  return restored ? { restored, notice: 'loaded' } : { restored: null, notice: 'invalid' }
+}
+
+function toSession(restored: RestoredState): Session {
+  return { repo: restored.repo, log: restored.log.map((entry, id) => ({ ...entry, id })) }
+}
+
+function currentHash(): string {
+  return typeof window === 'undefined' ? '' : window.location.hash
+}
+
+function shareUrl(hash: string): string {
+  const { origin, pathname, search } = window.location
+  return `${origin}${pathname}${search}${hash}`
 }
 
 const SOLVED_KEY = 'branchlab:solved'
@@ -35,15 +68,21 @@ function saveSolved(ids: ReadonlySet<string>): void {
 
 export default function App() {
   const puzzles = useMemo(() => PUZZLES.map(buildPuzzle), [])
-  const [mode, setMode] = useState<Mode>('free')
-  const [free, setFree] = useState<Session>(() => ({ repo: createRepo(), log: [] }))
-  const [puzzleIndex, setPuzzleIndex] = useState(0)
-  const [puzzle, setPuzzle] = useState<Session>(() => ({
-    repo: (puzzles[0] as (typeof puzzles)[number]).start,
-    log: [],
-  }))
+  const [initial] = useState(() => restoreFromHash(currentHash(), puzzles))
+  const restored = initial.restored
+  const [mode, setMode] = useState<Mode>(restored?.mode ?? 'free')
+  const [free, setFree] = useState<Session>(() =>
+    restored?.mode === 'free' ? toSession(restored) : { repo: createRepo(), log: [] },
+  )
+  const [puzzleIndex, setPuzzleIndex] = useState(restored?.mode === 'puzzle' ? restored.puzzleIndex : 0)
+  const [puzzle, setPuzzle] = useState<Session>(() =>
+    restored?.mode === 'puzzle'
+      ? toSession(restored)
+      : { repo: (puzzles[0] as BuiltPuzzle).start, log: [] },
+  )
   const [solvedIds, setSolvedIds] = useState(loadSolved)
-  const [nextLogId, setNextLogId] = useState(0)
+  const [nextLogId, setNextLogId] = useState(restored?.log.length ?? 0)
+  const [shareNotice, setShareNotice] = useState<ShareNotice>(initial.notice)
 
   const session = mode === 'free' ? free : puzzle
   const setSession = mode === 'free' ? setFree : setPuzzle
@@ -78,6 +117,40 @@ export default function App() {
     setPuzzle({ repo: target.start, log: [] })
   }
 
+  const shared: SharedState = {
+    mode,
+    ...(mode === 'puzzle' ? { puzzleId: built.puzzle.id } : {}),
+    commands: session.log.map((entry) => entry.command),
+  }
+  const hash = mode === 'free' && shared.commands.length === 0 ? '' : encodeShare(shared)
+
+  // 操作するたびに URL を更新して、そのままコピーやリロードできるようにする
+  useEffect(() => {
+    const { pathname, search } = window.location
+    if (window.location.hash === hash) return
+    window.history.replaceState(null, '', `${pathname}${search}${hash}`)
+  }, [hash])
+
+  // 開いているタブに共有リンクを貼り付けたときも読み込む
+  useEffect(() => {
+    const onHashChange = () => {
+      const next = restoreFromHash(window.location.hash, puzzles)
+      setShareNotice(next.notice)
+      if (!next.restored) return
+      const loaded = next.restored
+      setMode(loaded.mode)
+      if (loaded.mode === 'free') {
+        setFree(toSession(loaded))
+      } else {
+        setPuzzleIndex(loaded.puzzleIndex)
+        setPuzzle(toSession(loaded))
+      }
+      setNextLogId(loaded.log.length)
+    }
+    window.addEventListener('hashchange', onHashChange)
+    return () => window.removeEventListener('hashchange', onHashChange)
+  }, [puzzles])
+
   const branch = currentBranch(session.repo)
 
   return (
@@ -107,9 +180,22 @@ export default function App() {
             ? 'コマンドを入力して、ファイルとコミットグラフがどう変わるかを確かめよう'
             : '目標と同じ履歴になるように、コマンドを入力しよう'}
         </p>
-        <p className="status" aria-live="polite">
-          HEAD: {branch ?? '(detached)'} @ {headCommitId(session.repo)}
-        </p>
+        <div className="header-row">
+          <p className="status" aria-live="polite">
+            HEAD: {branch ?? '(detached)'} @ {headCommitId(session.repo)}
+          </p>
+          <ShareButton getUrl={() => shareUrl(hash || encodeShare(shared))} />
+        </div>
+        {shareNotice && (
+          <p className={`share-notice share-notice-${shareNotice}`} role="status">
+            {shareNotice === 'loaded'
+              ? '共有された状態を、コマンドを実行し直して再現しました。'
+              : '共有リンクを読み込めませんでした。リンクが途中で切れていないか確認してください。'}
+            <button type="button" onClick={() => setShareNotice(null)} aria-label="閉じる">
+              ×
+            </button>
+          </p>
+        )}
       </header>
       <main className="app-main">
         <div className="app-content">
