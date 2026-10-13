@@ -98,11 +98,9 @@ function matches(path: string, specs: readonly string[] | undefined): boolean {
   return specs.some((spec) => spec === '.' || path === spec || path.startsWith(spec.endsWith('/') ? spec : `${spec}/`))
 }
 
-function statLine(path: string, oldText: string | undefined, newText: string | undefined, width: number): [string, number, number] {
+function countChanges(oldText: string | undefined, newText: string | undefined): [number, number] {
   const ops = editScript(splitLines(oldText ?? ''), splitLines(newText ?? ''))
-  const added = ops.filter((op) => op.type === '+').length
-  const removed = ops.filter((op) => op.type === '-').length
-  return [` ${path.padEnd(width)} | ${String(added + removed).padStart(2)} ${'+'.repeat(added)}${'-'.repeat(removed)}`, added, removed]
+  return [ops.filter((op) => op.type === '+').length, ops.filter((op) => op.type === '-').length]
 }
 
 /** from から to への差分を git diff の形式で返す。 */
@@ -113,17 +111,18 @@ export function diffTrees(from: Tree, to: Tree, options: DiffOptions = {}): stri
   if (options.nameOnly) return paths.join('\n')
   if (options.stat) {
     if (paths.length === 0) return ''
+    const counts = paths.map((path) => countChanges(from[path], to[path]))
     const width = Math.max(...paths.map((path) => path.length))
-    let insertions = 0
-    let deletions = 0
-    const lines = paths.map((path) => {
-      const [line, added, removed] = statLine(path, from[path], to[path], width)
-      insertions += added
-      deletions += removed
-      return line
+    // 変更行数の桁は、いちばん大きい数に合わせる (git と同じ)
+    const digits = Math.max(...counts.map(([added, removed]) => String(added + removed).length))
+    const lines = paths.map((path, index) => {
+      const [added, removed] = counts[index] as [number, number]
+      const total = String(added + removed).padStart(digits)
+      return ` ${path.padEnd(width)} | ${total} ${'+'.repeat(added)}${'-'.repeat(removed)}`
     })
-    const files = `${paths.length} file${paths.length === 1 ? '' : 's'} changed`
-    const parts = [files]
+    const insertions = counts.reduce((sum, [added]) => sum + added, 0)
+    const deletions = counts.reduce((sum, [, removed]) => sum + removed, 0)
+    const parts = [`${paths.length} file${paths.length === 1 ? '' : 's'} changed`]
     if (insertions > 0) parts.push(`${insertions} insertion${insertions === 1 ? '' : 's'}(+)`)
     if (deletions > 0) parts.push(`${deletions} deletion${deletions === 1 ? '' : 's'}(-)`)
     return [...lines, ` ${parts.join(', ')}`].join('\n')

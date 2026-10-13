@@ -112,6 +112,19 @@ export interface Editor {
   readonly after: AfterEdit
 }
 
+/** git stash で退避した変更。 */
+export interface StashEntry {
+  /** 退避したときの HEAD。 */
+  readonly base: CommitId
+  /** stash list に出す説明 (WIP on main: C3 ... や On main: <メッセージ>)。 */
+  readonly message: string
+  readonly index: Tree
+  /** 追跡しているファイルの、作業ディレクトリの内容。 */
+  readonly workdir: Tree
+  /** -u で退避した、追跡していないファイル。 */
+  readonly untracked: Tree
+}
+
 export interface Remote {
   readonly name: string
   readonly commits: Readonly<Record<CommitId, Commit>>
@@ -129,6 +142,8 @@ export interface Repo {
   readonly conflicts: readonly Conflict[]
   /** 開いているエディタ。開いている間は、保存して閉じる以外の操作はできない。 */
   readonly editor: Editor | null
+  /** git stash のスタック。先頭が stash@{0} (最新)。 */
+  readonly stash: readonly StashEntry[]
   readonly remote: Remote
   /** リモート追跡ブランチ (origin/main など)。キーはリモート上のブランチ名。 */
   readonly remoteBranches: Readonly<Record<string, CommitId>>
@@ -170,6 +185,7 @@ export function createRepo(): Repo {
     operation: null,
     conflicts: [],
     editor: null,
+    stash: [],
     remote: { name: REMOTE_NAME, commits, branches: { [DEFAULT_BRANCH]: root.id } },
     remoteBranches: { [DEFAULT_BRANCH]: root.id },
     upstreams: { [DEFAULT_BRANCH]: DEFAULT_BRANCH },

@@ -39,6 +39,16 @@ import {
 } from './model'
 import { gitDiff, show } from './inspect'
 import { fetch, pull, push, teammateCommit } from './remote'
+import {
+  stashApply,
+  stashBranch,
+  stashClear,
+  stashDrop,
+  stashList,
+  stashPop,
+  stashPush,
+  stashShow,
+} from './stash'
 
 export interface CommandResult {
   readonly repo: Repo
@@ -63,6 +73,7 @@ export const HELP_TEXT = [
   '  merge <ブランチ> [--no-ff] [--no-edit] / rebase [-i] <ブランチ>',
   '  cherry-pick [-e] [--allow-empty] <コミット>... / revert [--no-edit] <コミット>...',
   '  reset [--soft | --mixed | --hard] [<コミット>]',
+  '  stash [push [-m "…"] [-u] [-k]] / stash list / show [-p] / apply / pop [--index] / drop / clear / branch',
   '  push [-u] [-f] [origin <ブランチ>] / fetch / pull [--rebase | --no-rebase]',
   '  (merge / rebase / cherry-pick / revert は --continue・--abort が使えます)',
   '',
@@ -338,6 +349,62 @@ function runRestore(repo: Repo, args: readonly string[]): OperationResult {
   return restore(repo, paths, { staged, ...(source === undefined ? {} : { source }) })
 }
 
+function runStash(repo: Repo, args: readonly string[]): OperationResult {
+  const [sub = 'push', ...rest] = args[0]?.startsWith('-') ? ['push', ...args] : args
+  switch (sub) {
+    case 'push':
+    case 'save': {
+      const parsed = parseArgs(rest, {
+        flags: ['-u', '-k'],
+        values: ['-m'],
+        aliases: { '--include-untracked': '-u', '--keep-index': '-k', '--message': '-m' },
+      })
+      if (parsed.paths !== null || (sub === 'push' && parsed.positional.length > 0)) {
+        throw new GitError('ファイルを指定した git stash push はこのアプリでは未対応です')
+      }
+      const message = parsed.values.get('-m') ?? (sub === 'save' ? parsed.positional.join(' ') : undefined)
+      return stashPush(repo, {
+        ...(message ? { message } : {}),
+        includeUntracked: parsed.flags.has('-u'),
+        keepIndex: parsed.flags.has('-k'),
+      })
+    }
+    case 'list':
+      parseArgs(rest, { flags: [] })
+      return stashList(repo)
+    case 'show': {
+      const parsed = parseArgs(rest, { flags: ['-p', '--stat'], aliases: { '--patch': '-p' } })
+      atMost(parsed, 1, 'git stash show [-p] [stash@{n}]')
+      return stashShow(repo, parsed.positional[0], { patch: parsed.flags.has('-p') })
+    }
+    case 'apply':
+    case 'pop': {
+      const parsed = parseArgs(rest, { flags: ['--index'] })
+      atMost(parsed, 1, `git stash ${sub} [--index] [stash@{n}]`)
+      const options = { index: parsed.flags.has('--index') }
+      return sub === 'pop'
+        ? stashPop(repo, parsed.positional[0], options)
+        : stashApply(repo, parsed.positional[0], options)
+    }
+    case 'drop': {
+      const parsed = parseArgs(rest, { flags: [] })
+      atMost(parsed, 1, 'git stash drop [stash@{n}]')
+      return stashDrop(repo, parsed.positional[0])
+    }
+    case 'clear':
+      parseArgs(rest, { flags: [] })
+      return stashClear(repo)
+    case 'branch': {
+      const parsed = parseArgs(rest, { flags: [] })
+      const [name, ref] = parsed.positional
+      if (name === undefined || parsed.positional.length > 2) usage('git stash branch <ブランチ> [stash@{n}]')
+      return stashBranch(repo, name, ref)
+    }
+    default:
+      throw new GitError(`error: 未対応の stash のサブコマンドです: ${sub}`)
+  }
+}
+
 function parseRemoteArgs(positional: readonly string[], text: string): string | undefined {
   const [remote, branch, ...rest] = positional
   if (rest.length > 0) usage(text)
@@ -490,6 +557,8 @@ function runGit(repo: Repo, name: string, args: readonly string[]): OperationRes
     }
     case 'reset':
       return runReset(repo, args)
+    case 'stash':
+      return runStash(repo, args)
     case 'push':
       return runPush(repo, args)
     case 'fetch': {

@@ -44,7 +44,7 @@ describe('diffTrees', () => {
     expect(diffTrees(from, to, { nameOnly: true })).toBe('a.txt\ndir/b.txt')
     expect(diffTrees(from, to, { nameOnly: true, paths: ['dir'] })).toBe('dir/b.txt')
     expect(diffTrees(from, to, { stat: true })).toBe(
-      ' a.txt     |  1 +\n dir/b.txt |  2 +-\n 2 files changed, 2 insertions(+), 1 deletion(-)',
+      ' a.txt     | 1 +\n dir/b.txt | 2 +-\n 2 files changed, 2 insertions(+), 1 deletion(-)',
     )
   })
 })

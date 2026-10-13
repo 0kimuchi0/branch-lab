@@ -1,5 +1,6 @@
 import { useMemo, type ReactNode } from 'react'
-import type { Repo } from '../git/model'
+import { getCommit, type Repo } from '../git/model'
+import { changedPaths } from '../git/tree'
 import { computeLayout, computeRemoteLayout } from '../graph/layout'
 import { stagedFiles, workdirFiles } from '../view/workspace'
 import { FileArea } from './FileArea'
@@ -84,6 +85,21 @@ export function Workspace({ repo }: { readonly repo: Repo }) {
       <Area title="リモートリポジトリ (origin)" hint="共有されているコミットの履歴" className="area-graph">
         <GraphView layout={remote} label="リモートリポジトリのコミットグラフ" />
       </Area>
+      {repo.stash.length > 0 && (
+        <Area title="スタッシュ" hint="git stash で退避した変更 (pop / apply で戻す)" className="area-stash">
+          <ul className="stash-list">
+            {repo.stash.map((entry, index) => {
+              const files = changedPaths(getCommit(repo, entry.base).tree, { ...entry.workdir, ...entry.untracked })
+              return (
+                <li key={`${index}:${entry.message}`}>
+                  <code>{`stash@{${index}}`}</code> {entry.message}
+                  <span className="stash-files">{files.join(', ')}</span>
+                </li>
+              )
+            })}
+          </ul>
+        </Area>
+      )}
     </div>
   )
 }
