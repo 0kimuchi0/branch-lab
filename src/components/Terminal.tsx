@@ -11,16 +11,22 @@ interface TerminalProps {
   readonly log: readonly LogEntry[]
   readonly onRun: (command: string) => void
   readonly onReset: () => void
+  readonly resetLabel: string
 }
 
 const EXAMPLES = [
-  'commit',
-  'switch -c feature',
-  'switch main',
-  'merge feature',
+  'echo "hello" >> README.md',
+  'git add .',
+  'git commit -m "update"',
+  'git commit --allow-empty',
+  'git switch -c feature',
+  'git switch main',
+  'git merge feature',
+  'git rebase main',
+  'git status',
 ] as const
 
-export function Terminal({ log, onRun, onReset }: TerminalProps) {
+export function Terminal({ log, onRun, onReset, resetLabel }: TerminalProps) {
   const [value, setValue] = useState('')
   const [cursor, setCursor] = useState<number | null>(null)
   const logRef = useRef<HTMLDivElement>(null)
@@ -109,7 +115,7 @@ export function Terminal({ log, onRun, onReset }: TerminalProps) {
             setCursor(null)
           }}
           onKeyDown={handleKeyDown}
-          placeholder='commit -m "メッセージ"'
+          placeholder='git commit -m "メッセージ"'
           aria-label="Git コマンド"
           autoFocus
           autoCapitalize="off"
@@ -121,7 +127,7 @@ export function Terminal({ log, onRun, onReset }: TerminalProps) {
           実行
         </button>
         <button type="button" onClick={onReset}>
-          リセット
+          {resetLabel}
         </button>
       </form>
     </section>
