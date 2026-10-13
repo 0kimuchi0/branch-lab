@@ -179,6 +179,35 @@ export const PUZZLES: readonly Puzzle[] = [
       )
     },
   },
+  {
+    id: 'tag',
+    title: 'リリースにタグを付ける',
+    description:
+      '「機能 B」まで入れたものを v1.0 としてリリースしました。そのコミットに v1.0 というタグを付けて、origin にも push しましょう。',
+    hint: 'git tag v1.0 <コミット ID> でタグを付け (-m "..." を付けると注釈付きタグになります)、git push origin v1.0 でタグを送ります。',
+    setup: [
+      ...change('app.txt', '機能 A', '機能 A'),
+      ...change('app.txt', '機能 B', '機能 B'),
+      ...change('app.txt', '機能 C', '機能 C'),
+      'git push',
+    ],
+    solutions: [['git tag v1.0 C2', 'git push origin v1.0']],
+    check: (repo) => repo.tags['v1.0']?.target === 'C2' && repo.remote.tags['v1.0']?.target === 'C2',
+  },
+  {
+    id: 'reflog',
+    title: '消えたコミットを取り戻す',
+    description:
+      'git reset --hard HEAD~2 で、まだ必要だったコミットを 2 つ消してしまいました。reflog を見て、main をリセットする前の状態に戻しましょう。',
+    hint: 'git reflog で HEAD の動きを確認します。リセットする前の位置は HEAD@{1} なので、git reset --hard HEAD@{1} で戻せます。',
+    setup: [
+      ...change('app.txt', '1', '作業 1'),
+      ...change('app.txt', '2', '作業 2'),
+      ...change('app.txt', '3', '作業 3'),
+      'git reset --hard HEAD~2',
+    ],
+    solutions: [['git reset --hard HEAD@{1}']],
+  },
 ]
 
 function runAll(repo: Repo, lines: readonly string[]): Repo {

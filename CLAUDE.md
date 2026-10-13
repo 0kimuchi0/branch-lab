@@ -25,6 +25,10 @@ React + TypeScript + Vite、テストは Vitest。UI の文言は日本語。
   保存は `:wq <JSON の文字列>` のコマンド (`saveEditor`) なので、ログと共有 URL でも再現できる。
   エディタが開いている間、ほかのコマンドは実行できない。
 - `src/git/inspect.ts`: diff / show。`src/git/stash.ts`: stash (コミットにはせず `Repo.stash` に持つ)。
+  `src/git/tag.ts`: tag。
+- reflog: HEAD やブランチを動かす処理は `logRefs(before, after, メッセージ)` で `Repo.reflogs` に記録する
+  (コミットは `createCommit` が `PendingCommit.reflogAction` を使って記録する)。メッセージは本物の Git と同じ形にする。
+- rebase -i の exec は、`history.ts` では todo に残したまま止まり、`commands.ts` の `runPendingExec` が実行して続ける。
 - `src/git/remote.ts`: push / fetch / pull と、他の人の push を再現する teammate。
 - `src/git/commands.ts`: 入力文字列の解析と実行。`GitError` は例外にせず `ok: false` で返す。
 - `src/graph/layout.ts`: グラフの座標を計算する純粋関数。
@@ -56,5 +60,5 @@ main に push すると https://branch-lab-dun.vercel.app にデプロイされ�
 
 ## 今後の予定
 
-- `rebase -i` の `exec` / `break`、マージコミットの cherry-pick / revert (`-m`)
-- `tag`、`reflog`
+- `rebase --rebase-merges`、`bisect`、`blame`
+- 複数のリモート (`remote add`)
