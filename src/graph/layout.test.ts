@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest'
 import { run } from '../test/run'
 import { computeLayout, computeRemoteLayout } from './layout'
 
-const EMPTY = 'git commit --allow-empty'
+const EMPTY = 'git commit --allow-empty -m x'
 
 describe('computeLayout', () => {
   it('main は最上段 (レーン 0) に一直線に並ぶ', () => {
@@ -25,7 +25,7 @@ describe('computeLayout', () => {
 
   it('マージコミットは両親から辺が伸び、合流線は合流元の色になる', () => {
     const layout = computeLayout(
-      run(['git switch -c feature', EMPTY, 'git switch main', EMPTY, 'git merge feature']),
+      run(['git switch -c feature', EMPTY, 'git switch main', EMPTY, 'git merge --no-edit feature']),
     )
     const mergeNode = layout.nodes.find((n) => n.isMerge)!
     expect(mergeNode.lane).toBe(0)
@@ -80,7 +80,7 @@ describe('computeLayout', () => {
 
 describe('computeRemoteLayout', () => {
   it('ブランチ名のない、マージで取り込まれた側のコミットも別レーンに置く', () => {
-    const repo = run(['git switch -c feature', EMPTY, 'git switch main', EMPTY, 'git merge feature', 'git push'])
+    const repo = run(['git switch -c feature', EMPTY, 'git switch main', EMPTY, 'git merge --no-edit feature', 'git push'])
     const byId = new Map(computeRemoteLayout(repo).nodes.map((n) => [n.id, n]))
     expect(byId.get('C3')!.lane).toBe(0)
     expect(byId.get('C2')!.lane).toBe(0)

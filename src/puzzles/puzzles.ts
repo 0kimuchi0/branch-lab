@@ -65,16 +65,16 @@ export const PUZZLES: readonly Puzzle[] = [
     id: 'merge',
     title: 'マージする',
     description: 'feature ブランチの変更を main に取り込み、マージコミットを作りましょう。',
-    hint: 'main にいる状態で git merge feature を実行します。',
+    hint: 'main にいる状態で git merge --no-edit feature を実行します。',
     setup: DIVERGED,
-    solutions: [['git merge feature']],
+    solutions: [['git merge --no-edit feature']],
   },
   {
     id: 'conflict',
     title: 'コンフリクトを解消する',
     description:
       'main と feature の両方で README.md の同じ行を書き換えています。feature を main にマージし、コンフリクトを解消してマージを完了させましょう。',
-    hint: 'git merge feature でコンフリクトしたら、echo "..." > README.md でファイルを書き直し、git add README.md してから git commit します。',
+    hint: 'git merge --no-edit feature でコンフリクトしたら、echo "..." > README.md でファイルを書き直し、git add README.md してから git commit します。',
     setup: [
       'git switch -c feature',
       'echo "# BranchLab (feature 版)" > README.md',
@@ -83,7 +83,7 @@ export const PUZZLES: readonly Puzzle[] = [
       'echo "# BranchLab (main 版)" > README.md',
       'git commit -am "タイトルを変更 (main)"',
     ],
-    solutions: [['git merge feature', 'echo "# BranchLab" > README.md', 'git add README.md', 'git commit']],
+    solutions: [['git merge --no-edit feature', 'echo "# BranchLab" > README.md', 'git add README.md', 'git commit --no-edit']],
   },
   {
     id: 'rebase',
@@ -127,9 +127,9 @@ export const PUZZLES: readonly Puzzle[] = [
     title: '公開済みのコミットを打ち消す',
     description:
       '「問題のある変更」はすでに push 済みです。履歴は書き換えずに、その変更を打ち消すコミットを作って push しましょう。',
-    hint: 'git revert HEAD で直前のコミットを打ち消すコミットを作り、git push で origin に送ります。',
+    hint: 'git revert --no-edit HEAD で直前のコミットを打ち消すコミットを作り、git push で origin に送ります。',
     setup: [...change('a.txt', '機能 A', '機能 A'), ...change('b.txt', '問題のある変更', '問題のある変更'), 'git push'],
-    solutions: [['git revert HEAD', 'git push']],
+    solutions: [['git revert --no-edit HEAD', 'git push']],
     checkRemote: true,
   },
   {
@@ -140,7 +140,7 @@ export const PUZZLES: readonly Puzzle[] = [
     hint: 'そのまま git push すると拒否されます。git pull --no-rebase (マージ) か git pull --rebase (リベース) で取り込んでから git push します。',
     setup: ['teammate', ...change('app.txt', '自分の変更', '自分の変更')],
     solutions: [
-      ['git pull --no-rebase', 'git push'],
+      ['git pull --no-rebase --no-edit', 'git push'],
       ['git pull --rebase', 'git push'],
     ],
     checkRemote: true,

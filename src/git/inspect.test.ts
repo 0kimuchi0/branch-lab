@@ -34,7 +34,7 @@ describe('git diff', () => {
   it('コンフリクト中のファイルは Unmerged path と表示する', () => {
     const stopped = run([
       'git switch -c feature', 'echo "f" > README.md', 'git commit -am f',
-      'git switch main', 'echo "m" > README.md', 'git commit -am m', 'git merge feature',
+      'git switch main', 'echo "m" > README.md', 'git commit -am m', 'git merge --no-edit feature',
     ])
     expect(out(stopped, 'git diff')).toBe('* Unmerged path README.md')
   })

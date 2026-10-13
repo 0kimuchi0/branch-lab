@@ -51,9 +51,9 @@ describe('add / commit', () => {
   })
 
   it('--allow-empty なら変更がなくてもコミットできる', () => {
-    const { repo } = commit(createRepo(), { allowEmpty: true })
+    const { repo } = commit(createRepo(), { allowEmpty: true, message: 'empty' })
     expect(repo.branches['main']).toBe('C1')
-    expect(repo.commits['C1']?.message).toBe('Commit 1')
+    expect(repo.commits['C1']?.message).toBe('empty')
   })
 
   it('-a は追跡しているファイルの変更だけをステージする', () => {
@@ -63,7 +63,7 @@ describe('add / commit', () => {
   })
 
   it('--amend は直前のコミットを作り直し、元のコミットは外れる', () => {
-    const repo = run([...commitFile('a.txt', 'a'), 'echo "b" >> a.txt', 'git commit -a --amend'])
+    const repo = run([...commitFile('a.txt', 'a'), 'echo "b" >> a.txt', 'git commit -a --amend --no-edit'])
     expect(repo.branches['main']).toBe('C2')
     expect(repo.commits['C2']).toMatchObject({ parents: ['C0'], message: 'a' })
     expect(reachableCommits(repo).has('C1')).toBe(false)
@@ -155,7 +155,7 @@ describe('branch / switch', () => {
 
 describe('isAncestor / mergeBase', () => {
   it('祖先と最も新しい共通祖先を求める', () => {
-    const repo = run(['git commit --allow-empty', 'git switch -c feature', 'git commit --allow-empty', 'git switch main', 'git commit --allow-empty'])
+    const repo = run(['git commit --allow-empty -m x', 'git switch -c feature', 'git commit --allow-empty -m x', 'git switch main', 'git commit --allow-empty -m x'])
     expect(isAncestor(repo, 'C0', 'C2')).toBe(true)
     expect(isAncestor(repo, 'C2', 'C2')).toBe(true)
     expect(isAncestor(repo, 'C2', 'C0')).toBe(false)
@@ -183,7 +183,7 @@ describe('resolveRef', () => {
   })
 
   it('^2 はマージコミットの 2 番目の親をたどる', () => {
-    const repo = run(['git switch -c feature', ...commitFile('f.txt', 'f'), 'git switch main', ...commitFile('m.txt', 'm'), 'git merge feature'])
+    const repo = run(['git switch -c feature', ...commitFile('f.txt', 'f'), 'git switch main', ...commitFile('m.txt', 'm'), 'git merge --no-edit feature'])
     expect(resolveRef(repo, 'HEAD^1')).toBe('C2')
     expect(resolveRef(repo, 'HEAD^2')).toBe('C1')
   })

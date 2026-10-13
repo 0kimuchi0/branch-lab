@@ -15,7 +15,7 @@ describe('push', () => {
   })
 
   it('upstream がないブランチは -u か origin <ブランチ> の指定が必要', () => {
-    const repo = run(['git switch -c feature', 'git commit --allow-empty'])
+    const repo = run(['git switch -c feature', 'git commit --allow-empty -m x'])
     expect(executeCommand(repo, 'git push').output).toContain('git push -u origin feature')
     const pushed = run(['git push -u origin feature'], repo)
     expect(pushed.upstreams['feature']).toBe('feature')
@@ -24,7 +24,7 @@ describe('push', () => {
   })
 
   it('リモートに手元にないコミットがあると拒否され、-f なら上書きする', () => {
-    const repo = run(['teammate', 'git commit --allow-empty'])
+    const repo = run(['teammate', 'git commit --allow-empty -m x'])
     const rejected = executeCommand(repo, 'git push')
     expect(rejected.ok).toBe(false)
     expect(rejected.output).toContain('[rejected]')
@@ -56,7 +56,7 @@ describe('fetch / pull', () => {
     expect(result.ok).toBe(false)
     expect(result.output).toContain('統合する方法を指定する必要があります')
 
-    const merged = run(['git pull --no-rebase'], repo)
+    const merged = run(['git pull --no-rebase --no-edit'], repo)
     expect(merged.commits['C3']).toMatchObject({ parents: ['C2', 'C1'], message: "Merge branch 'main' of origin" })
 
     const rebased = run(['git pull --rebase'], repo)

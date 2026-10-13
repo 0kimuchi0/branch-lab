@@ -28,7 +28,7 @@ describe('isSolved', () => {
   it('コミット ID がずれても、履歴の形と由来が同じなら正解', () => {
     const built = buildPuzzle(puzzle('branch'))
     const repo = run(
-      ['git commit --allow-empty', 'git reset --hard HEAD~1', 'git switch -c feature', 'git commit --allow-empty', 'git switch main', 'git commit --allow-empty'],
+      ['git commit --allow-empty -m x', 'git reset --hard HEAD~1', 'git switch -c feature', 'git commit --allow-empty -m x', 'git switch main', 'git commit --allow-empty -m x'],
       built.start,
     )
     expect(repo.branches['main']).toBe('C3')
@@ -37,24 +37,24 @@ describe('isSolved', () => {
 
   it('別の手順で同じ結果になっても正解 (merge の代わりに fetch と merge)', () => {
     const built = buildPuzzle(puzzle('pull-push'))
-    expect(isSolved(built, run(['git fetch', 'git merge origin/main', 'git push'], built.start))).toBe(true)
+    expect(isSolved(built, run(['git fetch', 'git merge --no-edit origin/main', 'git push'], built.start))).toBe(true)
   })
 
   it('履歴が違えば不正解', () => {
     // cherry-pick の代わりに feature をまるごとマージする
     const cherry = buildPuzzle(puzzle('cherry-pick'))
-    expect(isSolved(cherry, run(['git merge feature'], cherry.start))).toBe(false)
+    expect(isSolved(cherry, run(['git merge --no-edit feature'], cherry.start))).toBe(false)
     // revert の代わりに reset して強制 push する
     const revert = buildPuzzle(puzzle('revert'))
     expect(isSolved(revert, run(['git reset --hard HEAD~1', 'git push -f'], revert.start))).toBe(false)
     // push を忘れる
-    expect(isSolved(revert, run(['git revert HEAD'], revert.start))).toBe(false)
+    expect(isSolved(revert, run(['git revert --no-edit HEAD'], revert.start))).toBe(false)
   })
 
   it('コンフリクトの途中やマーカーが残ったままでは正解にならない', () => {
     const built = buildPuzzle(puzzle('conflict'))
-    expect(isSolved(built, run(['git merge feature'], built.start))).toBe(false)
-    expect(isSolved(built, run(['git merge feature', 'git add .', 'git commit'], built.start))).toBe(false)
+    expect(isSolved(built, run(['git merge --no-edit feature'], built.start))).toBe(false)
+    expect(isSolved(built, run(['git merge --no-edit feature', 'git add .', 'git commit --no-edit'], built.start))).toBe(false)
   })
 
   it('amend の代わりに新しいコミットを足すと不正解', () => {

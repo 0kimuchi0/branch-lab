@@ -1,10 +1,11 @@
 import { useEffect, useMemo, useState } from 'react'
 import './App.css'
+import { EditorPanel } from './components/EditorPanel'
 import { PuzzlePanel } from './components/PuzzlePanel'
 import { ShareButton } from './components/ShareButton'
 import { Terminal, type LogEntry } from './components/Terminal'
 import { Workspace } from './components/Workspace'
-import { executeCommand } from './git/commands'
+import { editorSaveCommand, executeCommand } from './git/commands'
 import { createRepo, currentBranch, headCommitId, type Repo } from './git/model'
 import { PUZZLES, buildPuzzle, isSolved, type BuiltPuzzle } from './puzzles/puzzles'
 import {
@@ -208,6 +209,13 @@ export default function App() {
               onSelect={selectPuzzle}
             />
           )}
+          {session.repo.editor && (
+            <EditorPanel
+              key={`${nextLogId}:${session.repo.editor.text}`}
+              editor={session.repo.editor}
+              onSave={(text) => run(editorSaveCommand(text === session.repo.editor?.text ? undefined : text))}
+            />
+          )}
           <Workspace repo={session.repo} />
         </div>
         <Terminal
@@ -216,6 +224,7 @@ export default function App() {
           onRun={run}
           onReset={reset}
           resetLabel={mode === 'free' ? 'リセット' : 'やり直す'}
+          editorOpen={session.repo.editor !== null}
         />
       </main>
     </div>

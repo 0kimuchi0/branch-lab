@@ -52,7 +52,7 @@ describe('executeCommand', () => {
       'echo "m" > m.txt',
       'git add m.txt',
       'git commit -m "m1"',
-      'git merge feature',
+      'git merge --no-edit feature',
     ])
     expect(currentBranch(repo)).toBe('main')
     expect(Object.keys(repo.commits)).toHaveLength(4)
@@ -64,7 +64,7 @@ describe('executeCommand', () => {
   })
 
   it('checkout はブランチ・コミット・ファイルで動きを変える', () => {
-    const repo = run(['git commit --allow-empty', 'git checkout -b topic'])
+    const repo = run(['git commit --allow-empty -m x', 'git checkout -b topic'])
     expect(currentBranch(repo)).toBe('topic')
     expect(run(['git checkout C0'], repo).head).toEqual({ type: 'detached', id: 'C0' })
     const edited = run(['echo x >> README.md', 'git checkout -- README.md'], repo)
@@ -78,10 +78,10 @@ describe('executeCommand', () => {
   })
 
   it('reset はモードと移動先、ファイル指定を区別する', () => {
-    const repo = run(['git commit --allow-empty', 'git commit --allow-empty', 'git commit --allow-empty'])
+    const repo = run(['git commit --allow-empty -m x', 'git commit --allow-empty -m x', 'git commit --allow-empty -m x'])
     const hard = executeCommand(repo, 'git reset --hard HEAD~2')
     expect(hard.repo.branches['main']).toBe('C1')
-    expect(hard.output).toBe('HEAD is now at C1 Commit 1')
+    expect(hard.output).toBe('HEAD is now at C1 x')
     expect(executeCommand(repo, 'reset C2 --soft').repo.branches['main']).toBe('C2')
     expect(executeCommand(hard.repo, 'reset C3').repo.branches['main']).toBe('C3')
     expect(executeCommand(repo, 'git reset --hard README.md').ok).toBe(false)

@@ -27,7 +27,7 @@ describe('描画のスモークテスト', () => {
       'git commit --allow-empty -m "add form"',
       'git switch main',
       'git commit --allow-empty -m "fix typo"',
-      'git merge feature',
+      'git merge --no-edit feature',
     ])
     for (const id of ['C0', 'C1', 'C2', 'C3']) {
       expect(html).toContain(`>${id}<`)
@@ -39,12 +39,12 @@ describe('描画のスモークテスト', () => {
 
   it('reset で外れたコミットは薄く描画される', () => {
     const html = renderGraph([
-      'git commit --allow-empty',
-      'git commit --allow-empty',
+      'git commit --allow-empty -m x',
+      'git commit --allow-empty -m x',
       'git reset --hard HEAD~1',
     ])
     expect(html.match(/node-group unreachable/g)).toHaveLength(1)
-    expect(html).toContain('C2: Commit 2 (どのブランチからもたどれません)')
+    expect(html).toContain('C2: x (どのブランチからもたどれません)')
   })
 
   it('お題パネルに目標のグラフと進み具合が描画される', () => {

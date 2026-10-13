@@ -17,7 +17,7 @@ describe('encodeShare / decodeShare', () => {
   })
 
   it('お題モードではお題の ID も入る', () => {
-    const state = { mode: 'puzzle' as const, puzzleId: 'merge', commands: ['git merge feature'] }
+    const state = { mode: 'puzzle' as const, puzzleId: 'merge', commands: ['git merge --no-edit feature'] }
     expect(decodeShare(encodeShare(state))).toEqual(state)
   })
 
@@ -42,14 +42,14 @@ describe('replay / restoreShare', () => {
   })
 
   it('自由モードは clone 直後の状態から再現する', () => {
-    const restored = restoreShare({ mode: 'free', commands: ['git commit --allow-empty'] }, puzzles)
+    const restored = restoreShare({ mode: 'free', commands: ['git commit --allow-empty -m x'] }, puzzles)
     expect(restored?.mode).toBe('free')
     expect(restored?.repo.branches['main']).toBe('C1')
   })
 
   it('お題モードはお題の初期状態から再現し、正解の状態も再現できる', () => {
     const restored = restoreShare(
-      { mode: 'puzzle', puzzleId: 'merge', commands: ['git merge feature'] },
+      { mode: 'puzzle', puzzleId: 'merge', commands: ['git merge --no-edit feature'] },
       puzzles,
     )
     expect(restored?.puzzleIndex).toBe(PUZZLES.findIndex((p) => p.id === 'merge'))
