@@ -139,6 +139,11 @@ describe('rebase -i', () => {
     expect(done.workdir['b.txt']).toBe('two\nmore\n')
   })
 
+  it('rebase -i で作り直さないコミットを通っても、追跡していないファイルは残る', () => {
+    const repo = rebaseI(run(['touch memo.txt'], threeCommits()), 'pick C1\npick C2\npick C3\n')
+    expect(repo.workdir['memo.txt']).toBe('')
+  })
+
   it('todo を空にすると中止し、書き方が間違っていればエディタを開いたままにする', () => {
     const before = threeCommits()
     const emptied = rebaseI(before, '# 何もしない\n')
@@ -158,5 +163,54 @@ describe('rebase -i', () => {
     const repo = rebaseI(before, 'pick C1\nedit C2\npick C3\n', 'git rebase --abort')
     expect(repo.branches['main']).toBe('C3')
     expect(currentBranch(repo)).toBe('main')
+  })
+
+  it('exec はコマンドを実行して続け、失敗したらそこで止まる', () => {
+    const done = rebaseI(threeCommits(), 'pick C1\nexec echo ok >> log.txt\npick C2\nexec git status\npick C3\n')
+    expect(done.operation).toBeNull()
+    expect(done.branches['main']).toBe('C3')
+    // exec で作った未追跡ファイルは残る (追跡していないので rebase は止まらない)
+    expect(done.workdir['log.txt']).toBe('ok\n')
+
+    const result = executeCommand(
+      run(['git rebase -i HEAD~3'], threeCommits()),
+      editorSaveCommand('pick C1\nexec cat nope.txt\npick C2\npick C3\n'),
+    )
+    expect(result.output).toContain('Executing: cat nope.txt')
+    expect(result.output).toContain('コマンドの実行に失敗しました')
+    expect(result.repo.operation).toMatchObject({ type: 'rebase', current: null })
+    expect(result.repo.head).toEqual({ type: 'detached', id: 'C1' })
+    const continued = run(['git rebase --continue'], result.repo)
+    expect(continued.branches['main']).toBe('C3')
+    expect(currentBranch(continued)).toBe('main')
+  })
+
+  it('exec が追跡しているファイルの変更を残したら止まる', () => {
+    const result = executeCommand(
+      run(['git rebase -i HEAD~3'], threeCommits()),
+      editorSaveCommand('pick C1\nexec echo x >> a.txt\npick C2\npick C3\n'),
+    )
+    expect(result.output).toContain('変更を残しました')
+    expect(result.repo.operation?.type).toBe('rebase')
+  })
+
+  it('break で止まり、--continue で続ける', () => {
+    const stopped = rebaseI(threeCommits(), 'pick C1\nbreak\npick C2\npick C3\n')
+    expect(stopped.operation).toMatchObject({ type: 'rebase', current: null })
+    expect(stopped.head).toEqual({ type: 'detached', id: 'C1' })
+    expect(run(['git rebase --continue'], stopped).branches['main']).toBe('C3')
+  })
+
+  it('rebase -x は各コミットの後ろに exec を入れる', () => {
+    const opened = run(['git rebase -i -x "git status" HEAD~2'], threeCommits())
+    expect(editorLines(opened)).toEqual(['pick C2 2 つ目', 'exec git status', 'pick C3 3 つ目', 'exec git status'])
+    const direct = executeCommand(threeCommits(), 'git rebase -x "ls" HEAD~2')
+    expect(direct.output.match(/Executing: ls/g)).toHaveLength(2)
+    expect(direct.repo.operation).toBeNull()
+  })
+
+  it('exec と break の書き方の間違いはエラーになる', () => {
+    const opened = run(['git rebase -i HEAD~3'], threeCommits())
+    expect(executeCommand(opened, editorSaveCommand('pick C1\nexec\n')).ok).toBe(false)
   })
 })

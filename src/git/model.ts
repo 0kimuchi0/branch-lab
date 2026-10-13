@@ -32,10 +32,17 @@ export type Head =
 /** rebase -i の todo の 1 行 (cherry-pick・revert・通常の rebase はすべて pick)。 */
 export type TodoAction = 'pick' | 'reword' | 'edit' | 'squash' | 'fixup'
 
-export interface TodoItem {
+/** コミットを適用する todo の行。 */
+export interface PickItem {
   readonly action: TodoAction
   readonly id: CommitId
 }
+
+/** rebase -i の todo の 1 行。exec はコマンドを実行し、break はそこで止まる。 */
+export type TodoItem =
+  | PickItem
+  | { readonly action: 'exec'; readonly command: string }
+  | { readonly action: 'break' }
 
 /** squash / fixup でまとめているコミットのメッセージ (fixup のものは skip)。 */
 export interface SquashPart {
@@ -48,7 +55,7 @@ export type SequenceType = 'cherry-pick' | 'revert' | 'rebase'
 export interface SequenceOperation {
   readonly type: SequenceType
   /** 適用中 (コンフリクトなどで止まっている) の項目。確定済みなら null。 */
-  readonly current: TodoItem | null
+  readonly current: PickItem | null
   /** これから適用する項目。 */
   readonly todo: readonly TodoItem[]
   /** 操作を始める前の HEAD。--abort で戻る先。 */

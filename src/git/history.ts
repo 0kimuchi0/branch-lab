@@ -35,6 +35,7 @@ import {
   type SequenceOperation,
   type SequenceType,
   type SquashPart,
+  type PickItem,
   type TodoAction,
   type TodoItem,
 } from './model'
@@ -243,7 +244,7 @@ function waitForEditor(repo: Repo, stoppedOp: SequenceOperation, editor: Editor)
 function completeItem(
   repo: Repo,
   op: SequenceOperation,
-  item: TodoItem,
+  item: PickItem,
   tree: Tree,
   fromContinue: boolean,
 ): Step {
@@ -304,7 +305,20 @@ function completeItem(
 }
 
 /** todo の先頭の項目を HEAD に適用する (revert なら逆向きに)。 */
-function applyItem(repo: Repo, op: SequenceOperation, item: TodoItem): Step {
+function applyItem(repo: Repo, op: SequenceOperation, todoItem: TodoItem): Step {
+  if (todoItem.action === 'exec') {
+    // exec はコマンドを実行する層 (commands.ts) が実行して続ける。ここでは todo に残したまま止まる
+    return { status: 'stop', repo: { ...repo, operation: op }, lines: [] }
+  }
+  if (todoItem.action === 'break') {
+    const head = getCommit(repo, headCommitId(repo))
+    return {
+      status: 'stop',
+      repo: { ...repo, operation: { ...op, todo: op.todo.slice(1), current: null } },
+      lines: [`${head.id} (${subject(head.message)}) で停止しました (break)`, '続けるには git rebase --continue を実行してください。'],
+    }
+  }
+  const item = todoItem
   const picked = getCommit(repo, item.id)
   checkMainline(picked, op.mainline)
   const headId = headCommitId(repo)
@@ -316,11 +330,11 @@ function applyItem(repo: Repo, op: SequenceOperation, item: TodoItem): Step {
     (item.action === 'pick' || item.action === 'edit') &&
     picked.parents[0] === headId
   ) {
+    // 追跡していないファイルは、ほかの経路と同じく残す
     const moved: Repo = {
       ...repo,
       head: { type: 'detached', id: picked.id },
-      index: picked.tree,
-      workdir: picked.tree,
+      ...carryChanges(repo, picked.tree, 'rebase'),
     }
     if (item.action === 'edit') {
       return {
@@ -430,7 +444,7 @@ function startPicks(
     {
       type,
       current: null,
-      todo: ids.map((id): TodoItem => ({ action: 'pick', id })),
+      todo: ids.map((id): PickItem => ({ action: 'pick', id })),
       origHead: headCommitId(repo),
       branch: currentBranch(repo),
       keepEmpty: options.keepEmpty,
@@ -520,18 +534,29 @@ function startRebase(
   )
 }
 
+/** 各コミットの後ろに exec の行を入れる (git rebase -x)。 */
+function withExec(items: readonly TodoItem[], command: string | undefined): TodoItem[] {
+  if (command === undefined) return [...items]
+  return items.flatMap((item): TodoItem[] => [item, { action: 'exec', command }])
+}
+
+export interface RebaseOptions {
+  /** -x / --exec: 各コミットを適用したあとに実行するコマンド。 */
+  readonly exec?: string
+}
+
 /** git rebase <upstream>: 現在のブランチのコミットを upstream の先に付け替える。 */
-export function rebase(repo: Repo, upstreamRef: string): OperationResult {
+export function rebase(repo: Repo, upstreamRef: string, options: RebaseOptions = {}): OperationResult {
   requireNoOperation(repo)
   requireCleanForRebase(repo)
   const upstream = resolveRef(repo, upstreamRef)
   const head = headCommitId(repo)
   const branch = currentBranch(repo)
 
-  if (isAncestor(repo, upstream, head)) {
+  if (isAncestor(repo, upstream, head) && options.exec === undefined) {
     return { repo, output: `Current branch ${branch ?? 'HEAD'} is up to date.` }
   }
-  if (isAncestor(repo, head, upstream)) {
+  if (isAncestor(repo, head, upstream) && head !== upstream) {
     const tree = getCommit(repo, upstream).tree
     const { index, workdir } = carryChanges(repo, tree, 'rebase')
     const moved: Repo =
@@ -544,7 +569,7 @@ export function rebase(repo: Repo, upstreamRef: string): OperationResult {
     }
   }
   const items = commitsToReplay(repo, head, upstream).map((id): TodoItem => ({ action: 'pick', id }))
-  return startRebase(repo, upstream, head, branch, items)
+  return startRebase(repo, upstream, head, branch, withExec(items, options.exec))
 }
 
 const TODO_HELP = [
@@ -555,6 +580,8 @@ const TODO_HELP = [
   '# s, squash <コミット> = コミットを使うが、直前のコミットにまとめる',
   '# f, fixup <コミット> = squash と同じだが、このコミットのメッセージは捨てる',
   '# d, drop <コミット> = コミットを取り除く',
+  '# x, exec <コマンド> = コマンドを実行する (失敗したらそこで止まる)',
+  '# b, break = ここで止まる (git rebase --continue で続ける)',
   '#',
   '# 行は並べ替えられます。上から順に実行されます。',
   '# 行を消すと、そのコミットは失われます。',
@@ -562,7 +589,11 @@ const TODO_HELP = [
 ]
 
 /** git rebase -i <upstream>: todo をエディタで編集してから rebase する。 */
-export function rebaseInteractive(repo: Repo, upstreamRef: string): OperationResult {
+export function rebaseInteractive(
+  repo: Repo,
+  upstreamRef: string,
+  options: RebaseOptions = {},
+): OperationResult {
   requireNoOperation(repo)
   requireCleanForRebase(repo)
   const onto = resolveRef(repo, upstreamRef)
@@ -571,7 +602,10 @@ export function rebaseInteractive(repo: Repo, upstreamRef: string): OperationRes
   const lines =
     commits.length === 0
       ? ['noop']
-      : commits.map((id) => `pick ${id} ${subject(getCommit(repo, id).message)}`)
+      : commits.flatMap((id) => [
+          `pick ${id} ${subject(getCommit(repo, id).message)}`,
+          ...(options.exec === undefined ? [] : [`exec ${options.exec}`]),
+        ])
   const editor: Editor = {
     file: 'git-rebase-todo',
     text: [
@@ -587,7 +621,11 @@ export function rebaseInteractive(repo: Repo, upstreamRef: string): OperationRes
   return { repo: openEditor(repo, editor), output: EDITOR_WAITING }
 }
 
-const TODO_ACTIONS: Readonly<Record<string, TodoAction | 'drop'>> = {
+const TODO_ACTIONS: Readonly<Record<string, TodoAction | 'drop' | 'exec' | 'break'>> = {
+  x: 'exec',
+  exec: 'exec',
+  b: 'break',
+  break: 'break',
   p: 'pick',
   pick: 'pick',
   r: 'reword',
@@ -612,6 +650,16 @@ export function parseTodo(repo: Repo, text: string): TodoItem[] {
     const action = TODO_ACTIONS[word]
     if (action === undefined) {
       throw new GitError(`error: ${index + 1} 行目のコマンド '${word}' はわかりません: ${line}`)
+    }
+    if (action === 'break') {
+      items.push({ action })
+      return
+    }
+    if (action === 'exec') {
+      const command = line.slice(word.length).trim()
+      if (command === '') throw new GitError(`error: ${index + 1} 行目に実行するコマンドがありません`)
+      items.push({ action, command })
+      return
     }
     if (ref === undefined) {
       throw new GitError(`error: ${index + 1} 行目にコミットがありません: ${line}`)

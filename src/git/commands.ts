@@ -18,6 +18,7 @@ import {
   deleteBranch,
   detachHead,
   gitRemove,
+  hasTrackedChanges,
   listBranches,
   listFiles,
   log,
@@ -70,7 +71,7 @@ export const HELP_TEXT = [
   '  branch [<名前> [<起点>]] / branch -d <名前> / branch -m <新しい名前>',
   '  switch <名前> / switch -c <名前> / switch --detach <コミット>',
   '  checkout <名前|コミット> / checkout -b <名前>',
-  '  merge <ブランチ> [--no-ff] [--no-edit] / rebase [-i] <ブランチ>',
+  '  merge <ブランチ> [--no-ff] [--no-edit] / rebase [-i] [-x <コマンド>] <ブランチ>',
   '  cherry-pick [-e] [-m <親>] [--allow-empty] <コミット>... / revert [--no-edit] [-m <親>] <コミット>...',
   '  reset [--soft | --mixed | --hard] [<コミット>]',
   '  stash [push [-m "…"] [-u] [-k]] / stash list / show [-p] / apply / pop [--index] / drop / clear / branch',
@@ -535,13 +536,18 @@ function runGit(repo: Repo, name: string, args: readonly string[]): OperationRes
     case 'rebase': {
       const parsed = parseArgs(args, {
         flags: [...CONTROL_FLAGS, '-i'],
-        aliases: { '--interactive': '-i' },
+        values: ['-x'],
+        aliases: { '--interactive': '-i', '--exec': '-x' },
       })
       const control = sequencerControl(repo, 'rebase', parsed)
       if (control) return control
-      if (parsed.positional.length !== 1) usage('git rebase [-i] <ブランチ>')
+      if (parsed.positional.length !== 1) usage('git rebase [-i] [-x <コマンド>] <ブランチ>')
       const upstream = parsed.positional[0] as string
-      return parsed.flags.has('-i') ? rebaseInteractive(repo, upstream) : rebase(repo, upstream)
+      const exec = parsed.values.get('-x')
+      const options = exec === undefined ? {} : { exec }
+      return parsed.flags.has('-i')
+        ? rebaseInteractive(repo, upstream, options)
+        : rebase(repo, upstream, options)
     }
     case 'cherry-pick': {
       const parsed = parseArgs(args, {
@@ -679,6 +685,63 @@ function runEditorSave(repo: Repo, input: string): CommandResult {
  * Git の規則に反する操作は例外にせず、ok: false と説明文で返す。
  */
 export function executeCommand(repo: Repo, input: string): CommandResult {
+  const result = executeOnce(repo, input)
+  return result.ok ? runPendingExec(result) : result
+}
+
+/**
+ * rebase の todo の先頭が exec なら、そのコマンドを実行して rebase を続ける。
+ * コマンドが失敗したり、コミットしていない変更を残したりしたら、Git と同じくそこで止まる。
+ */
+function runPendingExec(result: CommandResult): CommandResult {
+  let repo = result.repo
+  const lines = result.output === '' ? [] : [result.output]
+  for (;;) {
+    const op = repo.operation
+    const next = op?.type === 'rebase' && op.current === null && !repo.editor ? op.todo[0] : undefined
+    if (op?.type !== 'rebase' || next?.action !== 'exec') break
+    const before: Repo = { ...repo, operation: { ...op, todo: op.todo.slice(1) } }
+    lines.push(`Executing: ${next.command}`)
+    // exec の中のコマンドは、ここから入れ子にならないように 1 回だけ実行する
+    const ran = executeOnce(before, next.command)
+    if (ran.output) lines.push(ran.output)
+    const after: Repo = ran.ok ? ran.repo : before
+    if (!ran.ok) {
+      lines.push(
+        `warning: コマンドの実行に失敗しました: ${next.command}`,
+        '問題を直してから git rebase --continue を実行してください。',
+      )
+      repo = after
+      break
+    }
+    if (after.operation?.type !== 'rebase' || after.editor) {
+      // exec の中で rebase を終わらせた、またはエディタを開いた場合は、そのまま返す
+      repo = after
+      break
+    }
+    if (hasTrackedChanges(after)) {
+      lines.push(
+        `error: コマンドは成功しましたが、ステージか作業ディレクトリに変更を残しました: ${next.command}`,
+        'コミットするか stash してから git rebase --continue を実行してください。',
+      )
+      repo = after
+      break
+    }
+    try {
+      const continued = continueOperation(after, 'rebase')
+      if (continued.output) lines.push(continued.output)
+      repo = continued.repo
+    } catch (error) {
+      if (!(error instanceof GitError)) throw error
+      lines.push(error.message)
+      repo = after
+      break
+    }
+  }
+  return { repo, output: lines.join('\n'), ok: true }
+}
+
+function executeOnce(repo: Repo, input: string): CommandResult {
   if (input.startsWith(EDITOR_SAVE)) return runEditorSave(repo, input)
   if (repo.editor && input.trim() !== '') {
     return {
