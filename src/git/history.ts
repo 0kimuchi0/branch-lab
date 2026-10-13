@@ -39,6 +39,7 @@ import {
   type TodoAction,
   type TodoItem,
 } from './model'
+import { finishTag } from './tag'
 import { mergeTrees, treesEqual, withFile, type Conflict, type Tree } from './tree'
 
 /**
@@ -686,6 +687,10 @@ export function saveEditor(repo: Repo, text?: string): OperationResult {
   if (!editor) throw new GitError('エディタは開いていません')
   const content = text ?? editor.text
   const after = editor.after
+
+  if (after.kind === 'tag') {
+    return finishTag({ ...repo, editor: null }, after.name, after.target, content)
+  }
 
   if (after.kind === 'todo') {
     const items = parseTodo(repo, content)

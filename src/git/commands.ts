@@ -39,7 +39,8 @@ import {
   type ResetMode,
 } from './model'
 import { gitDiff, show } from './inspect'
-import { fetch, pull, push, teammateCommit } from './remote'
+import { createTag, deleteTags, listTags } from './tag'
+import { fetch, pull, push, pushDelete, pushTags, teammateCommit } from './remote'
 import {
   stashApply,
   stashBranch,
@@ -74,8 +75,10 @@ export const HELP_TEXT = [
   '  merge <ブランチ> [--no-ff] [--no-edit] / rebase [-i] [-x <コマンド>] <ブランチ>',
   '  cherry-pick [-e] [-m <親>] [--allow-empty] <コミット>... / revert [--no-edit] [-m <親>] <コミット>...',
   '  reset [--soft | --mixed | --hard] [<コミット>]',
+  '  tag [-a] [-m "…"] [-f] <タグ> [<コミット>] / tag -l [<パターン>] / tag -d <タグ>',
   '  stash [push [-m "…"] [-u] [-k]] / stash list / show [-p] / apply / pop [--index] / drop / clear / branch',
-  '  push [-u] [-f] [origin <ブランチ>] / fetch / pull [--rebase | --no-rebase]',
+  '  push [-u] [-f] [--tags] [origin <ブランチ|タグ>] / push origin --delete <名前>',
+  '  fetch / pull [--rebase | --no-rebase]',
   '  (merge / rebase / cherry-pick / revert は --continue・--abort が使えます)',
   '',
   '<コミット> の例: C1, main, origin/main, HEAD~1, HEAD^2',
@@ -358,6 +361,28 @@ function runRestore(repo: Repo, args: readonly string[]): OperationResult {
   return restore(repo, paths, { staged, ...(source === undefined ? {} : { source }) })
 }
 
+function runTag(repo: Repo, args: readonly string[]): OperationResult {
+  const parsed = parseArgs(args, {
+    flags: ['-a', '-d', '-f', '-l'],
+    values: ['-m'],
+    aliases: { '--annotate': '-a', '--delete': '-d', '--force': '-f', '--list': '-l', '--message': '-m' },
+  })
+  if (parsed.flags.has('-d')) return deleteTags(repo, parsed.positional)
+  const [name, target, ...rest] = parsed.positional
+  if (name === undefined || parsed.flags.has('-l')) {
+    atMost(parsed, 1, 'git tag -l [<パターン>]')
+    return listTags(repo, name)
+  }
+  if (rest.length > 0) usage('git tag [-a] [-m "メッセージ"] [-f] <タグ> [<コミット>]')
+  const message = parsed.values.get('-m')
+  return createTag(repo, name, {
+    ...(target === undefined ? {} : { target }),
+    ...(message === undefined ? {} : { message }),
+    annotate: parsed.flags.has('-a'),
+    force: parsed.flags.has('-f'),
+  })
+}
+
 function runStash(repo: Repo, args: readonly string[]): OperationResult {
   const [sub = 'push', ...rest] = args[0]?.startsWith('-') ? ['push', ...args] : args
   switch (sub) {
@@ -425,11 +450,19 @@ function parseRemoteArgs(positional: readonly string[], text: string): string | 
 
 function runPush(repo: Repo, args: readonly string[]): OperationResult {
   const parsed = parseArgs(args, {
-    flags: ['-u', '-f'],
-    aliases: { '--set-upstream': '-u', '--force': '-f' },
+    flags: ['-u', '-f', '--tags', '-d'],
+    aliases: { '--set-upstream': '-u', '--force': '-f', '--delete': '-d' },
   })
-  const text = 'git push [-u] [-f] [origin [<ブランチ>]]'
+  const text = 'git push [-u] [-f] [--tags] [origin [<ブランチ|タグ>]] / git push origin --delete <名前>'
   const branch = parseRemoteArgs(parsed.positional, text)
+  if (parsed.flags.has('-d')) {
+    if (branch === undefined) usage(text)
+    return pushDelete(repo, branch)
+  }
+  if (parsed.flags.has('--tags')) {
+    if (branch !== undefined) usage(text)
+    return pushTags(repo, Object.keys(repo.tags).sort(), { force: parsed.flags.has('-f') })
+  }
   return push(repo, {
     ...(branch === undefined ? {} : { branch }),
     explicit: branch !== undefined,
@@ -584,6 +617,8 @@ function runGit(repo: Repo, name: string, args: readonly string[]): OperationRes
       return runReset(repo, args)
     case 'stash':
       return runStash(repo, args)
+    case 'tag':
+      return runTag(repo, args)
     case 'push':
       return runPush(repo, args)
     case 'fetch': {

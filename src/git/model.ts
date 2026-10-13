@@ -103,6 +103,13 @@ export type AfterEdit =
       readonly operation: SequenceOperation
       readonly stop?: boolean
     }
+  /** 注釈付きタグを作る (git tag -a でメッセージを書いた場合)。 */
+  | {
+      readonly kind: 'tag'
+      readonly name: string
+      readonly target: CommitId
+      readonly force: boolean
+    }
   /** rebase -i の todo を読んで rebase を始める。 */
   | {
       readonly kind: 'todo'
@@ -115,7 +122,7 @@ export type AfterEdit =
 /** 開いているエディタ。Git がエディタを開いて、閉じられるのを待っている状態。 */
 export interface Editor {
   /** 編集しているファイルの名前 (表示用)。 */
-  readonly file: 'COMMIT_EDITMSG' | 'MERGE_MSG' | 'git-rebase-todo'
+  readonly file: 'COMMIT_EDITMSG' | 'MERGE_MSG' | 'TAG_EDITMSG' | 'git-rebase-todo'
   /** エディタを開いたときの内容。 */
   readonly text: string
   readonly after: AfterEdit
@@ -134,10 +141,17 @@ export interface StashEntry {
   readonly untracked: Tree
 }
 
+/** タグ。message があれば注釈付きタグ (git tag -a)、なければ軽量タグ。 */
+export interface Tag {
+  readonly target: CommitId
+  readonly message?: string
+}
+
 export interface Remote {
   readonly name: string
   readonly commits: Readonly<Record<CommitId, Commit>>
   readonly branches: Readonly<Record<string, CommitId>>
+  readonly tags: Readonly<Record<string, Tag>>
 }
 
 export interface Repo {
@@ -153,6 +167,7 @@ export interface Repo {
   readonly editor: Editor | null
   /** git stash のスタック。先頭が stash@{0} (最新)。 */
   readonly stash: readonly StashEntry[]
+  readonly tags: Readonly<Record<string, Tag>>
   readonly remote: Remote
   /** リモート追跡ブランチ (origin/main など)。キーはリモート上のブランチ名。 */
   readonly remoteBranches: Readonly<Record<string, CommitId>>
@@ -195,7 +210,8 @@ export function createRepo(): Repo {
     conflicts: [],
     editor: null,
     stash: [],
-    remote: { name: REMOTE_NAME, commits, branches: { [DEFAULT_BRANCH]: root.id } },
+    tags: {},
+    remote: { name: REMOTE_NAME, commits, branches: { [DEFAULT_BRANCH]: root.id }, tags: {} },
     remoteBranches: { [DEFAULT_BRANCH]: root.id },
     upstreams: { [DEFAULT_BRANCH]: DEFAULT_BRANCH },
     nextId: 1,
@@ -263,9 +279,13 @@ export function mergeBase(repo: Repo, a: CommitId, b: CommitId): CommitId | null
   return best[0] ?? null
 }
 
-/** ブランチ・リモート追跡ブランチ・HEAD からたどれるコミット。 */
+/** ブランチ・タグ・リモート追跡ブランチ・HEAD からたどれるコミット。 */
 export function reachableCommits(repo: Repo): Set<CommitId> {
-  const tips = [...Object.values(repo.branches), ...Object.values(repo.remoteBranches)]
+  const tips = [
+    ...Object.values(repo.branches),
+    ...Object.values(repo.tags).map((tag) => tag.target),
+    ...Object.values(repo.remoteBranches),
+  ]
   tips.push(headCommitId(repo))
   if (repo.operation?.type === 'merge') tips.push(repo.operation.theirs)
   const reachable = new Set<CommitId>()
@@ -292,7 +312,8 @@ export function tryResolveRef(repo: Repo, ref: string): CommitId | null {
 }
 
 /**
- * コミットの指定 (ブランチ名・origin/<ブランチ名>・コミット ID・HEAD) を解決する。
+ * コミットの指定 (タグ名・ブランチ名・origin/<ブランチ名>・コミット ID・HEAD) を解決する。
+ * タグとブランチが同じ名前なら、Git と同じくタグを優先する。
  * 末尾の ~n は第 1 親を n 回、^n は n 番目の親をたどる (n の省略は 1)。
  */
 export function resolveRef(repo: Repo, ref: string): CommitId {
@@ -303,6 +324,7 @@ export function resolveRef(repo: Repo, ref: string): CommitId {
   const remoteName = remoteRefName(base)
   let id: CommitId
   if (base === 'HEAD' || base === '@') id = headCommitId(repo)
+  else if (base in repo.tags) id = (repo.tags[base] as Tag).target
   else if (base in repo.branches) id = repo.branches[base] as CommitId
   else if (remoteName !== null && remoteName in repo.remoteBranches) {
     id = repo.remoteBranches[remoteName] as CommitId
@@ -336,6 +358,9 @@ export function refNames(repo: Repo, id: CommitId): string[] {
   for (const [name, target] of Object.entries(repo.branches)) {
     if (target !== id) continue
     names.push(name === current ? `HEAD -> ${name}` : name)
+  }
+  for (const [name, tag] of Object.entries(repo.tags).sort(([a], [b]) => a.localeCompare(b))) {
+    if (tag.target === id) names.push(`tag: ${name}`)
   }
   for (const [name, target] of Object.entries(repo.remoteBranches)) {
     if (target === id) names.push(`${REMOTE_NAME}/${name}`)
@@ -768,14 +793,14 @@ export function revertMessage(commit: Commit, mainline: number | null = null): s
 
 // ---- ブランチ ----
 
-function validateBranchName(name: string): void {
+export function validateRefName(name: string): void {
   if (!BRANCH_NAME_PATTERN.test(name) || name.includes('..') || name === 'HEAD') {
     throw new GitError(`fatal: '${name}' はブランチ名として使えません`)
   }
 }
 
 export function createBranch(repo: Repo, name: string, startPoint = 'HEAD'): OperationResult {
-  validateBranchName(name)
+  validateRefName(name)
   if (name in repo.branches) {
     throw new GitError(`fatal: ブランチ '${name}' はすでに存在します`)
   }
@@ -832,7 +857,7 @@ export function deleteBranch(repo: Repo, name: string, force = false): Operation
 export function renameBranch(repo: Repo, from: string, to: string): OperationResult {
   const target = repo.branches[from]
   if (target === undefined) throw new GitError(`error: ブランチ '${from}' は見つかりません`)
-  validateBranchName(to)
+  validateRefName(to)
   if (to in repo.branches) throw new GitError(`fatal: ブランチ '${to}' はすでに存在します`)
   const branches: Record<string, CommitId> = {}
   for (const [name, id] of Object.entries(repo.branches)) {
@@ -1150,7 +1175,12 @@ export function log(
   options: { readonly oneline?: boolean; readonly all?: boolean; readonly start?: string } = {},
 ): OperationResult {
   const tips = options.all
-    ? [...Object.values(repo.branches), ...Object.values(repo.remoteBranches), headCommitId(repo)]
+    ? [
+        ...Object.values(repo.branches),
+        ...Object.values(repo.tags).map((tag) => tag.target),
+        ...Object.values(repo.remoteBranches),
+        headCommitId(repo),
+      ]
     : [resolveRef(repo, options.start ?? 'HEAD')]
   const ids = new Set<CommitId>()
   for (const tip of tips) for (const id of ancestors(repo.commits, tip)) ids.add(id)

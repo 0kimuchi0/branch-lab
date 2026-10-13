@@ -44,7 +44,73 @@ export interface PushOptions {
   readonly explicit?: boolean
 }
 
+/** タグを origin に push する。リモートに同じ名前で別のコミットを指すタグがあれば、-f がない限り拒否する。 */
+export function pushTags(
+  repo: Repo,
+  names: readonly string[],
+  options: { readonly force?: boolean } = {},
+): OperationResult {
+  let remote = repo.remote
+  const lines: string[] = []
+  const rejected: string[] = []
+  for (const name of names) {
+    const tag = repo.tags[name]
+    if (!tag) throw new GitError(`error: src refspec ${name} がどれにも一致しません`)
+    const existing = remote.tags[name]
+    const ref = `${name} -> ${name}`
+    if (existing?.target === tag.target && existing.message === tag.message) continue
+    if (existing && !options.force) {
+      rejected.push(` ! [rejected]        ${ref} (already exists)`)
+      continue
+    }
+    remote = {
+      ...remote,
+      commits: copyCommits(repo.commits, remote.commits, tag.target),
+      tags: { ...remote.tags, [name]: tag },
+    }
+    lines.push(existing ? ` + ${existing.target}...${tag.target} ${ref} (forced update)` : ` * [new tag]         ${ref}`)
+  }
+  if (rejected.length > 0) {
+    throw new GitError(
+      [
+        `To ${REMOTE_NAME}`,
+        ...rejected,
+        `error: 一部の参照を '${REMOTE_NAME}' に push できませんでした`,
+        'ヒント: リモートにすでに同じ名前のタグがあります。上書きするには -f を付けてください。',
+      ].join('\n'),
+    )
+  }
+  if (lines.length === 0) return { repo, output: 'Everything up-to-date' }
+  return { repo: { ...repo, remote }, output: [`To ${REMOTE_NAME}`, ...lines].join('\n') }
+}
+
+/** git push origin --delete <名前>: リモートのブランチまたはタグを消す。 */
+export function pushDelete(repo: Repo, name: string): OperationResult {
+  if (name in repo.remote.branches) {
+    const branches = { ...repo.remote.branches }
+    delete branches[name]
+    const remoteBranches = { ...repo.remoteBranches }
+    delete remoteBranches[name]
+    return {
+      repo: { ...repo, remote: { ...repo.remote, branches }, remoteBranches },
+      output: `To ${REMOTE_NAME}\n - [deleted]         ${name}`,
+    }
+  }
+  if (name in repo.remote.tags) {
+    const tags = { ...repo.remote.tags }
+    delete tags[name]
+    return {
+      repo: { ...repo, remote: { ...repo.remote, tags } },
+      output: `To ${REMOTE_NAME}\n - [deleted]         ${name}`,
+    }
+  }
+  throw new GitError(`error: '${name}' を削除できません: リモートにその参照はありません`)
+}
+
 export function push(repo: Repo, options: PushOptions = {}): OperationResult {
+  if (options.branch !== undefined && !(options.branch in repo.branches) && options.branch in repo.tags) {
+    return pushTags(repo, [options.branch], { force: options.force ?? false })
+  }
   const current = currentBranch(repo)
   const branch = options.branch ?? current
   if (branch === null) {
@@ -119,7 +185,20 @@ export function fetch(repo: Repo): OperationResult {
     else if (ancestors(commits, id).has(before)) lines.push(`   ${before}..${id}  ${ref}`)
     else lines.push(` + ${before}...${id} ${ref} (forced update)`)
   }
-  const next: Repo = { ...repo, commits, remoteBranches: { ...repo.remote.branches } }
+  // リモートのタグも取り込む。手元に同じ名前で別のタグがあれば上書きしない (Git と同じ)
+  let tags = { ...repo.tags }
+  for (const [name, tag] of Object.entries(repo.remote.tags).sort()) {
+    const local = tags[name]
+    if (local?.target === tag.target) continue
+    if (local) {
+      lines.push(` ! [rejected]        ${name} -> ${name} (would clobber existing tag)`)
+      continue
+    }
+    commits = copyCommits(repo.remote.commits, commits, tag.target)
+    tags = { ...tags, [name]: tag }
+    lines.push(` * [new tag]         ${name} -> ${name}`)
+  }
+  const next: Repo = { ...repo, commits, tags, remoteBranches: { ...repo.remote.branches } }
   return {
     repo: next,
     output: lines.length === 0 ? '' : [`From ${REMOTE_NAME}`, ...lines].join('\n'),

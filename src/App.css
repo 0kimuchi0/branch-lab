@@ -649,6 +649,15 @@
   stroke: var(--error);
 }
 
+.label-tag rect {
+  fill: color-mix(in srgb, var(--lane-3) 16%, var(--surface));
+  stroke: var(--lane-3);
+}
+
+.label-tag text {
+  fill: var(--lane-3);
+}
+
 .label-remote rect {
   fill: var(--graph-bg);
   stroke-dasharray: 4 3;
