@@ -17,6 +17,7 @@ import {
   headCommitId,
   headTree,
   isAncestor,
+  logRefs,
   mergeBase,
   messageTemplate,
   openEditor,
@@ -86,6 +87,8 @@ export interface MergeOptions {
   readonly noFastForward?: boolean
   /** --ff-only: fast-forward できない場合は中止する。 */
   readonly fastForwardOnly?: boolean
+  /** reflog に書く操作の名前 (既定は "merge <ref>"、git pull なら "pull")。 */
+  readonly reflogAction?: string
 }
 
 export function merge(repo: Repo, ref: string, options: MergeOptions = {}): OperationResult {
@@ -105,7 +108,7 @@ export function merge(repo: Repo, ref: string, options: MergeOptions = {}): Oper
         ? { ...repo, branches: { ...repo.branches, [repo.head.name]: theirs } }
         : { ...repo, head: { type: 'detached', id: theirs } }
     return {
-      repo: { ...moved, index, workdir },
+      repo: logRefs(repo, { ...moved, index, workdir }, `${options.reflogAction ?? `merge ${ref}`}: Fast-forward`),
       output: `Updating ${ours}..${theirs}\nFast-forward`,
     }
   }
@@ -143,7 +146,11 @@ export function merge(repo: Repo, ref: string, options: MergeOptions = {}): Oper
   }
 
   const merged: Repo = { ...repo, ...carried }
-  const pending: PendingCommit = { parents: [ours, theirs], tree: result.tree }
+  const pending: PendingCommit = {
+    parents: [ours, theirs],
+    tree: result.tree,
+    reflogMessage: `${options.reflogAction ?? `merge ${ref}`}: Merge made by the 'ort' strategy.`,
+  }
   const message = options.message?.trim()
   if (message || options.noEdit) {
     const created = createCommit(merged, pending, message || defaultMessage)
@@ -259,7 +266,7 @@ function completeItem(
       { message: picked.message, skip: item.action === 'fixup' },
     ]
     // まとめた結果は、直前のコミットを置き換える
-    const pending: PendingCommit = { parents: head.parents, tree }
+    const pending: PendingCommit = { parents: head.parents, tree, reflogAction: `rebase (${item.action})` }
     const next = op.todo[0]
     if (next?.action === 'squash' || next?.action === 'fixup') {
       const kept = parts.filter((part) => !part.skip).map((part) => part.message)
@@ -282,6 +289,7 @@ function completeItem(
     parents: [head.id],
     tree,
     ...(op.type === 'revert' ? { reverts: picked.id } : { source: picked.source ?? picked.id }),
+    reflogAction: op.type === 'rebase' ? `rebase (${item.action})` : op.type,
   }
   const message = op.type === 'revert' ? revertMessage(picked, op.mainline) : picked.message
   const nextOp: SequenceOperation = { ...op, current: null }
@@ -332,11 +340,11 @@ function applyItem(repo: Repo, op: SequenceOperation, todoItem: TodoItem): Step 
     picked.parents[0] === headId
   ) {
     // 追跡していないファイルは、ほかの経路と同じく残す
-    const moved: Repo = {
-      ...repo,
-      head: { type: 'detached', id: picked.id },
-      ...carryChanges(repo, picked.tree, 'rebase'),
-    }
+    const moved: Repo = logRefs(
+      repo,
+      { ...repo, head: { type: 'detached', id: picked.id }, ...carryChanges(repo, picked.tree, 'rebase') },
+      `rebase (${item.action}): ${subject(picked.message)}`,
+    )
     if (item.action === 'edit') {
       return {
         status: 'stop',
@@ -417,13 +425,16 @@ function finishSequence(repo: Repo, op: SequenceOperation, lines: string[]): Ope
     return { repo: { ...repo, operation: null }, output: lines.join('\n') }
   }
   lines.push(`Successfully rebased and updated refs/heads/${op.branch}.`)
+  // reflog: まずブランチを付け替え、次に HEAD をブランチに戻す (Git と同じく 2 行に分けて記録する)
+  const moved = logRefs(
+    repo,
+    { ...repo, operation: null, branches: { ...repo.branches, [op.branch]: tip } },
+    `rebase (finish): refs/heads/${op.branch} onto ${tip}`,
+  )
   return {
-    repo: {
-      ...repo,
-      operation: null,
-      branches: { ...repo.branches, [op.branch]: tip },
-      head: { type: 'branch', name: op.branch },
-    },
+    repo: logRefs(moved, { ...moved, head: { type: 'branch', name: op.branch } }, `rebase (finish): returning to refs/heads/${op.branch}`, {
+      forceHead: true,
+    }),
     output: lines.join('\n'),
   }
 }
@@ -517,7 +528,12 @@ function startRebase(
 ): OperationResult {
   const tree = getCommit(repo, onto).tree
   const { index, workdir } = carryChanges({ ...repo, editor: null }, tree, 'rebase')
-  const detached: Repo = { ...repo, head: { type: 'detached', id: onto }, index, workdir, editor: null }
+  const detached: Repo = logRefs(
+    repo,
+    { ...repo, head: { type: 'detached', id: onto }, index, workdir, editor: null },
+    `rebase (start): checkout ${onto}`,
+    { forceHead: true },
+  )
   return runSequence(
     detached,
     {
@@ -565,7 +581,7 @@ export function rebase(repo: Repo, upstreamRef: string, options: RebaseOptions =
         ? { ...repo, head: { type: 'detached', id: upstream } }
         : { ...repo, branches: { ...repo.branches, [branch]: upstream } }
     return {
-      repo: { ...moved, index, workdir },
+      repo: logRefs(repo, { ...moved, index, workdir }, `rebase (finish): ${branch === null ? 'HEAD' : `refs/heads/${branch}`} onto ${upstream}`),
       output: `Fast-forwarded ${branch ?? 'HEAD'} to ${upstreamRef}.`,
     }
   }
@@ -791,8 +807,14 @@ export function abortOperation(repo: Repo, type: Operation['type']): OperationRe
           head: { type: 'branch', name: op.branch },
           branches: { ...repo.branches, [op.branch]: op.origHead },
         }
+  const where = op.branch === null ? op.origHead : `refs/heads/${op.branch}`
   return {
-    repo: { ...restored, operation: null, conflicts: [], index: tree, workdir: tree },
+    repo: logRefs(
+      repo,
+      { ...restored, operation: null, conflicts: [], index: tree, workdir: tree },
+      `${type} (abort): returning to ${where}`,
+      { forceHead: true },
+    ),
     output: `${type} を中止し、${op.origHead} に戻しました`,
   }
 }

@@ -22,7 +22,9 @@ import {
   listBranches,
   listFiles,
   log,
+  previousBranch,
   readFile,
+  reflog,
   removeFile,
   renameBranch,
   reset,
@@ -64,13 +66,13 @@ export const HELP_TEXT = [
   '  touch / cat / ls / rm      作成・表示・一覧・削除',
   '',
   'Git のコマンド (先頭の git は省略できます。rm だけは git rm と区別します):',
-  '  status / log [--oneline] [--all]',
+  '  status / log [--oneline] [--all] / reflog [<ブランチ>]',
   '  diff [--staged] [<コミット> [<コミット>]] [--stat] [-- <ファイル>] / show [<コミット>]',
   '  add <ファイル>... / add .        restore [--staged] <ファイル>...',
   '  commit [-m "メッセージ"] [-a] [--allow-empty] [--amend] [--no-edit]',
   '  (-m を付けないとエディタが開きます。merge・revert・--continue なども同じです)',
   '  branch [<名前> [<起点>]] / branch -d <名前> / branch -m <新しい名前>',
-  '  switch <名前> / switch -c <名前> / switch --detach <コミット>',
+  '  switch <名前> / switch - / switch -c <名前> / switch --detach <コミット>',
   '  checkout <名前|コミット> / checkout -b <名前>',
   '  merge <ブランチ> [--no-ff] [--no-edit] / rebase [-i] [-x <コマンド>] <ブランチ>',
   '  cherry-pick [-e] [-m <親>] [--allow-empty] <コミット>... / revert [--no-edit] [-m <親>] <コミット>...',
@@ -81,7 +83,7 @@ export const HELP_TEXT = [
   '  fetch / pull [--rebase | --no-rebase]',
   '  (merge / rebase / cherry-pick / revert は --continue・--abort が使えます)',
   '',
-  '<コミット> の例: C1, main, origin/main, HEAD~1, HEAD^2',
+  '<コミット> の例: C1, main, v1.0, origin/main, HEAD~1, HEAD^2, HEAD@{1}, main@{2}',
   '',
   'このアプリ独自のコマンド:',
   '  teammate [<ブランチ>]   他の人が origin に push したことにする',
@@ -285,7 +287,8 @@ function runSwitch(repo: Repo, args: readonly string[]): OperationResult {
     })
   }
   atMost(parsed, 1, 'git switch <ブランチ>')
-  const target = parsed.positional[0]
+  // git switch - は、直前にいたブランチに戻る
+  const target = parsed.positional[0] === '-' ? previousBranch(repo) : parsed.positional[0]
   if (parsed.flags.has('--detach')) return detachHead(repo, target ?? 'HEAD')
   if (target === undefined) usage('git switch <ブランチ>')
   if (!(target in repo.branches) && !(target in repo.remoteBranches) && tryResolveRef(repo, target)) {
@@ -314,7 +317,7 @@ function runCheckout(repo: Repo, args: readonly string[]): OperationResult {
     })
   }
   atMost(parsed, 1, 'git checkout <ブランチ|コミット>')
-  const target = parsed.positional[0]
+  const target = parsed.positional[0] === '-' ? previousBranch(repo) : parsed.positional[0]
   if (target === undefined) usage('git checkout <ブランチ|コミット>')
   if (!parsed.flags.has('--detach') && (target in repo.branches || target in repo.remoteBranches)) {
     return switchBranch(repo, target)
@@ -331,7 +334,9 @@ function runReset(repo: Repo, args: readonly string[]): OperationResult {
   const mode: ResetMode | undefined = modes[0]
   const [target, ...rest] = parsed.positional
 
-  if (parsed.paths !== null || (target !== undefined && tryResolveRef(repo, target) === null)) {
+  // HEAD@{n} や HEAD~n の形は、解決できなくてもファイルではなくコミットの指定として扱う
+  const looksLikeRef = target !== undefined && /@\{|[~^]/.test(target)
+  if (parsed.paths !== null || (target !== undefined && !looksLikeRef && tryResolveRef(repo, target) === null)) {
     if (mode !== undefined) {
       throw new GitError(`fatal: --${mode} はファイルを指定した reset では使えません`)
     }
@@ -619,6 +624,13 @@ function runGit(repo: Repo, name: string, args: readonly string[]): OperationRes
       return runStash(repo, args)
     case 'tag':
       return runTag(repo, args)
+    case 'reflog': {
+      const parsed = parseArgs(args, { flags: [] })
+      const [first, second, ...rest] = parsed.positional
+      const ref = first === 'show' ? second : first
+      if (rest.length > 0 || (first !== 'show' && second !== undefined)) usage('git reflog [show] [<ブランチ>]')
+      return reflog(repo, ref)
+    }
     case 'push':
       return runPush(repo, args)
     case 'fetch': {

@@ -262,6 +262,7 @@ export function pull(repo: Repo, options: PullOptions = {}): OperationResult {
         defaultMessage: `Merge branch '${upstream}' of ${REMOTE_NAME}`,
         noEdit: options.noEdit ?? false,
         fastForwardOnly: options.fastForwardOnly ?? false,
+        reflogAction: 'pull',
       })
   lines.push(integrated.output)
   return { repo: integrated.repo, output: lines.join('\n') }
