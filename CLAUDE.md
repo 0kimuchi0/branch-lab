@@ -45,6 +45,11 @@ React + TypeScript + Vite、テストは Vitest。UI の文言は日本語。
 `erasableSyntaxOnly` と `verbatimModuleSyntax` が有効。
 enum やコンストラクタの引数プロパティは使わず、型のインポートは `import type` (または `type` 修飾子) で書く。
 
+## 公開
+
+Vercel のプロジェクト `branch-lab` (チーム `0daiki0-projects`) が GitHub とつながっていて、
+main に push すると https://branch-lab-dun.vercel.app にデプロイされる。PR ではプレビューが作られる。
+
 ## 今後の予定
 
-1. Vercel または GitHub Pages で公開
+- `diff` / `stash` / `rebase -i`

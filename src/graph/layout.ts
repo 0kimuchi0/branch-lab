@@ -90,7 +90,8 @@ function computeDepths(commits: Commits): Map<CommitId, number> {
 /**
  * 参照の並び順に、その参照から第 1 親をたどって、
  * まだレーンが決まっていないコミットにその参照のレーンを割り当てる。
- * どこからもたどれないコミットは、新しいものから順に後ろのレーンに置く。
+ * 残ったコミット (マージで取り込まれ、ブランチ名が付いていない側の親や、
+ * どこからもたどれないコミット) は、新しいものから順に後ろのレーンに置く。
  */
 function assignLanes(
   commits: Commits,
@@ -98,13 +99,16 @@ function assignLanes(
   depths: ReadonlyMap<CommitId, number>,
   reachable: ReadonlySet<CommitId>,
 ): Map<CommitId, number> {
-  const unreachable = Object.keys(commits)
-    .filter((id) => !reachable.has(id))
-    .sort((a, b) => (depths.get(b) ?? 0) - (depths.get(a) ?? 0))
+  // たどれるコミットを先に、それぞれ新しい (深い) ものから
+  const rest = Object.keys(commits).sort(
+    (a, b) =>
+      Number(reachable.has(b)) - Number(reachable.has(a)) ||
+      (depths.get(b) ?? 0) - (depths.get(a) ?? 0),
+  )
 
   const lanes = new Map<CommitId, number>()
   let nextLane = 0
-  for (const tip of [...tips, ...unreachable]) {
+  for (const tip of [...tips, ...rest]) {
     let lane: number | undefined
     let id: CommitId | undefined = tip
     while (id !== undefined && id in commits && !lanes.has(id)) {
