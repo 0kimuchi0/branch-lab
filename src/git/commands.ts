@@ -3,8 +3,10 @@ import {
   commit,
   createBranch,
   merge,
+  reset,
   switchBranch,
   type Repo,
+  type ResetMode,
 } from './model'
 
 export interface CommandResult {
@@ -20,6 +22,8 @@ export const HELP_TEXT = [
   '  switch <名前>',
   '  switch -c <名前>',
   '  merge <名前>',
+  '  reset [--soft | --mixed | --hard] [<コミット>]',
+  '    <コミット> の例: C1, main, HEAD~1, HEAD^',
 ].join('\n')
 
 /** 引用符で囲まれた文字列を 1 つのトークンとして扱う分割。 */
@@ -44,6 +48,25 @@ function parseCommitMessage(args: string[]): string | undefined {
   const message = args[1]
   if (!message) throw new GitError('-m にはメッセージが必要です')
   return message
+}
+
+const RESET_USAGE = '使い方: reset [--soft | --mixed | --hard] [<コミット>]'
+
+function parseReset(args: string[]): { target?: string; mode?: ResetMode } {
+  let mode: ResetMode | undefined
+  const targets: string[] = []
+  for (const arg of args) {
+    if (arg === '--soft' || arg === '--mixed' || arg === '--hard') {
+      if (mode !== undefined) throw new GitError('reset のモードは 1 つだけ指定できます')
+      mode = arg === '--soft' ? 'soft' : arg === '--mixed' ? 'mixed' : 'hard'
+    } else if (arg.startsWith('-')) {
+      throw new GitError(`未対応のオプションです: ${arg}\n${RESET_USAGE}`)
+    } else {
+      targets.push(arg)
+    }
+  }
+  if (targets.length > 1) throw new GitError(RESET_USAGE)
+  return { target: targets[0], mode }
 }
 
 /**
@@ -84,6 +107,10 @@ export function executeCommand(repo: Repo, input: string): CommandResult {
       }
       case 'merge': {
         return { ...merge(repo, requireArg(args, 'merge <名前>')), ok: true }
+      }
+      case 'reset': {
+        const { target, mode } = parseReset(args)
+        return { ...reset(repo, target, mode), ok: true }
       }
       case 'help': {
         return { repo, output: HELP_TEXT, ok: true }

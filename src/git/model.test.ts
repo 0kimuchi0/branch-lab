@@ -8,7 +8,11 @@ import {
   headCommitId,
   isAncestor,
   merge,
+  reachableCommits,
+  reset,
+  resolveRef,
   switchBranch,
+  type Repo,
 } from './model'
 
 describe('createRepo', () => {
@@ -139,5 +143,98 @@ describe('merge', () => {
     const repo = createRepo()
     expect(() => merge(repo, 'nope')).toThrow(GitError)
     expect(() => merge(repo, 'main')).toThrow(GitError)
+  })
+})
+
+/** main に C1, C2, C3 を積んだ Repo。 */
+function linearRepo(): Repo {
+  let repo = createRepo()
+  for (const message of ['a', 'b', 'c']) repo = commit(repo, message).repo
+  return repo
+}
+
+describe('resolveRef', () => {
+  it('HEAD・ブランチ名・コミット ID を解決する', () => {
+    const repo = createBranch(linearRepo(), 'feature').repo
+    expect(resolveRef(repo, 'HEAD')).toBe('C3')
+    expect(resolveRef(repo, '@')).toBe('C3')
+    expect(resolveRef(repo, 'feature')).toBe('C3')
+    expect(resolveRef(repo, 'C1')).toBe('C1')
+  })
+
+  it('~n は第 1 親を n 回たどり、^ は親をたどる', () => {
+    const repo = linearRepo()
+    expect(resolveRef(repo, 'HEAD~')).toBe('C2')
+    expect(resolveRef(repo, 'HEAD~2')).toBe('C1')
+    expect(resolveRef(repo, 'HEAD^^')).toBe('C1')
+    expect(resolveRef(repo, 'main~1^')).toBe('C1')
+    expect(resolveRef(repo, 'HEAD^0')).toBe('C3')
+  })
+
+  it('^2 はマージコミットの 2 番目の親をたどる', () => {
+    let repo = switchBranch(createRepo(), 'feature', true).repo
+    repo = commit(repo, 'f1').repo
+    repo = switchBranch(repo, 'main').repo
+    repo = commit(repo, 'm1').repo
+    repo = merge(repo, 'feature').repo
+    expect(resolveRef(repo, 'HEAD^1')).toBe('C2')
+    expect(resolveRef(repo, 'HEAD^2')).toBe('C1')
+  })
+
+  it('存在しない指定や親のないコミットはエラーになる', () => {
+    const repo = linearRepo()
+    expect(() => resolveRef(repo, 'nope')).toThrow(GitError)
+    expect(() => resolveRef(repo, 'HEAD~4')).toThrow(GitError)
+    expect(() => resolveRef(repo, 'HEAD^2')).toThrow(GitError)
+    expect(() => resolveRef(repo, '~1')).toThrow(GitError)
+  })
+})
+
+describe('reset', () => {
+  it('現在のブランチだけを指定したコミットに移動する', () => {
+    const before = createBranch(linearRepo(), 'keep').repo
+    const { repo, output } = reset(before, 'HEAD~2', 'hard')
+    expect(repo.branches['main']).toBe('C1')
+    expect(repo.branches['keep']).toBe('C3')
+    expect(currentBranch(repo)).toBe('main')
+    expect(output).toContain('main を C1 (a) に移動しました (--hard)')
+  })
+
+  it('外れたコミットは消さずに残し、コミット ID で戻れる', () => {
+    const back = reset(linearRepo(), 'C1').repo
+    expect(Object.keys(back.commits)).toHaveLength(4)
+    expect(reachableCommits(back)).toEqual(new Set(['C0', 'C1']))
+
+    const forward = reset(back, 'C3').repo
+    expect(forward.branches['main']).toBe('C3')
+    expect(reachableCommits(forward).size).toBe(4)
+  })
+
+  it('reset 後のコミットは移動先から積まれ、ID は重複しない', () => {
+    let repo = reset(linearRepo(), 'C1').repo
+    repo = commit(repo, 'd').repo
+    expect(repo.branches['main']).toBe('C4')
+    expect(repo.commits['C4']?.parents).toEqual(['C1'])
+  })
+
+  it('既定は --mixed で、引数なしなら HEAD のまま', () => {
+    const before = linearRepo()
+    const { repo, output } = reset(before)
+    expect(repo.branches['main']).toBe('C3')
+    expect(output).toContain('(--mixed)')
+    expect(output).not.toContain('差分')
+  })
+
+  it('detached HEAD では HEAD そのものを移動する', () => {
+    const before: Repo = { ...linearRepo(), head: { type: 'detached', id: 'C3' } }
+    const { repo } = reset(before, 'HEAD~1')
+    expect(repo.head).toEqual({ type: 'detached', id: 'C2' })
+    expect(repo.branches['main']).toBe('C3')
+  })
+
+  it('元の Repo を変更しない', () => {
+    const before = linearRepo()
+    reset(before, 'C0', 'hard')
+    expect(before.branches['main']).toBe('C3')
   })
 })

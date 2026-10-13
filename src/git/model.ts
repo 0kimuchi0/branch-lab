@@ -191,3 +191,84 @@ export function merge(repo: Repo, name: string): OperationResult {
     output: `マージコミット ${mergeCommit.id} を作成しました`,
   }
 }
+
+/** ブランチと HEAD からたどれるコミットの集合。reset で外れたコミットは含まれない。 */
+export function reachableCommits(repo: Repo): Set<CommitId> {
+  const tips = Object.values(repo.branches)
+  if (repo.head.type === 'detached') tips.push(repo.head.id)
+  const reachable = new Set<CommitId>()
+  const stack = [...tips]
+  while (stack.length > 0) {
+    const id = stack.pop() as CommitId
+    if (reachable.has(id)) continue
+    reachable.add(id)
+    const commit = repo.commits[id]
+    if (commit) stack.push(...commit.parents)
+  }
+  return reachable
+}
+
+const REF_PATTERN = /^([^~^]+)((?:[~^]\d*)*)$/
+
+/**
+ * コミットの指定 (ブランチ名・コミット ID・HEAD) を解決する。
+ * 末尾の ~n は第 1 親を n 回、^n は n 番目の親をたどる (n の省略は 1)。
+ */
+export function resolveRef(repo: Repo, ref: string): CommitId {
+  const match = REF_PATTERN.exec(ref)
+  if (!match) throw new GitError(`'${ref}' はコミットの指定として使えません`)
+  const [, base = '', suffix = ''] = match
+
+  let id: CommitId
+  if (base === 'HEAD' || base === '@') id = headCommitId(repo)
+  else if (base in repo.branches) id = repo.branches[base] as CommitId
+  else if (base in repo.commits) id = base
+  else throw new GitError(`'${base}' というブランチやコミットはありません`)
+
+  for (const [, op, digits] of suffix.matchAll(/([~^])(\d*)/g)) {
+    const n = digits === '' ? 1 : Number(digits)
+    if (op === '~') {
+      for (let i = 0; i < n; i++) id = parentOf(repo, id, 0, ref)
+    } else if (n > 0) {
+      id = parentOf(repo, id, n - 1, ref)
+    }
+  }
+  return id
+}
+
+function parentOf(repo: Repo, id: CommitId, index: number, ref: string): CommitId {
+  const parent = repo.commits[id]?.parents[index]
+  if (parent === undefined) {
+    throw new GitError(`${ref}: ${id} には ${index + 1} 番目の親がありません`)
+  }
+  return parent
+}
+
+export type ResetMode = 'soft' | 'mixed' | 'hard'
+
+const RESET_NOTES: Readonly<Record<ResetMode, string>> = {
+  soft: '移動前との差分はステージに残ります',
+  mixed: '移動前との差分は作業ディレクトリに残ります (ステージは空になります)',
+  hard: '作業ディレクトリとステージも移動先の状態になり、差分は破棄されます',
+}
+
+/**
+ * 現在のブランチ (detached HEAD なら HEAD) を target に移動する。
+ * 外れたコミットは削除せず残すので、コミット ID を指定すれば戻れる。
+ */
+export function reset(
+  repo: Repo,
+  target = 'HEAD',
+  mode: ResetMode = 'mixed',
+): OperationResult {
+  const targetId = resolveRef(repo, target)
+  const message = repo.commits[targetId]?.message ?? ''
+  const next: Repo =
+    repo.head.type === 'branch'
+      ? { ...repo, branches: { ...repo.branches, [repo.head.name]: targetId } }
+      : { ...repo, head: { type: 'detached', id: targetId } }
+  const moved = repo.head.type === 'branch' ? repo.head.name : 'HEAD'
+  const lines = [`${moved} を ${targetId} (${message}) に移動しました (--${mode})`]
+  if (targetId !== headCommitId(repo)) lines.push(RESET_NOTES[mode])
+  return { repo: next, output: lines.join('\n') }
+}

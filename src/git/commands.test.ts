@@ -52,6 +52,37 @@ describe('executeCommand', () => {
     expect(executeCommand(repo, 'rebase main').ok).toBe(false)
   })
 
+  it('reset はモードと移動先を解析する', () => {
+    let repo = createRepo()
+    for (const line of ['commit', 'commit', 'commit']) {
+      repo = executeCommand(repo, line).repo
+    }
+    const hard = executeCommand(repo, 'git reset --hard HEAD~2')
+    expect(hard.ok).toBe(true)
+    expect(hard.repo.branches['main']).toBe('C1')
+    expect(hard.output).toContain('(--hard)')
+
+    // モードは移動先の後ろに書いてもよく、省略時は --mixed
+    expect(executeCommand(repo, 'reset C2 --soft').output).toContain('(--soft)')
+    expect(executeCommand(repo, 'reset C2').output).toContain('(--mixed)')
+    expect(executeCommand(hard.repo, 'reset C3').repo.branches['main']).toBe('C3')
+  })
+
+  it('reset の不正な引数は ok: false を返す', () => {
+    const repo = createRepo()
+    for (const line of [
+      'reset nope',
+      'reset HEAD~1',
+      'reset --keep',
+      'reset --soft --hard',
+      'reset C0 C0',
+    ]) {
+      const result = executeCommand(repo, line)
+      expect(result.ok, line).toBe(false)
+      expect(result.repo).toBe(repo)
+    }
+  })
+
   it('空入力は何もしない', () => {
     const repo = createRepo()
     const result = executeCommand(repo, '   ')

@@ -18,6 +18,7 @@ const EXAMPLES = [
   'switch -c feature',
   'switch main',
   'merge feature',
+  'reset --hard HEAD~1',
 ] as const
 
 export function Terminal({ log, onRun, onReset }: TerminalProps) {

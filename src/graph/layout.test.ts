@@ -52,4 +52,21 @@ describe('computeLayout', () => {
     const large = computeLayout(run(['commit', 'commit', 'commit']))
     expect(large.width).toBeGreaterThan(small.width)
   })
+
+  it('reset で外れたコミットは別レーンに置かれ、到達不能として扱われる', () => {
+    const layout = computeLayout(
+      run(['commit', 'commit', 'reset --hard HEAD~2', 'commit']),
+    )
+    const byId = new Map(layout.nodes.map((n) => [n.id, n]))
+    expect(byId.get('C3')).toMatchObject({ lane: 0, reachable: true })
+    expect(byId.get('C1')).toMatchObject({ lane: 1, reachable: false })
+    expect(byId.get('C2')).toMatchObject({ lane: 1, reachable: false })
+    // 新しいコミット C3 と外れた C1 は同じ深さだが重ならない
+    expect(byId.get('C3')!.x).toBe(byId.get('C1')!.x)
+    expect(byId.get('C3')!.y).not.toBe(byId.get('C1')!.y)
+
+    const edge = (key: string) => layout.edges.find((e) => e.key === key)!
+    expect(edge('C0->C1').reachable).toBe(false)
+    expect(edge('C0->C3').reachable).toBe(true)
+  })
 })

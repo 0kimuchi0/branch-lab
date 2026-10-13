@@ -42,7 +42,7 @@ export function GraphView({ repo }: GraphViewProps) {
           return (
             <path
               key={edge.key}
-              className="edge"
+              className={edge.reachable ? 'edge' : 'edge unreachable'}
               d={`M${edge.x1} ${edge.y1} C${mid} ${edge.y1}, ${mid} ${edge.y2}, ${edge.x2} ${edge.y2}`}
               stroke={laneColor(edge.lane)}
             />
@@ -50,9 +50,17 @@ export function GraphView({ repo }: GraphViewProps) {
         })}
 
         {layout.nodes.map((node) => (
-          <g key={node.id} transform={`translate(${node.x} ${node.y})`}>
+          <g
+            key={node.id}
+            className={node.reachable ? 'node-group' : 'node-group unreachable'}
+            style={{ transform: `translate(${node.x}px, ${node.y}px)` }}
+          >
             <g className="node-enter">
-              <title>{`${node.id}: ${node.message}`}</title>
+              <title>
+                {node.reachable
+                  ? `${node.id}: ${node.message}`
+                  : `${node.id}: ${node.message} (どのブランチからもたどれません)`}
+              </title>
               <circle
                 className={node.isMerge ? 'node merge' : 'node'}
                 r={node.isMerge ? 17 : 15}

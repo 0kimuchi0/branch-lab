@@ -3,7 +3,13 @@
  * - x: 祖先からの深さ (左から右へ時間が進む)
  * - y: ブランチごとのレーン (main が最上段)
  */
-import { DEFAULT_BRANCH, currentBranch, type CommitId, type Repo } from '../git/model'
+import {
+  DEFAULT_BRANCH,
+  currentBranch,
+  reachableCommits,
+  type CommitId,
+  type Repo,
+} from '../git/model'
 
 export const X_GAP = 96
 export const Y_GAP = 96
@@ -19,6 +25,8 @@ export interface LayoutNode {
   readonly y: number
   readonly lane: number
   readonly isMerge: boolean
+  /** ブランチや HEAD からたどれるか。reset で外れたコミットは false。 */
+  readonly reachable: boolean
 }
 
 export interface LayoutEdge {
@@ -29,6 +37,7 @@ export interface LayoutEdge {
   readonly y2: number
   /** 線の色に使うレーン番号。マージの合流線は合流元のレーンの色にする。 */
   readonly lane: number
+  readonly reachable: boolean
 }
 
 export interface LayoutLabel {
@@ -69,8 +78,13 @@ function computeDepths(repo: Repo): Map<CommitId, number> {
 /**
  * main を先頭に、各ブランチの先頭から第 1 親をたどって、
  * まだレーンが決まっていないコミットにそのブランチのレーンを割り当てる。
+ * どこからもたどれないコミットは、新しいものから順に後ろのレーンに置く。
  */
-function assignLanes(repo: Repo): Map<CommitId, number> {
+function assignLanes(
+  repo: Repo,
+  depths: ReadonlyMap<CommitId, number>,
+  reachable: ReadonlySet<CommitId>,
+): Map<CommitId, number> {
   const names = Object.keys(repo.branches).sort((a, b) => {
     if (a === b) return 0
     if (a === DEFAULT_BRANCH) return -1
@@ -79,6 +93,10 @@ function assignLanes(repo: Repo): Map<CommitId, number> {
   })
   const tips = names.map((name) => repo.branches[name] as CommitId)
   if (repo.head.type === 'detached') tips.push(repo.head.id)
+  const unreachable = Object.keys(repo.commits)
+    .filter((id) => !reachable.has(id))
+    .sort((a, b) => (depths.get(b) ?? 0) - (depths.get(a) ?? 0))
+  tips.push(...unreachable)
 
   const lanes = new Map<CommitId, number>()
   let nextLane = 0
@@ -111,7 +129,8 @@ interface PendingLabel {
 
 export function computeLayout(repo: Repo): GraphLayout {
   const depths = computeDepths(repo)
-  const lanes = assignLanes(repo)
+  const reachable = reachableCommits(repo)
+  const lanes = assignLanes(repo, depths, reachable)
   const current = currentBranch(repo)
 
   // コミットごとに、そこを指しているラベル (ブランチ名・HEAD) を集める
@@ -145,6 +164,7 @@ export function computeLayout(repo: Repo): GraphLayout {
       y: padTop + lane * Y_GAP,
       lane,
       isMerge: commit.parents.length > 1,
+      reachable: reachable.has(commit.id),
     }
   })
   const nodeById = new Map(nodes.map((node) => [node.id, node]))
@@ -163,6 +183,7 @@ export function computeLayout(repo: Repo): GraphLayout {
         x2: child.x,
         y2: child.y,
         lane: index === 0 ? child.lane : parent.lane,
+        reachable: child.reachable,
       })
     })
   }

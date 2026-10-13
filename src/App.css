@@ -63,6 +63,22 @@
   animation: edge-in 0.4s ease-out both;
 }
 
+.node-group {
+  transition:
+    transform 0.45s cubic-bezier(0.3, 0.8, 0.3, 1),
+    opacity 0.45s ease-out;
+}
+
+/* reset などでブランチからたどれなくなったコミット */
+.node-group.unreachable {
+  opacity: 0.35;
+}
+
+.edge.unreachable {
+  stroke-dasharray: 6 6;
+  opacity: 0.35;
+}
+
 .node {
   stroke: var(--graph-bg);
   stroke-width: 3;
@@ -252,7 +268,8 @@ button:focus-visible {
     animation: none;
   }
 
-  .label {
+  .label,
+  .node-group {
     transition: none;
   }
 }

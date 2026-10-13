@@ -31,4 +31,14 @@ describe('描画のスモークテスト', () => {
     expect(html).toContain('HEAD → main')
     expect(html).toContain('feature')
   })
+
+  it('reset で外れたコミットは薄く描画される', () => {
+    let repo = createRepo()
+    for (const line of ['commit', 'commit', 'reset --hard HEAD~1']) {
+      repo = executeCommand(repo, line).repo
+    }
+    const html = renderToStaticMarkup(createElement(GraphView, { repo }))
+    expect(html.match(/node-group unreachable/g)).toHaveLength(1)
+    expect(html).toContain('C2: Commit 2 (どのブランチからもたどれません)')
+  })
 })
