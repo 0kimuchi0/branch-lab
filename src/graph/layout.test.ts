@@ -79,6 +79,15 @@ describe('computeLayout', () => {
 })
 
 describe('computeRemoteLayout', () => {
+  it('ブランチ名のない、マージで取り込まれた側のコミットも別レーンに置く', () => {
+    const repo = run(['git switch -c feature', EMPTY, 'git switch main', EMPTY, 'git merge feature', 'git push'])
+    const byId = new Map(computeRemoteLayout(repo).nodes.map((n) => [n.id, n]))
+    expect(byId.get('C3')!.lane).toBe(0)
+    expect(byId.get('C2')!.lane).toBe(0)
+    expect(byId.get('C1')!.lane).toBe(1)
+    expect(byId.get('C1')!.reachable).toBe(true)
+  })
+
   it('リモートが持っているコミットとブランチだけを描く', () => {
     const repo = run([EMPTY, 'git push', EMPTY])
     const layout = computeRemoteLayout(repo)
