@@ -14,6 +14,37 @@ interface TerminalProps {
   readonly resetLabel: string
 }
 
+/** 差分を出すコマンドかどうか (出力の +/- 行に色を付ける)。 */
+function showsDiff(command: string): boolean {
+  return /^(git\s+)?(diff|show|stash\s+show)\b/.test(command)
+}
+
+function diffLineClass(line: string): string | undefined {
+  if (line.startsWith('diff --git') || line.startsWith('commit ')) return 'diff-header'
+  if (line.startsWith('+++') || line.startsWith('---')) return 'diff-file'
+  if (line.startsWith('@@')) return 'diff-hunk'
+  if (line.startsWith('+')) return 'diff-add'
+  if (line.startsWith('-')) return 'diff-del'
+  return undefined
+}
+
+function Output({ entry }: { readonly entry: LogEntry }) {
+  const className = entry.ok ? 'log-output' : 'log-output log-error'
+  if (!entry.ok || !showsDiff(entry.command)) {
+    return <pre className={className}>{entry.output}</pre>
+  }
+  return (
+    <pre className={className}>
+      {entry.output.split('\n').map((line, index) => (
+        <span key={index} className={diffLineClass(line)}>
+          {line}
+          {'\n'}
+        </span>
+      ))}
+    </pre>
+  )
+}
+
 const EXAMPLES = [
   'echo "hello" >> README.md',
   'git add .',
@@ -24,6 +55,7 @@ const EXAMPLES = [
   'git merge feature',
   'git rebase main',
   'git status',
+  'git diff',
 ] as const
 
 export function Terminal({ log, onRun, onReset, resetLabel }: TerminalProps) {
@@ -81,11 +113,7 @@ export function Terminal({ log, onRun, onReset, resetLabel }: TerminalProps) {
             <div className="log-command">
               <span className="prompt">$</span> {entry.command}
             </div>
-            {entry.output && (
-              <pre className={entry.ok ? 'log-output' : 'log-output log-error'}>
-                {entry.output}
-              </pre>
-            )}
+            {entry.output && <Output entry={entry} />}
           </div>
         ))}
       </div>

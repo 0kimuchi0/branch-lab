@@ -35,6 +35,7 @@ import {
   type Repo,
   type ResetMode,
 } from './model'
+import { gitDiff, show } from './inspect'
 import { fetch, pull, push, teammateCommit } from './remote'
 
 export interface CommandResult {
@@ -50,6 +51,7 @@ export const HELP_TEXT = [
   '',
   'Git のコマンド (先頭の git は省略できます。rm だけは git rm と区別します):',
   '  status / log [--oneline] [--all]',
+  '  diff [--staged] [<コミット> [<コミット>]] [--stat] [-- <ファイル>] / show [<コミット>]',
   '  add <ファイル>... / add .        restore [--staged] <ファイル>...',
   '  commit -m "メッセージ" [-a] [--allow-empty] [--amend]',
   '  branch [<名前> [<起点>]] / branch -d <名前> / branch -m <新しい名前>',
@@ -381,6 +383,28 @@ function runGit(repo: Repo, name: string, args: readonly string[]): OperationRes
         oneline: parsed.flags.has('--oneline'),
         all: parsed.flags.has('--all'),
         ...(start === undefined ? {} : { start }),
+      })
+    }
+    case 'diff': {
+      const parsed = parseArgs(args, {
+        flags: ['--staged', '--name-only', '--stat'],
+        aliases: { '--cached': '--staged' },
+      })
+      return gitDiff(repo, {
+        staged: parsed.flags.has('--staged'),
+        commits: parsed.positional,
+        ...(parsed.paths ? { paths: parsed.paths } : {}),
+        nameOnly: parsed.flags.has('--name-only'),
+        stat: parsed.flags.has('--stat'),
+      })
+    }
+    case 'show': {
+      const parsed = parseArgs(args, { flags: ['--name-only', '--stat'] })
+      atMost(parsed, 1, 'git show [<コミット>]')
+      return show(repo, parsed.positional[0], {
+        ...(parsed.paths ? { paths: parsed.paths } : {}),
+        nameOnly: parsed.flags.has('--name-only'),
+        stat: parsed.flags.has('--stat'),
       })
     }
     case 'add': {

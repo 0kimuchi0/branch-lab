@@ -32,7 +32,7 @@ export function splitLines(text: string): string[] {
 }
 
 /** a と b の最長共通部分列を、対応する行番号の組で返す。 */
-function lcsPairs(a: readonly string[], b: readonly string[]): Array<[number, number]> {
+export function lcsPairs(a: readonly string[], b: readonly string[]): Array<[number, number]> {
   const dp = Array.from({ length: a.length + 1 }, () =>
     new Array<number>(b.length + 1).fill(0),
   )

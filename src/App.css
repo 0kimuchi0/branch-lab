@@ -609,6 +609,27 @@
   color: var(--text-muted);
 }
 
+.diff-header {
+  color: var(--text);
+  font-weight: 600;
+}
+
+.diff-file {
+  color: var(--text);
+}
+
+.diff-hunk {
+  color: var(--lane-5);
+}
+
+.diff-add {
+  color: var(--lane-2);
+}
+
+.diff-del {
+  color: var(--error);
+}
+
 .log-error {
   color: var(--error);
 }
