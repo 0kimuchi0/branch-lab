@@ -5,8 +5,10 @@
  */
 import {
   DEFAULT_BRANCH,
+  REMOTE_NAME,
+  ancestors,
   currentBranch,
-  reachableCommits,
+  type Commit,
   type CommitId,
   type Repo,
 } from '../git/model'
@@ -40,10 +42,12 @@ export interface LayoutEdge {
   readonly reachable: boolean
 }
 
+export type LabelKind = 'branch' | 'current' | 'head' | 'remote'
+
 export interface LayoutLabel {
   readonly key: string
   readonly text: string
-  readonly kind: 'branch' | 'current' | 'head'
+  readonly kind: LabelKind
   readonly x: number
   readonly y: number
   readonly width: number
@@ -58,59 +62,56 @@ export interface GraphLayout {
   readonly height: number
 }
 
-function computeDepths(repo: Repo): Map<CommitId, number> {
+type Commits = Readonly<Record<CommitId, Commit>>
+
+/** グラフに描く参照 (ブランチ名や HEAD のラベル)。並び順がレーンの優先順になる。 */
+export interface GraphRef {
+  readonly key: string
+  readonly text: string
+  readonly kind: LabelKind
+  readonly target: CommitId
+}
+
+function computeDepths(commits: Commits): Map<CommitId, number> {
   const depths = new Map<CommitId, number>()
   const visit = (id: CommitId): number => {
     const known = depths.get(id)
     if (known !== undefined) return known
-    const commit = repo.commits[id]
-    const depth =
-      !commit || commit.parents.length === 0
-        ? 0
-        : 1 + Math.max(...commit.parents.map(visit))
+    const commit = commits[id]
+    const parents = commit?.parents.filter((parent) => parent in commits) ?? []
+    const depth = parents.length === 0 ? 0 : 1 + Math.max(...parents.map(visit))
     depths.set(id, depth)
     return depth
   }
-  Object.keys(repo.commits).forEach(visit)
+  Object.keys(commits).forEach(visit)
   return depths
 }
 
 /**
- * main を先頭に、各ブランチの先頭から第 1 親をたどって、
- * まだレーンが決まっていないコミットにそのブランチのレーンを割り当てる。
+ * 参照の並び順に、その参照から第 1 親をたどって、
+ * まだレーンが決まっていないコミットにその参照のレーンを割り当てる。
  * どこからもたどれないコミットは、新しいものから順に後ろのレーンに置く。
  */
 function assignLanes(
-  repo: Repo,
+  commits: Commits,
+  tips: readonly CommitId[],
   depths: ReadonlyMap<CommitId, number>,
   reachable: ReadonlySet<CommitId>,
 ): Map<CommitId, number> {
-  const names = Object.keys(repo.branches).sort((a, b) => {
-    if (a === b) return 0
-    if (a === DEFAULT_BRANCH) return -1
-    if (b === DEFAULT_BRANCH) return 1
-    return 0
-  })
-  const tips = names.map((name) => repo.branches[name] as CommitId)
-  if (repo.head.type === 'detached') tips.push(repo.head.id)
-  const unreachable = Object.keys(repo.commits)
+  const unreachable = Object.keys(commits)
     .filter((id) => !reachable.has(id))
     .sort((a, b) => (depths.get(b) ?? 0) - (depths.get(a) ?? 0))
-  tips.push(...unreachable)
 
   const lanes = new Map<CommitId, number>()
   let nextLane = 0
-  for (const tip of tips) {
+  for (const tip of [...tips, ...unreachable]) {
     let lane: number | undefined
     let id: CommitId | undefined = tip
-    while (id !== undefined && !lanes.has(id)) {
+    while (id !== undefined && id in commits && !lanes.has(id)) {
       lane ??= nextLane++
       lanes.set(id, lane)
-      id = repo.commits[id]?.parents[0]
+      id = commits[id]?.parents[0]
     }
-  }
-  for (const id of Object.keys(repo.commits)) {
-    if (!lanes.has(id)) lanes.set(id, 0)
   }
   return lanes
 }
@@ -121,47 +122,47 @@ function estimateLabelWidth(text: string): number {
   return Math.ceil(width)
 }
 
-interface PendingLabel {
-  readonly key: string
-  readonly text: string
-  readonly kind: LayoutLabel['kind']
+/** コミットに最も近い位置に置くラベルほど小さい値。 */
+const LABEL_ORDER: Readonly<Record<LabelKind, number>> = {
+  current: 0,
+  head: 0,
+  branch: 1,
+  remote: 2,
 }
 
-export function computeLayout(repo: Repo): GraphLayout {
-  const depths = computeDepths(repo)
-  const reachable = reachableCommits(repo)
-  const lanes = assignLanes(repo, depths, reachable)
-  const current = currentBranch(repo)
+/** コミットと参照からグラフの座標を計算する。 */
+export function layoutGraph(commits: Commits, refs: readonly GraphRef[]): GraphLayout {
+  const depths = computeDepths(commits)
+  const reachable = new Set<CommitId>()
+  for (const ref of refs) for (const id of ancestors(commits, ref.target)) reachable.add(id)
+  const lanes = assignLanes(
+    commits,
+    refs.map((ref) => ref.target),
+    depths,
+    reachable,
+  )
 
-  // コミットごとに、そこを指しているラベル (ブランチ名・HEAD) を集める
-  const pending = new Map<CommitId, PendingLabel[]>()
-  const addLabel = (commitId: CommitId, label: PendingLabel) => {
-    const list = pending.get(commitId) ?? []
-    list.push(label)
-    pending.set(commitId, list)
-  }
-  for (const [name, commitId] of Object.entries(repo.branches)) {
-    const isCurrent = name === current
-    addLabel(commitId, {
-      key: `branch:${name}`,
-      text: isCurrent ? `HEAD → ${name}` : name,
-      kind: isCurrent ? 'current' : 'branch',
-    })
-  }
-  if (repo.head.type === 'detached') {
-    addLabel(repo.head.id, { key: 'head', text: 'HEAD', kind: 'head' })
+  // コミットごとに、そこを指しているラベルを集める
+  const pending = new Map<CommitId, GraphRef[]>()
+  for (const ref of refs) {
+    if (!(ref.target in commits)) continue
+    const list = pending.get(ref.target) ?? []
+    list.push(ref)
+    pending.set(ref.target, list)
   }
 
   const maxStack = Math.max(1, ...[...pending.values()].map((l) => l.length))
   const padTop = LABEL_BASE + (maxStack - 1) * LABEL_STEP + 16
+  // 下のレーンに積んだラベルが、上のレーンのメッセージに重ならない間隔にする
+  const laneGap = Math.max(Y_GAP, padTop + 46)
 
-  const nodes: LayoutNode[] = Object.values(repo.commits).map((commit) => {
+  const nodes: LayoutNode[] = Object.values(commits).map((commit) => {
     const lane = lanes.get(commit.id) ?? 0
     return {
       id: commit.id,
       message: commit.message,
       x: PAD_X + (depths.get(commit.id) ?? 0) * X_GAP,
-      y: padTop + lane * Y_GAP,
+      y: padTop + lane * laneGap,
       lane,
       isMerge: commit.parents.length > 1,
       reachable: reachable.has(commit.id),
@@ -170,7 +171,7 @@ export function computeLayout(repo: Repo): GraphLayout {
   const nodeById = new Map(nodes.map((node) => [node.id, node]))
 
   const edges: LayoutEdge[] = []
-  for (const commit of Object.values(repo.commits)) {
+  for (const commit of Object.values(commits)) {
     const child = nodeById.get(commit.id)
     if (!child) continue
     commit.parents.forEach((parentId, index) => {
@@ -192,16 +193,15 @@ export function computeLayout(repo: Repo): GraphLayout {
   for (const [commitId, list] of pending) {
     const node = nodeById.get(commitId)
     if (!node) continue
-    // 現在のブランチ (HEAD) をコミットに最も近い位置に置く
-    const ordered = [...list].sort(
-      (a, b) => Number(b.kind !== 'branch') - Number(a.kind !== 'branch'),
-    )
-    ordered.forEach((label, index) => {
+    const ordered = [...list].sort((a, b) => LABEL_ORDER[a.kind] - LABEL_ORDER[b.kind])
+    ordered.forEach((ref, index) => {
       labels.push({
-        ...label,
+        key: ref.key,
+        text: ref.text,
+        kind: ref.kind,
         x: node.x,
         y: node.y - LABEL_BASE - index * LABEL_STEP,
-        width: estimateLabelWidth(label.text),
+        width: estimateLabelWidth(ref.text),
         lane: node.lane,
       })
     })
@@ -211,7 +211,49 @@ export function computeLayout(repo: Repo): GraphLayout {
   const maxDepth = Math.max(0, ...depths.values())
   const labelRight = Math.max(0, ...labels.map((l) => l.x + l.width / 2))
   const width = Math.max(PAD_X * 2 + maxDepth * X_GAP, labelRight + 24)
-  const height = padTop + (laneCount - 1) * Y_GAP + PAD_BOTTOM
+  const height = padTop + (laneCount - 1) * laneGap + PAD_BOTTOM
 
   return { nodes, edges, labels, width, height }
+}
+
+/** main を先頭にしたブランチ名の並び。 */
+function branchOrder(names: Iterable<string>): string[] {
+  return [...names].sort((a, b) => Number(b === DEFAULT_BRANCH) - Number(a === DEFAULT_BRANCH))
+}
+
+/** ローカルリポジトリのグラフ。ブランチ・HEAD・リモート追跡ブランチ (origin/main など) を描く。 */
+export function computeLayout(repo: Repo): GraphLayout {
+  const current = currentBranch(repo)
+  const refs: GraphRef[] = branchOrder(Object.keys(repo.branches)).map((name) => ({
+    key: `branch:${name}`,
+    text: name === current ? `HEAD → ${name}` : name,
+    kind: name === current ? 'current' : 'branch',
+    target: repo.branches[name] as CommitId,
+  }))
+  if (repo.head.type === 'detached') {
+    refs.push({ key: 'head', text: 'HEAD', kind: 'head', target: repo.head.id })
+  }
+  if (repo.operation?.type === 'merge') {
+    refs.push({ key: 'merge-head', text: 'MERGE_HEAD', kind: 'head', target: repo.operation.theirs })
+  }
+  for (const name of branchOrder(Object.keys(repo.remoteBranches))) {
+    refs.push({
+      key: `remote:${name}`,
+      text: `${REMOTE_NAME}/${name}`,
+      kind: 'remote',
+      target: repo.remoteBranches[name] as CommitId,
+    })
+  }
+  return layoutGraph(repo.commits, refs)
+}
+
+/** リモート (origin) のグラフ。 */
+export function computeRemoteLayout(repo: Repo): GraphLayout {
+  const refs: GraphRef[] = branchOrder(Object.keys(repo.remote.branches)).map((name) => ({
+    key: `branch:${name}`,
+    text: name,
+    kind: 'branch',
+    target: repo.remote.branches[name] as CommitId,
+  }))
+  return layoutGraph(repo.remote.commits, refs)
 }

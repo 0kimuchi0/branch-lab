@@ -1,9 +1,10 @@
-import { useState } from 'react'
+import { useMemo, useState } from 'react'
 import './App.css'
 import { GraphView } from './components/GraphView'
 import { Terminal, type LogEntry } from './components/Terminal'
 import { executeCommand } from './git/commands'
 import { createRepo, currentBranch, headCommitId } from './git/model'
+import { computeLayout } from './graph/layout'
 
 export default function App() {
   const [repo, setRepo] = useState(createRepo)
@@ -26,6 +27,7 @@ export default function App() {
   }
 
   const branch = currentBranch(repo)
+  const layout = useMemo(() => computeLayout(repo), [repo])
 
   return (
     <div className="app">
@@ -37,7 +39,7 @@ export default function App() {
         </p>
       </header>
       <main className="app-main">
-        <GraphView repo={repo} />
+        <GraphView layout={layout} label="ローカルリポジトリのコミットグラフ" />
         <Terminal log={log} onRun={run} onReset={reset} />
       </main>
     </div>

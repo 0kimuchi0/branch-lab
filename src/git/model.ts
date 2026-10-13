@@ -1,7 +1,14 @@
 /**
- * Git の内部モデル (コミットの DAG・ブランチ・HEAD)。
+ * Git の内部モデル (コミットの DAG・ブランチ・HEAD・ステージ・作業ディレクトリ・リモート)。
  * UI には一切依存せず、すべての操作は新しい Repo を返す純粋関数として実装する。
  */
+import {
+  changedPaths,
+  treesEqual,
+  withFile,
+  type Conflict,
+  type Tree,
+} from './tree'
 
 export type CommitId = string
 
@@ -10,16 +17,59 @@ export interface Commit {
   /** 親コミット。通常のコミットは 1 つ、マージコミットは 2 つ、ルートは 0 個。 */
   readonly parents: readonly CommitId[]
   readonly message: string
+  /** このコミット時点のファイルのスナップショット。 */
+  readonly tree: Tree
+  /** cherry-pick や rebase でコピーしたときの、コピー元をたどった最初のコミット。 */
+  readonly source?: CommitId
+  /** revert で打ち消したコミット。 */
+  readonly reverts?: CommitId
 }
 
 export type Head =
   | { readonly type: 'branch'; readonly name: string }
   | { readonly type: 'detached'; readonly id: CommitId }
 
+/** 途中で止まっている操作 (コンフリクトの解消待ちなど)。 */
+export type Operation =
+  | {
+      readonly type: 'merge'
+      readonly theirs: CommitId
+      readonly message: string
+    }
+  | {
+      readonly type: 'cherry-pick' | 'revert' | 'rebase'
+      /** 適用中のコミット。commit で確定済みなら null。 */
+      readonly current: CommitId | null
+      /** これから適用するコミット。 */
+      readonly todo: readonly CommitId[]
+      /** 操作を始める前の HEAD。--abort で戻る先。 */
+      readonly origHead: CommitId
+      /** rebase の対象ブランチ (detached HEAD なら null)。 */
+      readonly branch: string | null
+      /** もともと空のコミットも複製するか (rebase と cherry-pick --allow-empty)。 */
+      readonly keepEmpty: boolean
+    }
+
+export interface Remote {
+  readonly name: string
+  readonly commits: Readonly<Record<CommitId, Commit>>
+  readonly branches: Readonly<Record<string, CommitId>>
+}
+
 export interface Repo {
   readonly commits: Readonly<Record<CommitId, Commit>>
   readonly branches: Readonly<Record<string, CommitId>>
   readonly head: Head
+  /** ステージ (インデックス)。次にコミットされるスナップショット。 */
+  readonly index: Tree
+  readonly workdir: Tree
+  readonly operation: Operation | null
+  readonly conflicts: readonly Conflict[]
+  readonly remote: Remote
+  /** リモート追跡ブランチ (origin/main など)。キーはリモート上のブランチ名。 */
+  readonly remoteBranches: Readonly<Record<string, CommitId>>
+  /** ローカルブランチ → 追跡するリモートのブランチ名 (upstream)。 */
+  readonly upstreams: Readonly<Record<string, string>>
   /** 次に採番するコミット番号。 */
   readonly nextId: number
 }
@@ -38,18 +88,31 @@ export class GitError extends Error {
 }
 
 export const DEFAULT_BRANCH = 'main'
+export const REMOTE_NAME = 'origin'
 
 const BRANCH_NAME_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._/-]*$/
 
+/** origin から clone した直後の状態を作る。 */
 export function createRepo(): Repo {
-  const root: Commit = { id: 'C0', parents: [], message: 'Initial commit' }
+  const tree: Tree = { 'README.md': '# BranchLab\n' }
+  const root: Commit = { id: 'C0', parents: [], message: 'Initial commit', tree }
+  const commits = { [root.id]: root }
   return {
-    commits: { [root.id]: root },
+    commits,
     branches: { [DEFAULT_BRANCH]: root.id },
     head: { type: 'branch', name: DEFAULT_BRANCH },
+    index: tree,
+    workdir: tree,
+    operation: null,
+    conflicts: [],
+    remote: { name: REMOTE_NAME, commits, branches: { [DEFAULT_BRANCH]: root.id } },
+    remoteBranches: { [DEFAULT_BRANCH]: root.id },
+    upstreams: { [DEFAULT_BRANCH]: DEFAULT_BRANCH },
     nextId: 1,
   }
 }
+
+// ---- 参照 ----
 
 export function headCommitId(repo: Repo): CommitId {
   if (repo.head.type === 'detached') return repo.head.id
@@ -64,154 +127,82 @@ export function currentBranch(repo: Repo): string | null {
   return repo.head.type === 'branch' ? repo.head.name : null
 }
 
+export function getCommit(repo: Repo, id: CommitId): Commit {
+  const commit = repo.commits[id]
+  if (!commit) throw new GitError(`コミット ${id} が見つかりません`)
+  return commit
+}
+
+export function headTree(repo: Repo): Tree {
+  return getCommit(repo, headCommitId(repo)).tree
+}
+
+/** id とその祖先すべて。 */
+export function ancestors(
+  commits: Readonly<Record<CommitId, Commit>>,
+  id: CommitId,
+): Set<CommitId> {
+  const visited = new Set<CommitId>()
+  const stack: CommitId[] = [id]
+  while (stack.length > 0) {
+    const current = stack.pop() as CommitId
+    if (visited.has(current)) continue
+    visited.add(current)
+    const commit = commits[current]
+    if (commit) stack.push(...commit.parents)
+  }
+  return visited
+}
+
 /** ancestor が descendant の祖先 (自分自身を含む) かどうか。 */
 export function isAncestor(
   repo: Repo,
   ancestor: CommitId,
   descendant: CommitId,
 ): boolean {
-  const visited = new Set<CommitId>()
-  const stack: CommitId[] = [descendant]
-  while (stack.length > 0) {
-    const id = stack.pop() as CommitId
-    if (id === ancestor) return true
-    if (visited.has(id)) continue
-    visited.add(id)
-    const commit = repo.commits[id]
-    if (commit) stack.push(...commit.parents)
-  }
-  return false
+  return ancestors(repo.commits, descendant).has(ancestor)
 }
 
-function validateBranchName(name: string): void {
-  if (!BRANCH_NAME_PATTERN.test(name) || name.includes('..')) {
-    throw new GitError(`'${name}' はブランチ名として使えません`)
-  }
-}
-
-function addCommit(
-  repo: Repo,
-  parents: readonly CommitId[],
-  message: string,
-): { repo: Repo; commit: Commit } {
-  const commit: Commit = { id: `C${repo.nextId}`, parents, message }
-  const commits = { ...repo.commits, [commit.id]: commit }
-  const next: Repo =
-    repo.head.type === 'branch'
-      ? {
-          ...repo,
-          commits,
-          branches: { ...repo.branches, [repo.head.name]: commit.id },
-          nextId: repo.nextId + 1,
-        }
-      : {
-          ...repo,
-          commits,
-          head: { type: 'detached', id: commit.id },
-          nextId: repo.nextId + 1,
-        }
-  return { repo: next, commit }
-}
-
-export function commit(repo: Repo, message?: string): OperationResult {
-  const text = message?.trim() || `Commit ${repo.nextId}`
-  const { repo: next, commit: created } = addCommit(
-    repo,
-    [headCommitId(repo)],
-    text,
+/** 2 つのコミットの共通祖先のうち、最も新しいもの。 */
+export function mergeBase(repo: Repo, a: CommitId, b: CommitId): CommitId | null {
+  const ofA = ancestors(repo.commits, a)
+  const common = [...ancestors(repo.commits, b)].filter((id) => ofA.has(id))
+  const best = common.filter(
+    (id) => !common.some((other) => other !== id && isAncestor(repo, id, other)),
   )
-  return { repo: next, output: `[${created.id}] ${created.message}` }
+  return best[0] ?? null
 }
 
-export function createBranch(repo: Repo, name: string): OperationResult {
-  validateBranchName(name)
-  if (name in repo.branches) {
-    throw new GitError(`ブランチ ${name} はすでに存在します`)
-  }
-  return {
-    repo: { ...repo, branches: { ...repo.branches, [name]: headCommitId(repo) } },
-    output: `ブランチ ${name} を作成しました`,
-  }
-}
-
-export function switchBranch(
-  repo: Repo,
-  name: string,
-  create = false,
-): OperationResult {
-  if (create) {
-    const created = createBranch(repo, name).repo
-    return {
-      repo: { ...created, head: { type: 'branch', name } },
-      output: `新しいブランチ ${name} に切り替えました`,
-    }
-  }
-  if (!(name in repo.branches)) {
-    throw new GitError(`ブランチ ${name} は存在しません`)
-  }
-  return {
-    repo: { ...repo, head: { type: 'branch', name } },
-    output: `ブランチ ${name} に切り替えました`,
-  }
-}
-
-export function merge(repo: Repo, name: string): OperationResult {
-  const current = currentBranch(repo)
-  if (current === null) {
-    throw new GitError('detached HEAD 状態ではマージできません')
-  }
-  const targetId = repo.branches[name]
-  if (targetId === undefined) {
-    throw new GitError(`ブランチ ${name} は存在しません`)
-  }
-  if (name === current) {
-    throw new GitError('現在のブランチ自身はマージできません')
-  }
-
-  const currentId = headCommitId(repo)
-
-  if (isAncestor(repo, targetId, currentId)) {
-    return { repo, output: 'すでに最新です (Already up to date)' }
-  }
-
-  if (isAncestor(repo, currentId, targetId)) {
-    return {
-      repo: { ...repo, branches: { ...repo.branches, [current]: targetId } },
-      output: `Fast-forward: ${current} を ${targetId} まで進めました`,
-    }
-  }
-
-  const { repo: next, commit: mergeCommit } = addCommit(
-    repo,
-    [currentId, targetId],
-    `Merge ${name} into ${current}`,
-  )
-  return {
-    repo: next,
-    output: `マージコミット ${mergeCommit.id} を作成しました`,
-  }
-}
-
-/** ブランチと HEAD からたどれるコミットの集合。reset で外れたコミットは含まれない。 */
+/** ブランチ・リモート追跡ブランチ・HEAD からたどれるコミット。 */
 export function reachableCommits(repo: Repo): Set<CommitId> {
-  const tips = Object.values(repo.branches)
-  if (repo.head.type === 'detached') tips.push(repo.head.id)
+  const tips = [...Object.values(repo.branches), ...Object.values(repo.remoteBranches)]
+  tips.push(headCommitId(repo))
+  if (repo.operation?.type === 'merge') tips.push(repo.operation.theirs)
   const reachable = new Set<CommitId>()
-  const stack = [...tips]
-  while (stack.length > 0) {
-    const id = stack.pop() as CommitId
-    if (reachable.has(id)) continue
-    reachable.add(id)
-    const commit = repo.commits[id]
-    if (commit) stack.push(...commit.parents)
+  for (const tip of tips) {
+    for (const id of ancestors(repo.commits, tip)) reachable.add(id)
   }
   return reachable
 }
 
 const REF_PATTERN = /^([^~^]+)((?:[~^]\d*)*)$/
 
+function remoteRefName(ref: string): string | null {
+  const prefix = `${REMOTE_NAME}/`
+  return ref.startsWith(prefix) ? ref.slice(prefix.length) : null
+}
+
+/** ref を解決できれば CommitId、できなければ null。 */
+export function tryResolveRef(repo: Repo, ref: string): CommitId | null {
+  try {
+    return resolveRef(repo, ref)
+  } catch {
+    return null
+  }
+}
+
 /**
- * コミットの指定 (ブランチ名・コミット ID・HEAD) を解決する。
+ * コミットの指定 (ブランチ名・origin/<ブランチ名>・コミット ID・HEAD) を解決する。
  * 末尾の ~n は第 1 親を n 回、^n は n 番目の親をたどる (n の省略は 1)。
  */
 export function resolveRef(repo: Repo, ref: string): CommitId {
@@ -219,10 +210,13 @@ export function resolveRef(repo: Repo, ref: string): CommitId {
   if (!match) throw new GitError(`'${ref}' はコミットの指定として使えません`)
   const [, base = '', suffix = ''] = match
 
+  const remoteName = remoteRefName(base)
   let id: CommitId
   if (base === 'HEAD' || base === '@') id = headCommitId(repo)
   else if (base in repo.branches) id = repo.branches[base] as CommitId
-  else if (base in repo.commits) id = base
+  else if (remoteName !== null && remoteName in repo.remoteBranches) {
+    id = repo.remoteBranches[remoteName] as CommitId
+  } else if (base in repo.commits) id = base
   else throw new GitError(`'${base}' というブランチやコミットはありません`)
 
   for (const [, op, digits] of suffix.matchAll(/([~^])(\d*)/g)) {
@@ -244,16 +238,559 @@ function parentOf(repo: Repo, id: CommitId, index: number, ref: string): CommitI
   return parent
 }
 
-export type ResetMode = 'soft' | 'mixed' | 'hard'
+/** コミットを指しているブランチなどの名前 (log の表示用)。 */
+export function refNames(repo: Repo, id: CommitId): string[] {
+  const names: string[] = []
+  const current = currentBranch(repo)
+  if (repo.head.type === 'detached' && repo.head.id === id) names.push('HEAD')
+  for (const [name, target] of Object.entries(repo.branches)) {
+    if (target !== id) continue
+    names.push(name === current ? `HEAD -> ${name}` : name)
+  }
+  for (const [name, target] of Object.entries(repo.remoteBranches)) {
+    if (target === id) names.push(`${REMOTE_NAME}/${name}`)
+  }
+  return names
+}
 
-const RESET_NOTES: Readonly<Record<ResetMode, string>> = {
-  soft: '移動前との差分はステージに残ります',
-  mixed: '移動前との差分は作業ディレクトリに残ります (ステージは空になります)',
-  hard: '作業ディレクトリとステージも移動先の状態になり、差分は破棄されます',
+// ---- 作業ディレクトリとステージ ----
+
+/** コミットしていない変更 (ステージ済み・未ステージ・未追跡) があるパス。 */
+export function dirtyPaths(repo: Repo): string[] {
+  const head = headTree(repo)
+  return [
+    ...new Set([...changedPaths(head, repo.index), ...changedPaths(repo.index, repo.workdir)]),
+  ].sort()
+}
+
+/** ステージ済み・未ステージの変更 (未追跡ファイルを除く) があるか。 */
+export function hasTrackedChanges(repo: Repo): boolean {
+  if (!treesEqual(headTree(repo), repo.index)) return true
+  return changedPaths(repo.index, repo.workdir).some((path) => path in repo.index)
+}
+
+export function requireNoOperation(repo: Repo): void {
+  const op = repo.operation
+  if (!op) return
+  throw new GitError(
+    `${op.type} の途中です。コンフリクトを解消して git ${op.type} --continue で続けるか、` +
+      `git ${op.type} --abort で中止してください`,
+  )
 }
 
 /**
+ * HEAD を nextTree のコミットに移すとき、コミットしていない変更を引き継いだ
+ * ステージと作業ディレクトリを返す。変更が上書きされる場合は Git と同じく中止する。
+ */
+export function carryChanges(
+  repo: Repo,
+  nextTree: Tree,
+  action: string,
+): { index: Tree; workdir: Tree } {
+  const head = headTree(repo)
+  const dirty = dirtyPaths(repo)
+  const tracked = dirty.filter((path) => path in head || path in repo.index)
+  const untracked = dirty.filter((path) => !tracked.includes(path))
+
+  const overwritten = tracked.filter((path) => nextTree[path] !== head[path])
+  if (overwritten.length > 0) {
+    throw new GitError(
+      [
+        `error: 次のファイルのローカルの変更は ${action} によって上書きされます:`,
+        ...overwritten.map((path) => `\t${path}`),
+        '変更をコミットするか restore で取り消してから、もう一度実行してください。',
+      ].join('\n'),
+    )
+  }
+  const clobbered = untracked.filter((path) => path in nextTree)
+  if (clobbered.length > 0) {
+    throw new GitError(
+      [
+        `error: 次の追跡されていないファイルは ${action} によって上書きされます:`,
+        ...clobbered.map((path) => `\t${path}`),
+        'ファイルを移動するか削除してから、もう一度実行してください。',
+      ].join('\n'),
+    )
+  }
+
+  let index = nextTree
+  let workdir = nextTree
+  for (const path of dirty) {
+    index = withFile(index, path, repo.index[path])
+    workdir = withFile(workdir, path, repo.workdir[path])
+  }
+  return { index, workdir }
+}
+
+const PATH_PATTERN = /^[^\s/][^\s]*$/
+
+function validatePath(path: string): void {
+  const segments = path.split('/')
+  if (
+    !PATH_PATTERN.test(path) ||
+    segments.some((segment) => segment === '' || segment === '.' || segment === '..')
+  ) {
+    throw new GitError(`'${path}' はファイル名として使えません`)
+  }
+}
+
+/** pathspec ('.'、ファイル名、ディレクトリ名) に当てはまるパス。 */
+function matchPaths(paths: Iterable<string>, spec: string): string[] {
+  const prefix = spec.endsWith('/') ? spec : `${spec}/`
+  return [...paths].filter((path) => spec === '.' || path === spec || path.startsWith(prefix))
+}
+
+export function writeFile(
+  repo: Repo,
+  path: string,
+  text: string,
+  append: boolean,
+): OperationResult {
+  validatePath(path)
+  if (Object.keys(repo.workdir).some((other) => other.startsWith(`${path}/`))) {
+    throw new GitError(`${path} はディレクトリです`)
+  }
+  const content = append ? (repo.workdir[path] ?? '') + text : text
+  return { repo: { ...repo, workdir: withFile(repo.workdir, path, content) }, output: '' }
+}
+
+export function touchFile(repo: Repo, path: string): OperationResult {
+  if (path in repo.workdir) return { repo, output: '' }
+  return writeFile(repo, path, '', false)
+}
+
+export function readFile(repo: Repo, path: string): OperationResult {
+  const content = repo.workdir[path]
+  if (content === undefined) {
+    throw new GitError(`cat: ${path}: そのようなファイルはありません`)
+  }
+  return { repo, output: content.replace(/\n$/, '') }
+}
+
+export function listFiles(repo: Repo): OperationResult {
+  return { repo, output: Object.keys(repo.workdir).sort().join('\n') }
+}
+
+/** シェルの rm。作業ディレクトリからだけ削除する。 */
+export function removeFile(repo: Repo, path: string): OperationResult {
+  if (!(path in repo.workdir)) {
+    throw new GitError(`rm: ${path}: そのようなファイルはありません`)
+  }
+  return { repo: { ...repo, workdir: withFile(repo.workdir, path, undefined) }, output: '' }
+}
+
+function withoutConflicts(repo: Repo, paths: readonly string[]): readonly Conflict[] {
+  return repo.conflicts.filter((conflict) => !paths.includes(conflict.path))
+}
+
+/** git add。pathspec に当てはまる作業ディレクトリの内容をステージする。 */
+export function add(repo: Repo, specs: readonly string[]): OperationResult {
+  if (specs.length === 0) {
+    throw new GitError('ステージするファイルを指定してください (例: git add README.md, git add .)')
+  }
+  const known = new Set([...Object.keys(repo.workdir), ...Object.keys(repo.index)])
+  const paths = new Set<string>()
+  for (const spec of specs) {
+    const matched = matchPaths(known, spec === '-A' || spec === '--all' ? '.' : spec)
+    if (matched.length === 0 && spec !== '.' && spec !== '-A' && spec !== '--all') {
+      throw new GitError(`fatal: pathspec '${spec}' に一致するファイルはありません`)
+    }
+    for (const path of matched) paths.add(path)
+  }
+  let index = repo.index
+  for (const path of paths) index = withFile(index, path, repo.workdir[path])
+  return {
+    repo: { ...repo, index, conflicts: withoutConflicts(repo, [...paths]) },
+    output: '',
+  }
+}
+
+/** git rm。ステージと作業ディレクトリから削除する (--cached ならステージからだけ)。 */
+export function gitRemove(
+  repo: Repo,
+  specs: readonly string[],
+  options: { readonly cached?: boolean; readonly force?: boolean } = {},
+): OperationResult {
+  if (specs.length === 0) throw new GitError('削除するファイルを指定してください')
+  const head = headTree(repo)
+  const paths: string[] = []
+  for (const spec of specs) {
+    const matched = matchPaths(Object.keys(repo.index), spec)
+    if (matched.length === 0) {
+      throw new GitError(`fatal: pathspec '${spec}' に一致するファイルはありません`)
+    }
+    paths.push(...matched)
+  }
+  if (!options.force) {
+    const staged = paths.filter((path) => repo.index[path] !== head[path])
+    const modified = paths.filter(
+      (path) => path in repo.workdir && repo.workdir[path] !== repo.index[path],
+    )
+    const blocked = options.cached
+      ? staged.filter((path) => modified.includes(path))
+      : [...new Set([...staged, ...modified])]
+    if (blocked.length > 0) {
+      throw new GitError(
+        [
+          'error: 次のファイルにはコミットしていない変更があります:',
+          ...blocked.map((path) => `    ${path}`),
+          '(--cached でファイルを残すか、-f で強制的に削除できます)',
+        ].join('\n'),
+      )
+    }
+  }
+  let index = repo.index
+  let workdir = repo.workdir
+  for (const path of paths) {
+    index = withFile(index, path, undefined)
+    if (!options.cached) workdir = withFile(workdir, path, undefined)
+  }
+  return {
+    repo: { ...repo, index, workdir, conflicts: withoutConflicts(repo, paths) },
+    output: paths.map((path) => `rm '${path}'`).join('\n'),
+  }
+}
+
+/**
+ * git restore。staged ならステージを source (既定は HEAD) の内容に、
+ * そうでなければ作業ディレクトリをステージの内容に戻す。
+ */
+export function restore(
+  repo: Repo,
+  specs: readonly string[],
+  options: { readonly staged?: boolean; readonly source?: string } = {},
+): OperationResult {
+  if (specs.length === 0) throw new GitError('元に戻すファイルを指定してください')
+  const sourceTree =
+    options.source !== undefined
+      ? getCommit(repo, resolveRef(repo, options.source)).tree
+      : options.staged
+        ? headTree(repo)
+        : repo.index
+  const target = options.staged ? repo.index : repo.workdir
+  let next = target
+  for (const spec of specs) {
+    const matched = matchPaths(new Set([...Object.keys(sourceTree), ...Object.keys(target)]), spec)
+    if (matched.length === 0) {
+      throw new GitError(`error: pathspec '${spec}' に一致するファイルはありません`)
+    }
+    for (const path of matched) next = withFile(next, path, sourceTree[path])
+  }
+  return {
+    repo: options.staged ? { ...repo, index: next } : { ...repo, workdir: next },
+    output: '',
+  }
+}
+
+// ---- コミット ----
+
+/**
+ * 新しいコミットを作って HEAD (ブランチにいればそのブランチ) を進める。
+ * ステージと作業ディレクトリは変更しない。
+ */
+export function addCommit(
+  repo: Repo,
+  fields: Omit<Commit, 'id'>,
+): { repo: Repo; commit: Commit } {
+  const commit: Commit = { id: `C${repo.nextId}`, ...fields }
+  const commits = { ...repo.commits, [commit.id]: commit }
+  const next: Repo =
+    repo.head.type === 'branch'
+      ? {
+          ...repo,
+          commits,
+          branches: { ...repo.branches, [repo.head.name]: commit.id },
+          nextId: repo.nextId + 1,
+        }
+      : {
+          ...repo,
+          commits,
+          head: { type: 'detached', id: commit.id },
+          nextId: repo.nextId + 1,
+        }
+  return { repo: next, commit }
+}
+
+export function requireNoConflicts(repo: Repo): void {
+  if (repo.conflicts.length === 0) return
+  throw new GitError(
+    [
+      'error: マージされていないファイルがあるため、コミットできません:',
+      ...repo.conflicts.map((conflict) => `\t${conflict.path}`),
+      'ファイルを編集してコンフリクトを解消し、git add してください。',
+    ].join('\n'),
+  )
+}
+
+export function commitSummary(commit: Commit, branch: string | null): string {
+  const where = branch ?? 'detached HEAD'
+  return `[${where} ${commit.id}] ${commit.message}`
+}
+
+export interface CommitOptions {
+  readonly message?: string
+  /** -a: 追跡しているファイルの変更をすべてステージしてからコミットする。 */
+  readonly all?: boolean
+  readonly allowEmpty?: boolean
+  readonly amend?: boolean
+}
+
+/** ステージ (インデックス) の内容でコミットする。 */
+export function commit(repo: Repo, options: CommitOptions = {}): OperationResult {
+  const op = repo.operation
+  if (options.amend) requireNoOperation(repo)
+
+  let staged = repo
+  if (options.all) {
+    let index = repo.index
+    for (const path of Object.keys(repo.index)) index = withFile(index, path, repo.workdir[path])
+    staged = { ...repo, index, conflicts: withoutConflicts(repo, Object.keys(repo.index)) }
+  }
+  requireNoConflicts(staged)
+
+  const headId = headCommitId(staged)
+  const head = getCommit(staged, headId)
+  const parents =
+    options.amend ? head.parents
+    : op?.type === 'merge' ? [headId, op.theirs]
+    : [headId]
+  const parentTree = options.amend
+    ? (staged.commits[head.parents[0] ?? '']?.tree ?? {})
+    : head.tree
+
+  if (op?.type !== 'merge' && !options.allowEmpty && treesEqual(staged.index, parentTree)) {
+    if (options.amend) {
+      throw new GitError('コミットの内容が親と同じになります。--allow-empty を付けてください')
+    }
+    if (op && op.current !== null) {
+      throw new GitError(
+        `${op.current} の変更はすでに含まれているため、コミットが空になります。\n` +
+          `git ${op.type} --skip で飛ばすか、git commit --allow-empty で空のコミットを作ってください`,
+      )
+    }
+    const lines = statusLines(staged)
+    if (!treesEqual(staged.index, staged.workdir)) {
+      lines.push('コミット予定の変更はありません ("git add" や "git commit -a" を使ってください)')
+    }
+    throw new GitError(lines.join('\n'))
+  }
+
+  const picked = op && op.type !== 'merge' && op.current ? getCommit(repo, op.current) : null
+  const defaultMessage =
+    options.amend ? head.message
+    : op?.type === 'merge' ? op.message
+    : picked && op?.type === 'revert' ? revertMessage(picked)
+    : picked ? picked.message
+    : `Commit ${staged.nextId}`
+  const message = options.message?.trim() || defaultMessage
+
+  const { repo: next, commit: created } = addCommit(staged, {
+    parents,
+    message,
+    tree: staged.index,
+    ...(picked && op?.type !== 'revert' ? { source: picked.source ?? picked.id } : {}),
+    ...(picked && op?.type === 'revert' ? { reverts: picked.id } : {}),
+  })
+  const finishedOp: Operation | null =
+    !op ? null
+    : op.type === 'merge' ? null
+    : op.todo.length === 0 && op.type !== 'rebase' ? null
+    : { ...op, current: null }
+  return {
+    repo: { ...next, operation: finishedOp },
+    output: commitSummary(created, currentBranch(next)),
+  }
+}
+
+export function revertMessage(commit: Commit): string {
+  return `Revert "${commit.message}"`
+}
+
+// ---- ブランチ ----
+
+function validateBranchName(name: string): void {
+  if (!BRANCH_NAME_PATTERN.test(name) || name.includes('..') || name === 'HEAD') {
+    throw new GitError(`fatal: '${name}' はブランチ名として使えません`)
+  }
+}
+
+export function createBranch(repo: Repo, name: string, startPoint = 'HEAD'): OperationResult {
+  validateBranchName(name)
+  if (name in repo.branches) {
+    throw new GitError(`fatal: ブランチ '${name}' はすでに存在します`)
+  }
+  return {
+    repo: { ...repo, branches: { ...repo.branches, [name]: resolveRef(repo, startPoint) } },
+    output: '',
+  }
+}
+
+export function listBranches(repo: Repo, options: { readonly remotes?: boolean } = {}): string {
+  const current = currentBranch(repo)
+  const lines: string[] = []
+  if (repo.head.type === 'detached') lines.push(`* (HEAD detached at ${repo.head.id})`)
+  for (const name of Object.keys(repo.branches).sort()) {
+    lines.push(`${name === current ? '*' : ' '} ${name}`)
+  }
+  if (options.remotes) {
+    for (const name of Object.keys(repo.remoteBranches).sort()) {
+      lines.push(`  remotes/${REMOTE_NAME}/${name}`)
+    }
+  }
+  return lines.join('\n')
+}
+
+export function deleteBranch(repo: Repo, name: string, force = false): OperationResult {
+  const target = repo.branches[name]
+  if (target === undefined) {
+    throw new GitError(`error: ブランチ '${name}' は見つかりません`)
+  }
+  if (name === currentBranch(repo)) {
+    throw new GitError(`error: 現在いるブランチ '${name}' は削除できません`)
+  }
+  const upstream = repo.upstreams[name]
+  const upstreamId = upstream === undefined ? undefined : repo.remoteBranches[upstream]
+  const merged =
+    isAncestor(repo, target, headCommitId(repo)) ||
+    (upstreamId !== undefined && isAncestor(repo, target, upstreamId))
+  if (!force && !merged) {
+    throw new GitError(
+      `error: ブランチ '${name}' は完全にはマージされていません。\n` +
+        `本当に削除する場合は 'git branch -D ${name}' を実行してください。`,
+    )
+  }
+  const branches = { ...repo.branches }
+  delete branches[name]
+  const upstreams = { ...repo.upstreams }
+  delete upstreams[name]
+  return {
+    repo: { ...repo, branches, upstreams },
+    output: `ブランチ ${name} を削除しました (${target})`,
+  }
+}
+
+export function renameBranch(repo: Repo, from: string, to: string): OperationResult {
+  const target = repo.branches[from]
+  if (target === undefined) throw new GitError(`error: ブランチ '${from}' は見つかりません`)
+  validateBranchName(to)
+  if (to in repo.branches) throw new GitError(`fatal: ブランチ '${to}' はすでに存在します`)
+  const branches: Record<string, CommitId> = {}
+  for (const [name, id] of Object.entries(repo.branches)) {
+    branches[name === from ? to : name] = id
+  }
+  const upstreams: Record<string, string> = {}
+  for (const [name, remote] of Object.entries(repo.upstreams)) {
+    upstreams[name === from ? to : name] = remote
+  }
+  const head: Head =
+    repo.head.type === 'branch' && repo.head.name === from ? { type: 'branch', name: to } : repo.head
+  return { repo: { ...repo, branches, upstreams, head }, output: '' }
+}
+
+/** git branch -u origin/<ブランチ>: branch の upstream を設定する。 */
+export function setUpstream(repo: Repo, remoteRef: string, branch?: string): OperationResult {
+  const name = branch ?? currentBranch(repo)
+  if (name === null) throw new GitError('fatal: detached HEAD では upstream を設定できません')
+  if (!(name in repo.branches)) throw new GitError(`error: ブランチ '${name}' は見つかりません`)
+  const remoteName = remoteRefName(remoteRef)
+  if (remoteName === null || !(remoteName in repo.remoteBranches)) {
+    throw new GitError(`fatal: '${remoteRef}' というリモート追跡ブランチはありません`)
+  }
+  return {
+    repo: { ...repo, upstreams: { ...repo.upstreams, [name]: remoteName } },
+    output: `ブランチ '${name}' は '${remoteRef}' を追跡するように設定されました。`,
+  }
+}
+
+/** detached HEAD から離れるとき、どこからもたどれなくなるコミットの警告。 */
+function leavingBehindWarning(before: Repo, after: Repo): string | null {
+  if (before.head.type !== 'detached') return null
+  const reachable = reachableCommits(after)
+  const lost = [...ancestors(before.commits, before.head.id)].filter((id) => !reachable.has(id))
+  if (lost.length === 0) return null
+  return (
+    `警告: どのブランチにもつながっていない ${lost.length} 個のコミットを置いていきます: ` +
+    `${lost.join(', ')}\n残したい場合は git branch <新しいブランチ名> ${before.head.id} で保存できます`
+  )
+}
+
+function moveHead(repo: Repo, head: Head, targetId: CommitId, action: string): Repo {
+  const { index, workdir } = carryChanges(repo, getCommit(repo, targetId).tree, action)
+  return { ...repo, head, index, workdir }
+}
+
+function joinLines(...lines: Array<string | null>): string {
+  return lines.filter((line): line is string => line !== null && line !== '').join('\n')
+}
+
+export function switchBranch(
+  repo: Repo,
+  name: string,
+  options: { readonly create?: boolean; readonly startPoint?: string } = {},
+): OperationResult {
+  requireNoOperation(repo)
+  if (options.create) {
+    const created = createBranch(repo, name, options.startPoint).repo
+    const next = moveHead(created, { type: 'branch', name }, created.branches[name] as CommitId, 'switch')
+    return {
+      repo: next,
+      output: joinLines(leavingBehindWarning(repo, next), `新しいブランチ '${name}' に切り替えました`),
+    }
+  }
+
+  if (!(name in repo.branches)) {
+    // origin にだけあるブランチは、追跡ブランチを作って切り替える
+    const remoteId = repo.remoteBranches[name]
+    if (remoteId === undefined) {
+      throw new GitError(`fatal: '${name}' というブランチはありません`)
+    }
+    const created: Repo = {
+      ...repo,
+      branches: { ...repo.branches, [name]: remoteId },
+      upstreams: { ...repo.upstreams, [name]: name },
+    }
+    const next = moveHead(created, { type: 'branch', name }, remoteId, 'switch')
+    return {
+      repo: next,
+      output: joinLines(
+        `ブランチ '${name}' は '${REMOTE_NAME}/${name}' を追跡するように設定されました。`,
+        `新しいブランチ '${name}' に切り替えました`,
+      ),
+    }
+  }
+
+  if (currentBranch(repo) === name) {
+    return { repo, output: `すでに '${name}' にいます` }
+  }
+  const next = moveHead(repo, { type: 'branch', name }, repo.branches[name] as CommitId, 'switch')
+  return {
+    repo: next,
+    output: joinLines(leavingBehindWarning(repo, next), `ブランチ '${name}' に切り替えました`),
+  }
+}
+
+/** HEAD をブランチから切り離して、コミットを直接指す (detached HEAD)。 */
+export function detachHead(repo: Repo, ref: string): OperationResult {
+  requireNoOperation(repo)
+  const id = resolveRef(repo, ref)
+  const next = moveHead(repo, { type: 'detached', id }, id, 'switch')
+  return {
+    repo: next,
+    output: joinLines(
+      leavingBehindWarning(repo, next),
+      `HEAD は ${id} (${getCommit(repo, id).message}) を直接指しています (detached HEAD)`,
+    ),
+  }
+}
+
+// ---- reset ----
+
+export type ResetMode = 'soft' | 'mixed' | 'hard'
+
+/**
  * 現在のブランチ (detached HEAD なら HEAD) を target に移動する。
+ * --soft はステージと作業ディレクトリをそのまま、--mixed はステージを、
+ * --hard はステージと作業ディレクトリも target の内容にする。
  * 外れたコミットは削除せず残すので、コミット ID を指定すれば戻れる。
  */
 export function reset(
@@ -261,14 +798,214 @@ export function reset(
   target = 'HEAD',
   mode: ResetMode = 'mixed',
 ): OperationResult {
+  if (repo.operation && mode !== 'hard') requireNoOperation(repo)
   const targetId = resolveRef(repo, target)
-  const message = repo.commits[targetId]?.message ?? ''
-  const next: Repo =
+  const tree = getCommit(repo, targetId).tree
+  const moved: Repo =
     repo.head.type === 'branch'
       ? { ...repo, branches: { ...repo.branches, [repo.head.name]: targetId } }
       : { ...repo, head: { type: 'detached', id: targetId } }
-  const moved = repo.head.type === 'branch' ? repo.head.name : 'HEAD'
-  const lines = [`${moved} を ${targetId} (${message}) に移動しました (--${mode})`]
-  if (targetId !== headCommitId(repo)) lines.push(RESET_NOTES[mode])
-  return { repo: next, output: lines.join('\n') }
+  const cleared: Repo =
+    mode === 'hard' && repo.operation?.type !== 'rebase'
+      ? { ...moved, operation: null, conflicts: [] }
+      : mode === 'hard'
+        ? { ...moved, conflicts: [] }
+        : moved
+  const next: Repo =
+    mode === 'soft' ? cleared
+    : mode === 'mixed' ? { ...cleared, index: tree }
+    : { ...cleared, index: tree, workdir: tree }
+
+  if (mode === 'hard') {
+    return {
+      repo: next,
+      output: `HEAD is now at ${targetId} ${getCommit(repo, targetId).message}`,
+    }
+  }
+  if (mode === 'mixed') {
+    const unstaged = changedPaths(next.index, next.workdir).filter((path) => path in next.index)
+    return {
+      repo: next,
+      output:
+        unstaged.length === 0
+          ? ''
+          : ['リセット後にステージされていない変更:', ...unstaged.map((path) => `M\t${path}`)].join(
+              '\n',
+            ),
+    }
+  }
+  return { repo: next, output: '' }
+}
+
+/** git reset <path>: ステージを HEAD の内容に戻す (git restore --staged と同じ)。 */
+export function resetPaths(repo: Repo, specs: readonly string[]): OperationResult {
+  return restore(repo, specs, { staged: true })
+}
+
+// ---- 状態の表示 ----
+
+export type FileChange = 'added' | 'modified' | 'deleted'
+
+export interface FileEntry {
+  readonly path: string
+  readonly change: FileChange
+}
+
+export interface WorkspaceStatus {
+  /** HEAD とステージの差分 (コミット予定の変更)。 */
+  readonly staged: readonly FileEntry[]
+  /** ステージと作業ディレクトリの差分 (未追跡ファイルを除く)。 */
+  readonly unstaged: readonly FileEntry[]
+  readonly untracked: readonly string[]
+  readonly conflicts: readonly Conflict[]
+}
+
+function diffEntries(from: Tree, to: Tree, skip: ReadonlySet<string>): FileEntry[] {
+  return changedPaths(from, to)
+    .filter((path) => !skip.has(path))
+    .map((path) => ({
+      path,
+      change: !(path in from) ? 'added' : !(path in to) ? 'deleted' : 'modified',
+    }))
+}
+
+export function workspaceStatus(repo: Repo): WorkspaceStatus {
+  const conflicted = new Set(repo.conflicts.map((conflict) => conflict.path))
+  const untracked = Object.keys(repo.workdir)
+    .filter((path) => !(path in repo.index) && !conflicted.has(path))
+    .sort()
+  const untrackedSet = new Set(untracked)
+  return {
+    staged: diffEntries(headTree(repo), repo.index, conflicted),
+    unstaged: diffEntries(repo.index, repo.workdir, new Set([...conflicted, ...untrackedSet])),
+    untracked,
+    conflicts: repo.conflicts,
+  }
+}
+
+const CHANGE_LABELS: Readonly<Record<FileChange, string>> = {
+  added: '新規ファイル:',
+  modified: '変更:',
+  deleted: '削除:',
+}
+
+const CONFLICT_LABELS: Readonly<Record<Conflict['kind'], string>> = {
+  'both-modified': '両方とも変更:',
+  'both-added': '両方とも追加:',
+  'deleted-by-us': 'こちらで削除:',
+  'deleted-by-them': 'あちらで削除:',
+}
+
+function countOnly(repo: Repo, from: CommitId, notIn: CommitId): number {
+  const exclude = ancestors(repo.commits, notIn)
+  return [...ancestors(repo.commits, from)].filter((id) => !exclude.has(id)).length
+}
+
+/** ブランチと upstream の関係 (git status の 2 行目)。 */
+export function trackingLine(repo: Repo, branch: string): string | null {
+  const upstream = repo.upstreams[branch]
+  if (upstream === undefined) return null
+  const remoteId = repo.remoteBranches[upstream]
+  const localId = repo.branches[branch]
+  const name = `${REMOTE_NAME}/${upstream}`
+  if (remoteId === undefined || localId === undefined) {
+    return `このブランチは '${name}' を追跡していますが、リモートにありません。`
+  }
+  const ahead = countOnly(repo, localId, remoteId)
+  const behind = countOnly(repo, remoteId, localId)
+  if (ahead === 0 && behind === 0) return `このブランチは '${name}' と比較して最新です。`
+  if (behind === 0) {
+    return `このブランチは '${name}' よりも ${ahead} コミット進んでいます。("git push" で公開できます)`
+  }
+  if (ahead === 0) {
+    return `このブランチは '${name}' よりも ${behind} コミット遅れています。fast-forward できます。("git pull" で更新できます)`
+  }
+  return `このブランチと '${name}' は分岐しており、それぞれ ${ahead} と ${behind} の異なるコミットがあります。`
+}
+
+function statusLines(repo: Repo): string[] {
+  const lines: string[] = []
+  const branch = currentBranch(repo)
+  const op = repo.operation
+  if (op?.type === 'rebase') {
+    lines.push(`リベース中です (${op.branch ?? 'detached HEAD'} を ${headCommitId(repo)} の上に付け替えています)`)
+  } else if (branch === null) {
+    lines.push(`HEAD は ${headCommitId(repo)} で切り離されています (detached HEAD)`)
+  } else {
+    lines.push(`ブランチ ${branch}`)
+    const tracking = trackingLine(repo, branch)
+    if (tracking) lines.push(tracking)
+  }
+  if (op?.type === 'merge') {
+    lines.push(
+      repo.conflicts.length > 0
+        ? 'マージしていないパスがあります。(コンフリクトを解消して "git commit" を実行してください)'
+        : 'すべてのコンフリクトが解消されました。"git commit" でマージを完了してください',
+    )
+  } else if (op && op.current !== null) {
+    lines.push(`${op.type} の途中です (${op.current} を適用中)`)
+  }
+  if (op) lines.push(`(中止するには "git ${op.type} --abort")`)
+
+  const status = workspaceStatus(repo)
+  if (status.staged.length > 0) {
+    lines.push('', 'コミット予定の変更点:')
+    for (const entry of status.staged) lines.push(`\t${CHANGE_LABELS[entry.change]}  ${entry.path}`)
+  }
+  if (status.conflicts.length > 0) {
+    lines.push('', 'マージされていないパス:')
+    for (const conflict of status.conflicts) {
+      lines.push(`\t${CONFLICT_LABELS[conflict.kind]}  ${conflict.path}`)
+    }
+  }
+  if (status.unstaged.length > 0) {
+    lines.push('', 'コミット予定に含まれていない変更:')
+    for (const entry of status.unstaged) {
+      lines.push(`\t${CHANGE_LABELS[entry.change]}  ${entry.path}`)
+    }
+  }
+  if (status.untracked.length > 0) {
+    lines.push('', '追跡されていないファイル:')
+    for (const path of status.untracked) lines.push(`\t${path}`)
+  }
+  if (
+    status.staged.length + status.unstaged.length + status.untracked.length +
+      status.conflicts.length ===
+    0
+  ) {
+    lines.push('', 'コミットするものはありません。作業ツリーはクリーンです')
+  }
+  return lines
+}
+
+export function status(repo: Repo): OperationResult {
+  return { repo, output: statusLines(repo).join('\n') }
+}
+
+/** git log。新しいものから順に、start から (all ならすべての参照から) たどれるコミットを表示する。 */
+export function log(
+  repo: Repo,
+  options: { readonly oneline?: boolean; readonly all?: boolean; readonly start?: string } = {},
+): OperationResult {
+  const tips = options.all
+    ? [...Object.values(repo.branches), ...Object.values(repo.remoteBranches), headCommitId(repo)]
+    : [resolveRef(repo, options.start ?? 'HEAD')]
+  const ids = new Set<CommitId>()
+  for (const tip of tips) for (const id of ancestors(repo.commits, tip)) ids.add(id)
+  const sorted = [...ids].sort((a, b) => Number(b.slice(1)) - Number(a.slice(1)))
+  const lines: string[] = []
+  for (const id of sorted) {
+    const commit = getCommit(repo, id)
+    const names = refNames(repo, id)
+    const decoration = names.length > 0 ? ` (${names.join(', ')})` : ''
+    if (options.oneline) {
+      lines.push(`${id}${decoration} ${commit.message}`)
+    } else {
+      if (lines.length > 0) lines.push('')
+      lines.push(`commit ${id}${decoration}`)
+      if (commit.parents.length > 1) lines.push(`Merge: ${commit.parents.join(' ')}`)
+      lines.push('', `    ${commit.message}`)
+    }
+  }
+  return { repo, output: lines.join('\n') }
 }

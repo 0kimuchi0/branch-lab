@@ -1,6 +1,5 @@
-import { useEffect, useMemo, useRef } from 'react'
-import type { Repo } from '../git/model'
-import { computeLayout } from '../graph/layout'
+import { useEffect, useRef } from 'react'
+import type { GraphLayout } from '../graph/layout'
 
 const LANE_COLOR_COUNT = 6
 
@@ -14,11 +13,12 @@ function truncate(text: string, max: number): string {
 }
 
 interface GraphViewProps {
-  readonly repo: Repo
+  readonly layout: GraphLayout
+  /** スクリーンリーダー向けのグラフの名前。 */
+  readonly label: string
 }
 
-export function GraphView({ repo }: GraphViewProps) {
-  const layout = useMemo(() => computeLayout(repo), [repo])
+export function GraphView({ layout, label }: GraphViewProps) {
   const scrollRef = useRef<HTMLDivElement>(null)
 
   // コミットが増えたとき、最新側 (右端) が見えるようにスクロールする
@@ -32,7 +32,7 @@ export function GraphView({ repo }: GraphViewProps) {
       <svg
         className="graph"
         role="img"
-        aria-label="コミットグラフ"
+        aria-label={label}
         width={layout.width}
         height={layout.height}
         viewBox={`0 0 ${layout.width} ${layout.height}`}

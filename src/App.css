@@ -137,6 +137,16 @@
   stroke: var(--error);
 }
 
+.label-remote rect {
+  fill: var(--graph-bg);
+  stroke-dasharray: 4 3;
+}
+
+.label-remote text {
+  fill: var(--text-muted);
+  font-weight: 500;
+}
+
 @keyframes node-in {
   from {
     opacity: 0;

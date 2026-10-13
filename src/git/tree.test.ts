@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { changedPaths, mergeTrees, treesEqual, withFile } from './tree'
+import { changedPaths, mergeText, mergeTrees, splitLines, treesEqual, withFile } from './tree'
 
 const labels = { ours: 'HEAD', theirs: 'feature' }
 
@@ -28,11 +28,36 @@ describe('mergeTrees', () => {
     expect(result.conflicts).toEqual([])
   })
 
-  it('両方が別々に変えたファイルはマーカー付きでコンフリクトにする', () => {
-    const result = mergeTrees({ a: '1' }, { a: '2' }, {}, labels)
-    expect(result.conflicts).toEqual(['a'])
-    expect(result.tree['a']).toBe(
-      '<<<<<<< HEAD\n2\n=======\n(削除)\n>>>>>>> feature',
-    )
+  it('片方が削除し、もう片方が変更したファイルは変更側を残してコンフリクトにする', () => {
+    const result = mergeTrees({ a: '1\n' }, { a: '2\n' }, {}, labels)
+    expect(result).toEqual({ tree: { a: '2\n' }, conflicts: [{ path: 'a', kind: 'deleted-by-them' }] })
+  })
+
+  it('両方が同じファイルを変えたら行単位でマージする', () => {
+    const merged = mergeTrees({ a: '1\n2\n3\n' }, { a: '1!\n2\n3\n' }, { a: '1\n2\n3!\n' }, labels)
+    expect(merged).toEqual({ tree: { a: '1!\n2\n3!\n' }, conflicts: [] })
+  })
+})
+
+describe('mergeText', () => {
+  it('改行を残したまま行に分ける', () => {
+    expect(splitLines('a\nb')).toEqual(['a\n', 'b'])
+    expect(splitLines('')).toEqual([])
+  })
+
+  it('同じ箇所を別々に変えたら Git と同じマーカーを入れ、ほかの行は残す', () => {
+    const result = mergeText('top\nx\nend\n', 'top\nours\nend\n', 'top\ntheirs\nend\n', labels)
+    expect(result.conflict).toBe(true)
+    expect(result.text).toBe('top\n<<<<<<< HEAD\nours\n=======\ntheirs\n>>>>>>> feature\nend\n')
+  })
+
+  it('両方が末尾に別々に追記したらコンフリクトになる', () => {
+    const result = mergeText('a\n', 'a\nb\n', 'a\nc\n', labels)
+    expect(result.text).toBe('a\n<<<<<<< HEAD\nb\n=======\nc\n>>>>>>> feature\n')
+  })
+
+  it('base がなくても (両方で追加) 共通部分は残す', () => {
+    const result = mergeText('', 'same\nours\n', 'same\ntheirs\n', labels)
+    expect(result.text).toBe('same\n<<<<<<< HEAD\nours\n=======\ntheirs\n>>>>>>> feature\n')
   })
 })

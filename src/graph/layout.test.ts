@@ -1,15 +1,12 @@
 import { describe, expect, it } from 'vitest'
-import { executeCommand } from '../git/commands'
-import { createRepo, type Repo } from '../git/model'
-import { computeLayout } from './layout'
+import { run } from '../test/run'
+import { computeLayout, computeRemoteLayout } from './layout'
 
-function run(lines: string[]): Repo {
-  return lines.reduce((repo, line) => executeCommand(repo, line).repo, createRepo())
-}
+const EMPTY = 'git commit --allow-empty'
 
 describe('computeLayout', () => {
   it('main は最上段 (レーン 0) に一直線に並ぶ', () => {
-    const layout = computeLayout(run(['commit', 'commit']))
+    const layout = computeLayout(run([EMPTY, EMPTY]))
     const nodes = layout.nodes
     expect(nodes.map((n) => n.lane)).toEqual([0, 0, 0])
     expect(nodes[0]!.x).toBeLessThan(nodes[1]!.x)
@@ -18,9 +15,7 @@ describe('computeLayout', () => {
   })
 
   it('ブランチ上のコミットは別レーンに置かれる', () => {
-    const layout = computeLayout(
-      run(['switch -c feature', 'commit', 'switch main', 'commit']),
-    )
+    const layout = computeLayout(run(['git switch -c feature', EMPTY, 'git switch main', EMPTY]))
     const byId = new Map(layout.nodes.map((n) => [n.id, n]))
     expect(byId.get('C0')!.lane).toBe(0)
     expect(byId.get('C2')!.lane).toBe(0) // main 側のコミット
@@ -30,7 +25,7 @@ describe('computeLayout', () => {
 
   it('マージコミットは両親から辺が伸び、合流線は合流元の色になる', () => {
     const layout = computeLayout(
-      run(['switch -c feature', 'commit', 'switch main', 'commit', 'merge feature']),
+      run(['git switch -c feature', EMPTY, 'git switch main', EMPTY, 'git merge feature']),
     )
     const mergeNode = layout.nodes.find((n) => n.isMerge)!
     expect(mergeNode.lane).toBe(0)
@@ -39,24 +34,27 @@ describe('computeLayout', () => {
     expect(incoming.map((e) => e.lane).sort()).toEqual([0, 1])
   })
 
-  it('ブランチ名ラベルは指しているコミットの上に表示され、HEAD が最も近い', () => {
-    const layout = computeLayout(run(['branch feature']))
+  it('ラベルは HEAD・ブランチ・リモート追跡ブランチの順にコミットから近い', () => {
+    const layout = computeLayout(run(['git branch feature']))
     const labels = layout.labels
-    expect(labels.map((l) => l.text)).toEqual(['HEAD → main', 'feature'])
+    expect(labels.map((l) => [l.text, l.kind])).toEqual([
+      ['HEAD → main', 'current'],
+      ['feature', 'branch'],
+      ['origin/main', 'remote'],
+    ])
     expect(labels[0]!.y).toBeGreaterThan(labels[1]!.y)
+    expect(labels[1]!.y).toBeGreaterThan(labels[2]!.y)
     expect(labels.every((l) => l.x === layout.nodes[0]!.x)).toBe(true)
   })
 
   it('コミットが増えると幅が広がる', () => {
     const small = computeLayout(run([]))
-    const large = computeLayout(run(['commit', 'commit', 'commit']))
+    const large = computeLayout(run([EMPTY, EMPTY, EMPTY]))
     expect(large.width).toBeGreaterThan(small.width)
   })
 
   it('reset で外れたコミットは別レーンに置かれ、到達不能として扱われる', () => {
-    const layout = computeLayout(
-      run(['commit', 'commit', 'reset --hard HEAD~2', 'commit']),
-    )
+    const layout = computeLayout(run([EMPTY, EMPTY, 'git reset --hard HEAD~2', EMPTY]))
     const byId = new Map(layout.nodes.map((n) => [n.id, n]))
     expect(byId.get('C3')).toMatchObject({ lane: 0, reachable: true })
     expect(byId.get('C1')).toMatchObject({ lane: 1, reachable: false })
@@ -68,5 +66,23 @@ describe('computeLayout', () => {
     const edge = (key: string) => layout.edges.find((e) => e.key === key)!
     expect(edge('C0->C1').reachable).toBe(false)
     expect(edge('C0->C3').reachable).toBe(true)
+  })
+
+  it('rebase で付け替える前のコミットは薄くなる', () => {
+    const layout = computeLayout(
+      run(['git switch -c feature', EMPTY, 'git switch main', 'echo x > a.txt', 'git add .', 'git commit -m m', 'git switch feature', 'git rebase main']),
+    )
+    const byId = new Map(layout.nodes.map((n) => [n.id, n]))
+    expect(byId.get('C1')!.reachable).toBe(false)
+    expect(byId.get('C3')!.reachable).toBe(true)
+  })
+})
+
+describe('computeRemoteLayout', () => {
+  it('リモートが持っているコミットとブランチだけを描く', () => {
+    const repo = run([EMPTY, 'git push', EMPTY])
+    const layout = computeRemoteLayout(repo)
+    expect(layout.nodes.map((n) => n.id).sort()).toEqual(['C0', 'C1'])
+    expect(layout.labels.map((l) => l.text)).toEqual(['main'])
   })
 })
