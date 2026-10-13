@@ -1,0 +1,68 @@
+:root {
+  color-scheme: light dark;
+
+  --bg: #f6f7f9;
+  --surface: #ffffff;
+  --border: #d9dde3;
+  --text: #1c2430;
+  --text-muted: #5d6877;
+  --accent: #2f6fed;
+  --accent-text: #ffffff;
+  --error: #c8362b;
+  --graph-bg: #fbfcfd;
+
+  --lane-0: #2f6fed;
+  --lane-1: #e0752b;
+  --lane-2: #2e9e6b;
+  --lane-3: #a24fd1;
+  --lane-4: #cf3f78;
+  --lane-5: #3a9bb5;
+
+  font-family:
+    system-ui, -apple-system, 'Segoe UI', 'Hiragino Sans', 'Noto Sans JP',
+    'Yu Gothic UI', sans-serif;
+  line-height: 1.5;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #12161c;
+    --surface: #1b212a;
+    --border: #2f3844;
+    --text: #e6eaf0;
+    --text-muted: #9aa5b4;
+    --accent: #5b92ff;
+    --accent-text: #0e1218;
+    --error: #ff7d72;
+    --graph-bg: #161b22;
+
+    --lane-0: #5b92ff;
+    --lane-1: #ff9a55;
+    --lane-2: #4cc790;
+    --lane-3: #c785f0;
+    --lane-4: #f56d9c;
+    --lane-5: #5cc3dd;
+  }
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  min-height: 100vh;
+  background: var(--bg);
+  color: var(--text);
+}
+
+button,
+input {
+  font: inherit;
+}
+
+code,
+pre,
+.terminal input {
+  font-family: ui-monospace, 'SF Mono', Menlo, Consolas, 'Noto Sans Mono CJK JP', monospace;
+}
