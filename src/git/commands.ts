@@ -617,9 +617,18 @@ function runShell(repo: Repo, name: string, tokens: readonly Token[]): Operation
 /** エディタを保存して閉じる操作を表すコマンド。ログと共有 URL にはこの形で残る。 */
 export const EDITOR_SAVE = ':wq'
 
-/** エディタを保存して閉じるコマンドを作る。text を省略すると開いたときの内容のまま閉じる。 */
+/**
+ * エディタを保存して閉じるコマンドを作る。text を省略すると開いたときの内容のまま閉じる。
+ * '#' で始まる行は Git が読み飛ばすので、ログと共有 URL を短くするために取り除いて記録する。
+ */
 export function editorSaveCommand(text?: string): string {
-  return text === undefined ? EDITOR_SAVE : `${EDITOR_SAVE} ${JSON.stringify(text)}`
+  if (text === undefined) return EDITOR_SAVE
+  const kept = text
+    .split('\n')
+    .filter((line) => !line.startsWith('#'))
+    .join('\n')
+    .replace(/\s+$/, '')
+  return `${EDITOR_SAVE} ${JSON.stringify(kept)}`
 }
 
 /** エディタを保存したコマンドなら、保存した内容 (開いたときのままなら null) を返す。 */

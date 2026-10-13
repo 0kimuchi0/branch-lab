@@ -1,7 +1,17 @@
 import { useMemo } from 'react'
 import { computeLayout, computeRemoteLayout } from '../graph/layout'
+import { parseEditorSave } from '../git/commands'
 import type { BuiltPuzzle } from '../puzzles/puzzles'
 import { GraphView } from './GraphView'
+
+/** 解答例の 1 行。エディタの保存は、書く内容がわかる形にする。 */
+function solutionLine(command: string): string {
+  const saved = parseEditorSave(command)
+  if (!saved) return command
+  if (saved.text === null) return '(エディタをそのまま保存して閉じる)'
+  const body = saved.text.trimEnd().split('\n').map((line) => `    ${line}`).join('\n')
+  return `(エディタを次の内容にして保存して閉じる)\n${body}`
+}
 
 interface PuzzlePanelProps {
   readonly puzzles: readonly BuiltPuzzle[]
@@ -56,7 +66,7 @@ export function PuzzlePanel({ puzzles, index, solved, solvedIds, onSelect }: Puz
         </details>
         <details>
           <summary>解答例</summary>
-          <pre>{(puzzle.solutions[0] ?? []).join('\n')}</pre>
+          <pre>{(puzzle.solutions[0] ?? []).map(solutionLine).join('\n')}</pre>
         </details>
       </div>
 

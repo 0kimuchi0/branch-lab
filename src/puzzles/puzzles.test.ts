@@ -57,6 +57,27 @@ describe('isSolved', () => {
     expect(isSolved(built, run(['git merge --no-edit feature', 'git add .', 'git commit --no-edit'], built.start))).toBe(false)
   })
 
+  it('rebase -i の代わりに reset --soft でまとめても正解', () => {
+    const built = buildPuzzle(puzzle('squash'))
+    expect(isSolved(built, run(['git reset --soft HEAD~3', 'git commit -m "機能を追加"'], built.start))).toBe(true)
+    // まとめずに pick のまま閉じると不正解
+    expect(isSolved(built, run(['git rebase -i HEAD~3', ':wq'], built.start))).toBe(false)
+  })
+
+  it('stash した変更を戻し忘れると不正解', () => {
+    const built = buildPuzzle(puzzle('stash'))
+    const forgot = run(['git stash', 'echo "fix" > fix.txt', 'git add fix.txt', 'git commit -m fix'], built.start)
+    expect(isSolved(built, forgot)).toBe(false)
+    // 書きかけの変更まで一緒にコミットしても不正解
+    expect(isSolved(built, run(['echo "fix" > fix.txt', 'git add .', 'git commit -m fix'], built.start))).toBe(false)
+  })
+
+  it('エディタが開いたままでは正解にならない', () => {
+    const built = buildPuzzle(puzzle('merge'))
+    expect(isSolved(built, run(['git merge feature'], built.start))).toBe(false)
+    expect(isSolved(built, run(['git merge feature', ':wq'], built.start))).toBe(true)
+  })
+
   it('amend の代わりに新しいコミットを足すと不正解', () => {
     const built = buildPuzzle(puzzle('amend'))
     const repo = run(['echo "<h1>Hello</h1>" > index.html', 'git commit -am "typo を修正"'], built.start)

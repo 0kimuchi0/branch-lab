@@ -1,5 +1,5 @@
 /** お題の一覧と、お題から初期状態・目標の Repo を作る関数。 */
-import { executeCommand } from '../git/commands'
+import { editorSaveCommand, executeCommand } from '../git/commands'
 import { createRepo, headTree, type Repo } from '../git/model'
 import { matchesGoal } from './match'
 
@@ -47,7 +47,7 @@ export const PUZZLES: readonly Puzzle[] = [
     title: '直前のコミットを直す',
     description:
       '直前のコミットで index.html の Hello を Helo と書き間違えました。新しいコミットを増やさずに、直前のコミットを修正しましょう。',
-    hint: 'ファイルを直して git add したら、git commit --amend で直前のコミットを作り直せます。',
+    hint: 'ファイルを直して git add したら、git commit --amend で直前のコミットを作り直せます。メッセージを書くエディタが開くので、そのまま保存して閉じます (--no-edit を付けると開きません)。',
     setup: change('index.html', '<h1>Helo</h1>', '見出しを追加'),
     solutions: [['echo "<h1>Hello</h1>" > index.html', 'git add index.html', 'git commit --amend -m "見出しを追加"']],
     check: (repo) => headTree(repo)['index.html']?.includes('Hello') ?? false,
@@ -65,7 +65,7 @@ export const PUZZLES: readonly Puzzle[] = [
     id: 'merge',
     title: 'マージする',
     description: 'feature ブランチの変更を main に取り込み、マージコミットを作りましょう。',
-    hint: 'main にいる状態で git merge --no-edit feature を実行します。',
+    hint: 'main にいる状態で git merge feature を実行します。マージコミットのメッセージを書くエディタが開くので、そのまま「保存して閉じる」を押せば完了です (--no-edit を付けるとエディタを開きません)。',
     setup: DIVERGED,
     solutions: [['git merge --no-edit feature']],
   },
@@ -74,7 +74,7 @@ export const PUZZLES: readonly Puzzle[] = [
     title: 'コンフリクトを解消する',
     description:
       'main と feature の両方で README.md の同じ行を書き換えています。feature を main にマージし、コンフリクトを解消してマージを完了させましょう。',
-    hint: 'git merge --no-edit feature でコンフリクトしたら、echo "..." > README.md でファイルを書き直し、git add README.md してから git commit します。',
+    hint: 'git merge feature でコンフリクトしたら、echo "..." > README.md でファイルを書き直し、git add README.md してから git commit します。エディタにマージのメッセージが入っているので、そのまま保存して閉じます。',
     setup: [
       'git switch -c feature',
       'echo "# BranchLab (feature 版)" > README.md',
@@ -127,7 +127,7 @@ export const PUZZLES: readonly Puzzle[] = [
     title: '公開済みのコミットを打ち消す',
     description:
       '「問題のある変更」はすでに push 済みです。履歴は書き換えずに、その変更を打ち消すコミットを作って push しましょう。',
-    hint: 'git revert --no-edit HEAD で直前のコミットを打ち消すコミットを作り、git push で origin に送ります。',
+    hint: 'git revert HEAD で直前のコミットを打ち消すコミットを作り (エディタが開いたら保存して閉じます)、git push で origin に送ります。',
     setup: [...change('a.txt', '機能 A', '機能 A'), ...change('b.txt', '問題のある変更', '問題のある変更'), 'git push'],
     solutions: [['git revert --no-edit HEAD', 'git push']],
     checkRemote: true,
@@ -137,13 +137,47 @@ export const PUZZLES: readonly Puzzle[] = [
     title: '他の人の変更を取り込んで push',
     description:
       '自分がコミットしている間に、他の人が origin/main に push しました。他の人の変更を取り込んでから、自分のコミットを push しましょう (マージでもリベースでも構いません)。',
-    hint: 'そのまま git push すると拒否されます。git pull --no-rebase (マージ) か git pull --rebase (リベース) で取り込んでから git push します。',
+    hint: 'そのまま git push すると拒否されます。git pull --no-rebase (マージ) か git pull --rebase (リベース) で取り込んでから git push します。マージのときはエディタが開くので、保存して閉じます。',
     setup: ['teammate', ...change('app.txt', '自分の変更', '自分の変更')],
     solutions: [
       ['git pull --no-rebase --no-edit', 'git push'],
       ['git pull --rebase', 'git push'],
     ],
     checkRemote: true,
+  },
+  {
+    id: 'squash',
+    title: 'コミットをまとめる',
+    description:
+      '小さな修正のコミットが 3 つに分かれてしまいました。push する前に、git rebase -i で 1 つのコミットにまとめましょう。',
+    hint: 'git rebase -i HEAD~3 で todo のエディタが開きます。2 行目と 3 行目の pick を fixup (または squash) に書き換えて保存します。',
+    setup: [
+      ...change('app.txt', '機能', '機能を追加'),
+      ...change('app.txt', 'typo を修正', 'typo を修正'),
+      ...change('app.txt', 'さらに修正', 'さらに修正'),
+    ],
+    solutions: [['git rebase -i HEAD~3', editorSaveCommand('pick C1\nfixup C2\nfixup C3\n')]],
+    check: (repo) => headTree(repo)['app.txt']?.includes('さらに修正') ?? false,
+  },
+  {
+    id: 'stash',
+    title: '作業を退避して急ぎの修正',
+    description:
+      'README.md を書きかけのところで、急ぎの修正を頼まれました。書きかけの変更は含めずに fix.txt を追加するコミットを作り、そのあと書きかけの作業を作業ディレクトリに戻しましょう。',
+    hint: 'git stash で書きかけの変更を退避し、修正をコミットしてから git stash pop で戻します。',
+    setup: ['echo "書きかけの説明" >> README.md'],
+    solutions: [
+      ['git stash', 'echo "fix" > fix.txt', 'git add fix.txt', 'git commit -m "急ぎの修正"', 'git stash pop'],
+    ],
+    check: (repo) => {
+      const head = headTree(repo)
+      return (
+        'fix.txt' in head &&
+        !(head['README.md'] ?? '').includes('書きかけ') &&
+        (repo.workdir['README.md'] ?? '').includes('書きかけ') &&
+        repo.stash.length === 0
+      )
+    },
   },
 ]
 

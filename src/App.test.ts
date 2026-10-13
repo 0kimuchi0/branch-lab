@@ -59,7 +59,7 @@ describe('描画のスモークテスト', () => {
       }),
     )
     expect(html).toContain('4. マージする')
-    expect(html).toContain('1 / 10 問クリア')
+    expect(html).toContain('1 / 12 問クリア')
     expect(html).toContain('正解です！')
     expect(html).toContain('目標のローカルリポジトリのコミットグラフ')
   })

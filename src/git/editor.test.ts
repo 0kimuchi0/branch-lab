@@ -65,6 +65,8 @@ describe('エディタ', () => {
 
   it('保存したコマンドは、内容ごとログと共有 URL に残せる形になる', () => {
     expect(parseEditorSave(editorSaveCommand('a "b"\nc'))).toEqual({ text: 'a "b"\nc' })
+    // Git が読み飛ばすコメント行は記録しない
+    expect(parseEditorSave(editorSaveCommand('pick C1\n# コメント\n\n'))).toEqual({ text: 'pick C1' })
     expect(parseEditorSave(':wq')).toEqual({ text: null })
     expect(parseEditorSave('git status')).toBeNull()
   })
