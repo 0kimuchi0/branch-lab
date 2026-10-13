@@ -35,6 +35,81 @@
   align-items: start;
 }
 
+.header-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px 12px;
+  margin-top: 10px;
+}
+
+.app-header .header-row .status {
+  margin-top: 0;
+}
+
+.share {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+}
+
+.share-button {
+  padding: 3px 12px;
+  border: 1px solid var(--accent);
+  border-radius: 999px;
+  background: transparent;
+  color: var(--accent);
+  font-size: 0.85rem;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.share-button:hover {
+  background: color-mix(in srgb, var(--accent) 10%, transparent);
+}
+
+.share-url {
+  width: min(420px, 100%);
+  padding: 3px 8px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--graph-bg);
+  color: var(--text);
+  font-family: ui-monospace, 'SF Mono', Menlo, Consolas, monospace;
+  font-size: 0.75rem;
+}
+
+.app-header .share-notice {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: fit-content;
+  max-width: 100%;
+  margin-top: 8px;
+  padding: 4px 6px 4px 12px;
+  border-radius: 8px;
+  color: var(--text);
+  font-size: 0.85rem;
+}
+
+.share-notice-loaded {
+  background: color-mix(in srgb, var(--lane-2) 14%, var(--surface));
+}
+
+.share-notice-invalid {
+  background: color-mix(in srgb, var(--error) 12%, var(--surface));
+}
+
+.share-notice button {
+  border: none;
+  background: transparent;
+  color: var(--text-muted);
+  font-size: 1rem;
+  line-height: 1;
+  cursor: pointer;
+}
+
 .app-content {
   display: flex;
   flex-direction: column;

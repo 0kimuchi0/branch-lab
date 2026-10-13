@@ -29,8 +29,11 @@ React + TypeScript + Vite、テストは Vitest。UI の文言は日本語。
 - `src/puzzles/`: お題の定義 (`puzzles.ts`) と正解判定 (`match.ts`)。
   お題の目標は「初期状態に解答例を実行した結果」で作り、ID ではなく履歴の形と由来で比べる。
   お題を足したら、解答例で正解になり初期状態では正解にならないことを `puzzles.test.ts` が確かめる。
+- `src/share/share.ts`: URL 共有。ハッシュには状態ではなくモード・お題 ID・コマンド列を入れ、開いた側で再実行して復元する。
+  形式を変えるときは `VERSION` を上げる。コマンドから `Repo` が決定的に作られることが前提なので、
+  モデルに乱数や時刻を持ち込まない。
 - `src/components/`: `GraphView` (SVG 描画とアニメーション)、`FileArea`、`Workspace` (4 領域)、
-  `PuzzlePanel`、`Terminal` (入力欄とログ)。
+  `PuzzlePanel`、`ShareButton`、`Terminal` (入力欄とログ)。
 - `src/App.tsx`: モード (自由に試す / お題)・`Repo`・実行ログの状態管理。
 - テストでコマンドを順に実行するときは `src/test/run.ts` の `run` を使う。
 
@@ -44,5 +47,4 @@ enum やコンストラクタの引数プロパティは使わず、型のイン
 
 ## 今後の予定
 
-1. 現在の状態を URL で共有
-2. Vercel または GitHub Pages で公開
+1. Vercel または GitHub Pages で公開
