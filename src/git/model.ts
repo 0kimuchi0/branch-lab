@@ -5,6 +5,7 @@
 import {
   changedPaths,
   conflictKey,
+  parseGitlink,
   treesEqual,
   withFile,
   type Conflict,
@@ -254,6 +255,27 @@ export interface Repo {
    * 今いる worktree の状態は Repo の head・index・workdir などにある。
    */
   readonly worktrees: Readonly<Record<string, WorktreeState>>
+  /**
+   * 今いる worktree でチェックアウトしているサブモジュール (パス → そのリポジトリ)。
+   * サブモジュールも 1 つの Repo で、コミット ID の頭文字 (idPrefix) で区別する。
+   */
+  readonly submodules: Readonly<Record<string, Repo>>
+  /** cd でサブモジュールの中にいるなら、そのパス。コマンドはそのサブモジュールで実行する。 */
+  readonly submodule: string | null
+  /** サブモジュールの取得元 (URL → 模擬のサーバー)。どの worktree から clone しても同じ中身になる。 */
+  readonly libraries: Readonly<Record<string, Library>>
+  /** コミット ID の頭文字 (既定は C)。 */
+  readonly idPrefix?: string
+}
+
+/**
+ * サブモジュールの取得元になる、模擬のサーバー上のリポジトリ。
+ * prefix はそのコミット ID の頭文字、nextId は次に採番する番号 (clone どうしで ID がぶつからないように共有する)。
+ */
+export interface Library {
+  readonly remote: Remote
+  readonly prefix: string
+  readonly nextId: number
 }
 
 /** worktree ごとに持つ状態 (それ以外のブランチ・コミット・stash・設定などは共有する)。 */
@@ -268,6 +290,7 @@ export interface WorktreeState {
   /** この worktree の HEAD の reflog。 */
   readonly headReflog: readonly ReflogEntry[]
   readonly rererePending: RerereState['pending']
+  readonly submodules: Readonly<Record<string, Repo>>
 }
 
 /** メインの worktree (clone したディレクトリ) のパス。 */
@@ -285,6 +308,7 @@ export function currentWorktreeState(repo: Repo): WorktreeState {
     bisect: repo.bisect,
     headReflog: repo.reflogs['HEAD'] ?? [],
     rererePending: repo.rerere.pending,
+    submodules: repo.submodules,
   }
 }
 
@@ -308,6 +332,8 @@ export function enterWorktree(repo: Repo, path: string): Repo {
     rerere: { ...repo.rerere, pending: target.rererePending },
     worktree: path,
     worktrees,
+    submodules: target.submodules,
+    submodule: null,
   }
 }
 
@@ -384,6 +410,9 @@ export function createRepo(): Repo {
     rerere: EMPTY_RERERE,
     worktree: MAIN_WORKTREE,
     worktrees: {},
+    submodules: {},
+    submodule: null,
+    libraries: {},
     reflogs: {
       HEAD: [{ id: root.id, message: `clone: from ${REMOTE_NAME}` }],
       [DEFAULT_BRANCH]: [{ id: root.id, message: `clone: from ${REMOTE_NAME}` }],
@@ -648,7 +677,10 @@ export function carryChanges(
   action: string,
 ): { index: Tree; workdir: Tree } {
   const head = headTree(repo)
-  const dirty = dirtyPaths(repo)
+  // サブモジュールの中で HEAD を動かしただけ (未ステージの gitlink) なら、Git と同じく上書きの対象にしない
+  const dirty = dirtyPaths(repo).filter(
+    (path) => !(parseGitlink(repo.workdir[path]) !== null && repo.index[path] === head[path]),
+  )
   const tracked = dirty.filter((path) => path in head || path in repo.index)
   const untracked = dirty.filter((path) => !tracked.includes(path))
 
@@ -707,19 +739,24 @@ export function writeFile(
   append: boolean,
 ): OperationResult {
   validatePath(path)
-  if (Object.keys(repo.workdir).some((other) => other.startsWith(`${path}/`))) {
+  if (Object.keys(repo.workdir).some((other) => other.startsWith(`${path}/`)) || isSubmodulePath(repo, path)) {
     throw new GitError(`${path} はディレクトリです`)
+  }
+  const inSubmodule = submoduleContaining(repo, path)
+  if (inSubmodule !== null) {
+    throw new GitError(`${path} はサブモジュール '${inSubmodule}' の中です (cd ${inSubmodule} で中に移動してください)`)
   }
   const content = append ? (repo.workdir[path] ?? '') + text : text
   return { repo: { ...repo, workdir: withFile(repo.workdir, path, content) }, output: '' }
 }
 
 export function touchFile(repo: Repo, path: string): OperationResult {
-  if (path in repo.workdir) return { repo, output: '' }
+  if (path in repo.workdir && !isSubmodulePath(repo, path)) return { repo, output: '' }
   return writeFile(repo, path, '', false)
 }
 
 export function readFile(repo: Repo, path: string): OperationResult {
+  if (isSubmodulePath(repo, path)) throw new GitError(`cat: ${path}: ディレクトリです`)
   const content = repo.workdir[path]
   if (content === undefined) {
     throw new GitError(`cat: ${path}: そのようなファイルはありません`)
@@ -728,11 +765,29 @@ export function readFile(repo: Repo, path: string): OperationResult {
 }
 
 export function listFiles(repo: Repo): OperationResult {
-  return { repo, output: Object.keys(repo.workdir).sort().join('\n') }
+  return {
+    repo,
+    output: Object.keys(repo.workdir)
+      .sort()
+      .map((path) => (isSubmodulePath(repo, path) ? `${path}/` : path))
+      .join('\n'),
+  }
+}
+
+/** path がサブモジュール (gitlink) の位置か。 */
+export function isSubmodulePath(repo: Repo, path: string): boolean {
+  return parseGitlink(repo.workdir[path] ?? repo.index[path]) !== null || path in repo.submodules
+}
+
+/** path がサブモジュールの中のファイルなら、そのサブモジュールのパス。 */
+export function submoduleContaining(repo: Repo, path: string): string | null {
+  const paths = new Set([...Object.keys(repo.submodules), ...Object.keys(repo.index).filter((p) => parseGitlink(repo.index[p]) !== null)])
+  return [...paths].find((sub) => path.startsWith(`${sub}/`)) ?? null
 }
 
 /** シェルの rm。作業ディレクトリからだけ削除する。 */
 export function removeFile(repo: Repo, path: string): OperationResult {
+  if (isSubmodulePath(repo, path)) throw new GitError(`rm: ${path} を削除できません: ディレクトリです`)
   if (!(path in repo.workdir)) {
     throw new GitError(`rm: ${path}: そのようなファイルはありません`)
   }
@@ -879,7 +934,7 @@ export function addCommit(
   repo: Repo,
   fields: Omit<Commit, 'id'>,
 ): { repo: Repo; commit: Commit } {
-  const commit: Commit = { id: `C${repo.nextId}`, ...fields }
+  const commit: Commit = { id: `${repo.idPrefix ?? 'C'}${repo.nextId}`, ...fields }
   const commits = { ...repo.commits, [commit.id]: commit }
   const next: Repo =
     repo.head.type === 'branch'
@@ -1499,10 +1554,16 @@ function statusLines(repo: Repo): string[] {
       lines.push(`\t${CONFLICT_LABELS[conflict.kind]}  ${conflict.path}`)
     }
   }
-  if (status.unstaged.length > 0) {
+  // サブモジュールは、中のコミットが変わった・中に変更がある、を Git と同じく括弧で添える
+  const unstaged = [...status.unstaged.map((entry) => ({ ...entry, note: submoduleNote(repo, entry.path) }))]
+  for (const path of Object.keys(repo.submodules).sort()) {
+    const note = submoduleNote(repo, path)
+    if (note !== '' && !unstaged.some((entry) => entry.path === path)) unstaged.push({ path, change: 'modified', note })
+  }
+  if (unstaged.length > 0) {
     lines.push('', 'コミット予定に含まれていない変更:')
-    for (const entry of status.unstaged) {
-      lines.push(`\t${CHANGE_LABELS[entry.change]}  ${entry.path}`)
+    for (const entry of unstaged) {
+      lines.push(`\t${CHANGE_LABELS[entry.change]}  ${entry.path}${entry.note}`)
     }
   }
   if (status.untracked.length > 0) {
@@ -1510,13 +1571,24 @@ function statusLines(repo: Repo): string[] {
     for (const path of status.untracked) lines.push(`\t${path}`)
   }
   if (
-    status.staged.length + status.unstaged.length + status.untracked.length +
+    status.staged.length + unstaged.length + status.untracked.length +
       status.conflicts.length ===
     0
   ) {
     lines.push('', 'コミットするものはありません。作業ツリーはクリーンです')
   }
   return lines
+}
+
+/** サブモジュールの状態の注記 (" (new commits, modified content)" など)。サブモジュールでなければ空。 */
+function submoduleNote(repo: Repo, path: string): string {
+  const nested = repo.submodules[path]
+  if (nested === undefined) return ''
+  const notes: string[] = []
+  if (parseGitlink(repo.workdir[path]) !== parseGitlink(repo.index[path])) notes.push('new commits')
+  if (hasTrackedChanges(nested)) notes.push('modified content')
+  if (Object.keys(nested.workdir).some((file) => !(file in nested.index))) notes.push('untracked content')
+  return notes.length === 0 ? '' : ` (${notes.join(', ')})`
 }
 
 export function status(repo: Repo): OperationResult {

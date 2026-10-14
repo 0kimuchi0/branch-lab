@@ -5,6 +5,27 @@
 
 export type Tree = Readonly<Record<string, string>>
 
+/**
+ * サブモジュールの位置に置く値 (gitlink)。本物の Git では tree に「コミット ID を指す特別な項目」として入る。
+ * ここではファイルの内容として、echo では書けない文字 (\0) から始まる文字列で表す。
+ */
+const GITLINK_PREFIX = '\u0000gitlink '
+
+export function gitlink(id: string): string {
+  return `${GITLINK_PREFIX}${id}`
+}
+
+/** gitlink ならサブモジュールのコミット ID、そうでなければ null。 */
+export function parseGitlink(content: string | undefined): string | null {
+  return content?.startsWith(GITLINK_PREFIX) ? content.slice(GITLINK_PREFIX.length) : null
+}
+
+/** 表示用の内容 (gitlink は git diff と同じく "Subproject commit <ID>" にする)。 */
+export function displayContent(content: string): string {
+  const id = parseGitlink(content)
+  return id === null ? content : `Subproject commit ${id}\n`
+}
+
 /** a と b で内容が異なるパス (片方にしかないものを含む) を名前順に返す。 */
 export function changedPaths(a: Tree, b: Tree): string[] {
   const paths = new Set([...Object.keys(a), ...Object.keys(b)])
@@ -193,6 +214,9 @@ export function mergeTrees(
     } else if (a === undefined || b === undefined) {
       tree = withFile(tree, path, a ?? b)
       conflicts.push({ path, kind: a === undefined ? 'deleted-by-us' : 'deleted-by-them' })
+    } else if (parseGitlink(a) !== null || parseGitlink(b) !== null) {
+      // サブモジュールの指すコミットは行単位にマージできない。こちらの側を残してコンフリクトにする
+      conflicts.push({ path, kind: o === undefined ? 'both-added' : 'both-modified' })
     } else {
       const merged = mergeText(o ?? '', a, b, labels)
       tree = withFile(tree, path, merged.text)

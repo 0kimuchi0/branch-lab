@@ -65,12 +65,14 @@ export function Workspace({ repo }: { readonly repo: Repo }) {
   const staged = useMemo(() => stagedFiles(repo), [repo])
   const worktrees = useMemo(() => worktreeRows(repo), [repo])
   const many = worktrees.length > 1
+  // worktree が複数あるときと、サブモジュールの中にいるときは、作業ディレクトリの場所を出す
+  const showPath = many || repo.idPrefix !== undefined
 
   return (
     <div className="workspace">
       <OperationBanner repo={repo} />
       <div className="file-areas">
-        <Area title={many ? `作業ディレクトリ (${repo.worktree})` : '作業ディレクトリ'} hint="echo / rm で編集">
+        <Area title={showPath ? `作業ディレクトリ (${repo.worktree})` : '作業ディレクトリ'} hint="echo / rm で編集">
           <FileArea files={workdir} emptyText="ファイルはありません" />
         </Area>
         <Flow>

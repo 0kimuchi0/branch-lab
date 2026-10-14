@@ -10,6 +10,7 @@ import {
   currentWorktreeState,
   enterWorktree,
   getCommit,
+  isSubmodulePath,
   requireBranchFree,
   resolveRef,
   subject,
@@ -46,13 +47,30 @@ function stateOf(repo: Repo, path: string): WorktreeState {
   return path === repo.worktree ? currentWorktreeState(repo) : (repo.worktrees[path] as WorktreeState)
 }
 
-/** cd <パス>: 別の worktree に移る。 */
-export function changeDirectory(repo: Repo, path: string | undefined): OperationResult {
-  const target = resolvePath(repo.worktree, path ?? MAIN_WORKTREE)
-  if (!worktreePaths(repo).includes(target)) {
-    throw new GitError(`cd: ${path}: そのようなディレクトリはありません (移動できるのは worktree だけです)`)
+/** 今いる場所のパス (サブモジュールの中ならその中)。 */
+export function currentDirectory(root: Repo): string {
+  return root.submodule === null ? root.worktree : `${root.worktree}/${root.submodule}`
+}
+
+/**
+ * cd <パス>: 別の worktree や、チェックアウトしたサブモジュールの中に移る (root は一番外側のリポジトリ)。
+ * 引数がなければメインの worktree に戻る。
+ */
+export function changeDirectory(root: Repo, path: string | undefined): OperationResult {
+  const target = resolvePath(currentDirectory(root), path ?? MAIN_WORKTREE)
+  const outside: Repo = root.submodule === null ? root : { ...root, submodule: null }
+  const paths = worktreePaths(outside)
+  if (paths.includes(target)) return { repo: enterWorktree(outside, target), output: '' }
+  const worktree = paths.filter((wt) => target.startsWith(`${wt}/`)).sort((a, b) => b.length - a.length)[0]
+  if (worktree !== undefined) {
+    const entered = enterWorktree(outside, worktree)
+    const sub = target.slice(worktree.length + 1)
+    if (sub in entered.submodules) return { repo: { ...entered, submodule: sub }, output: '' }
+    if (isSubmodulePath(entered, sub)) {
+      throw new GitError(`cd: ${path}: サブモジュールの中身がありません (git submodule update --init で取得します)`)
+    }
   }
-  return { repo: enterWorktree(repo, target), output: '' }
+  throw new GitError(`cd: ${path}: そのようなディレクトリはありません (移動できるのは worktree とサブモジュールだけです)`)
 }
 
 export interface WorktreeAddOptions {
@@ -112,6 +130,8 @@ export function worktreeAdd(
     bisect: null,
     headReflog: [{ id, message: `worktree add: ${path}` }],
     rererePending: {},
+    // サブモジュールは、新しい worktree では git submodule update --init するまで空のまま
+    submodules: {},
   }
   return {
     repo: { ...current, worktrees: { ...current.worktrees, [path]: state } },

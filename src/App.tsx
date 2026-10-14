@@ -6,6 +6,8 @@ import { ShareButton } from './components/ShareButton'
 import { Terminal, type LogEntry } from './components/Terminal'
 import { Workspace } from './components/Workspace'
 import { editorSaveCommand, executeCommand } from './git/commands'
+import { activeRepo } from './git/submodule'
+import { currentDirectory } from './git/worktree'
 import { createRepo, currentBranch, headCommitId, type Repo } from './git/model'
 import { PUZZLES, buildPuzzle, isSolved, type BuiltPuzzle } from './puzzles/puzzles'
 import {
@@ -152,7 +154,9 @@ export default function App() {
     return () => window.removeEventListener('hashchange', onHashChange)
   }, [puzzles])
 
-  const branch = currentBranch(session.repo)
+  // サブモジュールの中にいれば、画面にはそのサブモジュールを出す
+  const active = activeRepo(session.repo)
+  const branch = currentBranch(active)
 
   return (
     <div className="app">
@@ -183,8 +187,9 @@ export default function App() {
         </p>
         <div className="header-row">
           <p className="status" aria-live="polite">
-            {Object.keys(session.repo.worktrees).length > 0 && `${session.repo.worktree} — `}
-            HEAD: {branch ?? '(detached)'} @ {headCommitId(session.repo)}
+            {(Object.keys(session.repo.worktrees).length > 0 || session.repo.submodule !== null) &&
+              `${currentDirectory(session.repo)} — `}
+            HEAD: {branch ?? '(detached)'} @ {headCommitId(active)}
           </p>
           <ShareButton getUrl={() => shareUrl(hash || encodeShare(shared))} />
         </div>
@@ -210,14 +215,14 @@ export default function App() {
               onSelect={selectPuzzle}
             />
           )}
-          {session.repo.editor && (
+          {active.editor && (
             <EditorPanel
-              key={`${nextLogId}:${session.repo.editor.text}`}
-              editor={session.repo.editor}
-              onSave={(text) => run(editorSaveCommand(text === session.repo.editor?.text ? undefined : text))}
+              key={`${nextLogId}:${active.editor.text}`}
+              editor={active.editor}
+              onSave={(text) => run(editorSaveCommand(text === active.editor?.text ? undefined : text))}
             />
           )}
-          <Workspace repo={session.repo} />
+          <Workspace repo={active} />
         </div>
         <Terminal
           key={mode}
@@ -225,7 +230,7 @@ export default function App() {
           onRun={run}
           onReset={reset}
           resetLabel={mode === 'free' ? 'リセット' : 'やり直す'}
-          editorOpen={session.repo.editor !== null}
+          editorOpen={active.editor !== null}
         />
       </main>
     </div>

@@ -3,7 +3,7 @@
  * 作業ディレクトリはステージと、ステージは HEAD と比べた状態を付ける。
  */
 import { MAIN_WORKTREE, headTree, REMOTE_NAME, type Repo } from '../git/model'
-import { changedPaths } from '../git/tree'
+import { changedPaths, displayContent } from '../git/tree'
 
 export type FileState = 'clean' | 'untracked' | 'added' | 'modified' | 'deleted' | 'conflict'
 
@@ -39,7 +39,7 @@ export function workdirFiles(repo: Repo): AreaFile[] {
       : !(path in repo.index) ? 'untracked'
       : content === undefined ? 'deleted'
       : 'modified'
-    return { path, state, content }
+    return { path, state, content: content === undefined ? undefined : displayContent(content) }
   })
 }
 
@@ -56,7 +56,7 @@ export function stagedFiles(repo: Repo): AreaFile[] {
       : !(path in head) ? 'added'
       : content === undefined ? 'deleted'
       : 'modified'
-    return { path, state, content }
+    return { path, state, content: content === undefined ? undefined : displayContent(content) }
   })
 }
 

@@ -404,7 +404,7 @@ export function teammateCommit(repo: Repo, branch = 'main', remoteName = REMOTE_
     throw new GitError(`${remoteName} に ${branch} というブランチはありません`)
   }
   const tip = remote.commits[tipId] ?? getCommit(repo, tipId)
-  const id = `C${repo.nextId}`
+  const id = `${repo.idPrefix ?? 'C'}${repo.nextId}`
   const tree = { ...tip.tree, 'team.txt': `${tip.tree['team.txt'] ?? ''}他の人の変更 (${id})\n` }
   const created: Commit = { id, parents: [tipId], message: `他の人の変更 (${id})`, tree }
   return {
