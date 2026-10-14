@@ -2,7 +2,7 @@ import { useMemo, type ReactNode } from 'react'
 import { getCommit, type Repo } from '../git/model'
 import { changedPaths } from '../git/tree'
 import { computeLayout, computeRemoteLayout } from '../graph/layout'
-import { stagedFiles, workdirFiles } from '../view/workspace'
+import { remoteNames, stagedFiles, workdirFiles } from '../view/workspace'
 import { FileArea } from './FileArea'
 import { GraphView } from './GraphView'
 
@@ -52,7 +52,15 @@ function OperationBanner({ repo }: { readonly repo: Repo }) {
 
 export function Workspace({ repo }: { readonly repo: Repo }) {
   const local = useMemo(() => computeLayout(repo), [repo])
-  const remote = useMemo(() => computeRemoteLayout(repo), [repo])
+  const remotes = useMemo(
+    () =>
+      remoteNames(repo).map((name) => ({
+        name,
+        url: repo.remotes[name]?.url ?? '',
+        layout: computeRemoteLayout(repo, name),
+      })),
+    [repo],
+  )
   const workdir = useMemo(() => workdirFiles(repo), [repo])
   const staged = useMemo(() => stagedFiles(repo), [repo])
 
@@ -78,13 +86,17 @@ export function Workspace({ repo }: { readonly repo: Repo }) {
       <Area title="ローカルリポジトリ" hint="手元のコミットの履歴" className="area-graph">
         <GraphView layout={local} label="ローカルリポジトリのコミットグラフ" />
       </Area>
-      <Flow>
-        <span>↓ git push</span>
-        <span>git fetch / pull ↑</span>
-      </Flow>
-      <Area title="リモートリポジトリ (origin)" hint="共有されているコミットの履歴" className="area-graph">
-        <GraphView layout={remote} label="リモートリポジトリのコミットグラフ" />
-      </Area>
+      {remotes.length > 0 && (
+        <Flow>
+          <span>↓ git push</span>
+          <span>git fetch / pull ↑</span>
+        </Flow>
+      )}
+      {remotes.map(({ name, url, layout }) => (
+        <Area key={name} title={`リモートリポジトリ (${name})`} hint={url} className="area-graph">
+          <GraphView layout={layout} label={`リモートリポジトリ ${name} のコミットグラフ`} />
+        </Area>
+      ))}
       {repo.stash.length > 0 && (
         <Area title="スタッシュ" hint="git stash で退避した変更 (pop / apply で戻す)" className="area-stash">
           <ul className="stash-list">

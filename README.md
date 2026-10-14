@@ -18,7 +18,7 @@ npm run build    # 型チェックと本番ビルド
 画面上部のタブで 2 つのモードを切り替えられます。
 
 - **自由に試す**: clone 直後のリポジトリで、好きなコマンドを試せます。
-- **お題**: 「マージする」「コンフリクトを解消する」「コミットをまとめる」「作業を退避して急ぎの修正」など 14 問。
+- **お題**: 「マージする」「コンフリクトを解消する」「コミットをまとめる」「作業を退避して急ぎの修正」「バグを入れたコミットを探す」など 17 問。
   目標のグラフと同じ履歴を作れたら正解です。コミット ID やメッセージが違っても、
   履歴の形と各コミットの由来 (コピーや revert を含む) が同じなら正解になります。
   クリアした記録はブラウザに保存されます。
@@ -52,23 +52,26 @@ URL のハッシュ (`#s=...`) には状態そのものではなく、モード�
 | `reflog [show] [<ブランチ>]` | HEAD (やブランチ) が動いた履歴を表示する |
 | `diff [--staged] [<コミット> [<コミット>]] [--stat] [--name-only] [-- <ファイル>]` | 差分を表示する (`A..B` も可) |
 | `show [<コミット>]` | コミットの内容と差分を表示する |
+| `blame [-L <開始>,<終了>] <ファイル> [<コミット>]` | 各行を最後に変えたコミットを表示する |
 | `add <ファイル>...` / `add .` / `add -A` | 変更をステージする |
 | `restore [--staged] [--source=<コミット>] <ファイル>` | 作業ディレクトリ (または ステージ) を戻す |
 | `rm [--cached] [-f] <ファイル>` | ステージと作業ディレクトリから消す |
 | `commit [-m "…"] [-a] [--allow-empty] [--amend] [--no-edit]` | ステージの内容でコミットする (`-m` がなければエディタが開く) |
 | `branch [<名前> [<起点>]]` / `-d` / `-D` / `-m` / `-u` | ブランチの一覧・作成・削除・名前の変更・upstream の設定 |
-| `switch <名前>` / `-c <名前>` / `--detach <コミット>` / `switch -` | ブランチを切り替える (origin にだけあるブランチは追跡ブランチを作る、`-` は直前のブランチ) |
+| `switch <名前>` / `-c <名前> [<起点>]` / `--detach <コミット>` / `switch -` | ブランチを切り替える (リモートにだけあるブランチは追跡ブランチを作る、`-` は直前のブランチ) |
 | `checkout <名前\|コミット>` / `-b <名前>` / `-- <ファイル>` | switch と restore を兼ねる昔からのコマンド |
 | `merge <ブランチ> [--no-ff] [--ff-only] [--no-edit]` | fast-forward またはマージコミットでマージする |
-| `rebase [-i] [-x <コマンド>] <ブランチ>` | 現在のブランチのコミットを付け替える (`-i` は todo をエディタで編集する) |
+| `rebase [-i] [-r] [-x <コマンド>] <ブランチ>` | 現在のブランチのコミットを付け替える (`-i` は todo をエディタで編集する、`-r` / `--rebase-merges` はマージの形を保つ) |
 | `cherry-pick [-e] [-m <親>] [--allow-empty] <コミット>...` | コミットの変更を複製する (`-m` でマージコミットも) |
 | `revert [--no-edit] [-m <親>] <コミット>...` | コミットの変更を打ち消すコミットを作る |
 | `tag [-a] [-m "…"] [-f] <タグ> [<コミット>]` / `tag -l [<パターン>]` / `tag -d <タグ>` | タグを付ける・一覧を見る・消す |
 | `reset [--soft \| --mixed \| --hard] [<コミット>]` / `reset <ファイル>` | ブランチを移動する / ステージを戻す |
 | `stash [push] [-m "…"] [-u] [-k]` / `stash list` / `stash show [-p]` | 変更を退避する・一覧を見る |
 | `stash apply [--index]` / `stash pop [--index]` / `stash drop` / `stash clear` / `stash branch <名前>` | 退避した変更を戻す・消す |
-| `push [-u] [-f] [--tags] [origin [<ブランチ\|タグ>]]` / `push origin --delete <名前>` | origin に送る・origin の参照を消す |
-| `fetch` / `pull [--rebase \| --no-rebase \| --ff-only] [--no-edit]` | origin から取り込む (タグも取り込む) |
+| `bisect start [<bad> [<good>...]]` / `good` / `bad` / `skip` / `reset` / `log` / `run <コマンド>` | 二分探索でバグを入れたコミットを探す (`new` / `old` も可) |
+| `remote [-v]` / `remote add <名前> <URL>` / `remove` / `rename` / `set-url` / `get-url` | リモートの一覧・追加・削除・名前の変更 |
+| `push [-u] [-f] [--tags] [<リモート> [<ブランチ\|タグ>]]` / `push <リモート> --delete <名前>` | リモートに送る・リモートの参照を消す |
+| `fetch [<リモート> \| --all]` / `pull [--rebase \| --no-rebase \| --ff-only] [--no-edit] [<リモート> [<ブランチ>]]` | リモートから取り込む (タグも取り込む) |
 
 ### エディタ
 
@@ -82,12 +85,14 @@ URL のハッシュ (`#s=...`) には状態そのものではなく、モード�
 行を並べ替えたりできます。`edit` で止まったら `git commit --amend` で直して `git rebase --continue` で続けます。
 `exec <コマンド>` の行はそのコマンド (シェル風のコマンドも git のコマンドも) を実行し、失敗したらそこで止まります。
 `break` の行ではそこで止まります。`git rebase -x <コマンド>` は各コミットの後ろに `exec` を入れます。
+`git rebase -r` (`--rebase-merges`) の todo には、`label <名前>` (今の HEAD に名前を付ける)・`reset <名前>`
+(その位置に戻る)・`merge -C <元のマージ> <名前>` (名前の位置をマージする) の行が入り、マージの形のまま作り直します。
 
 `merge` / `rebase` / `cherry-pick` / `revert` がコンフリクトで止まったら、ファイルを直して `git add` し、
 `--continue` で続けます (`--abort` で中止、`--skip` で飛ばせます。merge は `git commit` で完了します)。
 マージは行単位の 3-way マージで、本物と同じコンフリクトマーカーが入ります。
 
-`<コミット>` には `C1` のようなコミット ID、ブランチ名、タグ名、`origin/main`、`HEAD` が使えます。
+`<コミット>` には `C1` のようなコミット ID、ブランチ名、タグ名、`origin/main` のようなリモート追跡ブランチ、`HEAD` が使えます。
 末尾に `~n` (第 1 親を n 回たどる) や `^n` (n 番目の親) を付けられます (例: `HEAD~2`, `main^`, `HEAD^2`)。
 `HEAD@{n}` / `main@{n}` / `@{n}` は reflog の n 個前、`@{-1}` は直前にいたブランチです
 (例: `git reset --hard HEAD@{1}` で直前の reset を取り消せます)。
@@ -98,17 +103,20 @@ URL のハッシュ (`#s=...`) には状態そのものではなく、モード�
 
 | コマンド | 内容 |
 | --- | --- |
-| `teammate [<ブランチ>]` | 他の人が origin にコミットを push したことにする |
+| `teammate [<リモート>] [<ブランチ>]` | 他の人がリモート (既定は origin の main) にコミットを push したことにする |
 | `help` | コマンド一覧を表示する |
 
 ### 本物の Git と違うところ
 
 - コミット ID はハッシュではなく `C1`, `C2`, … の連番です。
 - エディタは画面上の簡易エディタです。保存は `:wq "内容"` というコマンドとしてログと共有 URL に残ります。
-- リモートは `origin` 1 つだけで、ブラウザの中で模擬しています。
+- リモートはブラウザの中で模擬しています。URL には接続せず、`remote add` で追加したリモートは空のリポジトリから始まります
+  (`remote remove` するとそのリモートの中身も消えます)。
+- `blame` には作者と日時がなく、コミット ID と件名を表示します。`bisect run` のコマンドはこのアプリのコマンドで、成功なら good、失敗なら bad です
+  (先頭に `!` を付けると逆になります)。
 - `stash` は本物ではコミットとして保存されますが、ここでは別に持ち、グラフには描きません。
 - `diff` には blob の `index` 行がなく、コンフリクト中のファイルは結合差分の代わりに `* Unmerged path` と表示します。
-- `rebase -i` の `label` / `reset` / `merge` (`--rebase-merges`)、ファイルを指定した `stash push`、タグへの署名などは未対応です。
+- 3 つ以上の親を持つマージ (octopus)、ファイルを指定した `stash push`、タグへの署名などは未対応です。
 - reflog は HEAD とローカルブランチだけで、期限切れの削除 (`reflog expire`) はありません。
 
 ## 設計
@@ -122,10 +130,11 @@ src/
     diff.ts        unified 形式の差分
     model.ts       Git の内部モデル (コミット・ブランチ・HEAD・ステージ・作業ディレクトリ・リモート・エディタ)
     history.ts     merge / cherry-pick / revert / rebase (-i) と --continue / --abort / --skip、エディタを閉じたあとの続き
-    inspect.ts     diff / show
+    inspect.ts     diff / show / blame
+    bisect.ts      bisect
     stash.ts       stash
     tag.ts         tag
-    remote.ts      push / fetch / pull と teammate
+    remote.ts      remote / push / fetch / pull と teammate
     commands.ts    入力文字列の解析と実行。規則違反は例外にせず結果として返す
   graph/
     layout.ts      コミットグラフの座標を計算する純粋関数 (ローカル・リモートの両方)
@@ -153,5 +162,6 @@ Vite として自動で認識されるので、設定ファイルはありませ
 
 ## 今後の拡張案
 
-- `rebase --rebase-merges`、`bisect`、`blame`
-- 複数のリモート (`remote add`)
+- `rerere` (コンフリクトの解消を覚えて再利用する)
+- `worktree`、`submodule`
+- `merge` の octopus と、`-s ours` などのストラテジー

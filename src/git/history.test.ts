@@ -273,3 +273,123 @@ describe('rebase', () => {
     expect(fail(repo, 'git rebase main')).toContain('コミットしていない変更')
   })
 })
+
+describe('rebase --rebase-merges', () => {
+  /** topic に feature をマージした履歴 (C1 a → C2 f [feature] / C3 b → C4 マージ) と、main の C5。 */
+  function withMerge(): Repo {
+    return run([
+      'git switch -c topic',
+      ...commitFile('a.txt', 'a'),
+      'git switch -c feature',
+      ...commitFile('f.txt', 'f'),
+      'git switch topic',
+      ...commitFile('b.txt', 'b'),
+      'git merge --no-edit feature',
+      'git switch main',
+      ...commitFile('m.txt', 'm'),
+      'git switch topic',
+    ])
+  }
+
+  it('-i の todo は、横のブランチを先に作って label を付け、merge で合流する', () => {
+    const opened = executeCommand(withMerge(), 'git rebase -i -r main')
+    const text = opened.repo.editor?.text ?? ''
+    expect(text.split('\n# C5..')[0]).toBe(
+      [
+        'label onto',
+        '',
+        '# Branch: feature',
+        'reset onto',
+        'pick C1 a',
+        'label branch-point',
+        'pick C2 f',
+        'label feature',
+        '',
+        'reset branch-point # a',
+        'pick C3 b',
+        "merge -C C4 feature # Merge branch 'feature' into topic",
+        '',
+      ].join('\n'),
+    )
+  })
+
+  it('マージコミットも作り直し、ブランチの形を保つ', () => {
+    const repo = run(['git rebase -r main'], withMerge())
+    const tip = repo.commits[repo.branches['topic'] as string]
+    expect(tip?.parents).toHaveLength(2)
+    expect(tip?.message).toBe("Merge branch 'feature' into topic")
+    expect(tip?.source).toBe('C4')
+    expect(Object.keys(tip?.tree ?? {}).sort()).toEqual(['README.md', 'a.txt', 'b.txt', 'f.txt', 'm.txt'])
+    const [first, second] = tip?.parents ?? []
+    expect(repo.commits[first as string]?.source).toBe('C3')
+    expect(repo.commits[second as string]?.source).toBe('C2')
+    // 2 つの親は、作り直した a (C1 の複製) から分かれている
+    const a = repo.commits[first as string]?.parents[0]
+    expect(repo.commits[a as string]?.source).toBe('C1')
+    expect(repo.commits[second as string]?.parents[0]).toBe(a)
+    expect(repo.commits[a as string]?.parents[0]).toBe('C5')
+    expect(repo.operation).toBeNull()
+    expect(currentBranch(repo)).toBe('topic')
+  })
+
+  it('-r がなければ、マージコミットは取り除いて一直線にする', () => {
+    const repo = run(['git rebase main'], withMerge())
+    const tip = repo.commits[repo.branches['topic'] as string]
+    expect(tip?.parents).toHaveLength(1)
+  })
+
+  it('親が変わらないコミットとマージは、作り直さずにそのまま使う', () => {
+    const before = withMerge()
+    const repo = run(['git rebase -i -r C0', ':wq'], before)
+    expect(repo.branches['topic']).toBe('C4')
+    expect(repo.nextId).toBe(before.nextId)
+  })
+
+  it('マージでコンフリクトしたら止まり、解消して --continue でマージコミットを作る', () => {
+    const repo = run([
+      'git switch -c topic',
+      'git switch -c feature',
+      'echo "feature" > README.md',
+      'git commit -am "feature 側"',
+      'git switch topic',
+      'echo "topic" > README.md',
+      'git commit -am "topic 側"',
+    ])
+    const merged = executeCommand(repo, 'git merge --no-edit feature')
+    expect(merged.ok).toBe(true)
+    const resolved = run(['echo "both" > README.md', 'git commit -am "マージ" ', 'git switch main', ...commitFile('m.txt', 'm'), 'git switch topic'], merged.repo)
+    const stopped = executeCommand(resolved, 'git rebase -r main')
+    expect(stopped.output).toContain('error: feature をマージできませんでした')
+    expect(stopped.repo.operation?.type).toBe('rebase')
+    expect(executeCommand(stopped.repo, 'git status').output).toContain('merge feature を適用中')
+    const done = run(['echo "both" > README.md', 'git add README.md', 'git rebase --continue', ':wq'], stopped.repo)
+    const tip = done.commits[done.branches['topic'] as string]
+    expect(tip?.parents).toHaveLength(2)
+    expect(tip?.message).toBe('マージ')
+    expect(tip?.tree['README.md']).toBe('both\n')
+    expect(done.operation).toBeNull()
+  })
+
+  it('todo の label / reset / merge を書き換えられる (名前は先に label で付ける)', () => {
+    const repo = run([
+      'git switch -c topic',
+      ...commitFile('a.txt', 'a'),
+      'git switch main',
+      ...commitFile('m.txt', 'm'),
+      'git switch topic',
+    ])
+    const opened = executeCommand(repo, 'git rebase -i -r main')
+    const bad = executeCommand(opened.repo, `:wq ${JSON.stringify('reset nowhere\npick C1 a\n')}`)
+    expect(bad.ok).toBe(false)
+    expect(bad.output).toContain("'nowhere' が見つかりません")
+    // a を作ったあと onto に戻り、a をマージする形に組み替える
+    const todo = 'label onto\npick C1 a\nlabel side\nreset onto\nmerge side # side をマージ\n'
+    const editing = executeCommand(opened.repo, `:wq ${JSON.stringify(todo)}`)
+    expect(editing.repo.editor?.file).toBe('MERGE_MSG')
+    const done = run([':wq'], editing.repo)
+    const tip = done.commits[done.branches['topic'] as string]
+    expect(tip?.message).toBe("Merge branch 'side'")
+    expect(tip?.parents[0]).toBe('C2')
+    expect(Object.keys(tip?.tree ?? {}).sort()).toEqual(['README.md', 'a.txt', 'm.txt'])
+  })
+})

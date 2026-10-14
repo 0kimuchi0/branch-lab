@@ -38,11 +38,28 @@ export interface PickItem {
   readonly id: CommitId
 }
 
-/** rebase -i の todo の 1 行。exec はコマンドを実行し、break はそこで止まる。 */
+/**
+ * rebase --rebase-merges の merge の行。label の位置のコミットを HEAD にマージする。
+ * id は -C / -c で指定した元のマージコミット (メッセージをそこから取る)。edit ならメッセージをエディタで編集する。
+ */
+export interface MergeItem {
+  readonly action: 'merge'
+  readonly id: CommitId | null
+  readonly label: string
+  readonly edit: boolean
+}
+
+/**
+ * rebase -i の todo の 1 行。exec はコマンドを実行し、break はそこで止まる。
+ * label・reset・merge は --rebase-merges で使う (HEAD に名前を付ける・名前の位置に戻る・マージする)。
+ */
 export type TodoItem =
   | PickItem
+  | MergeItem
   | { readonly action: 'exec'; readonly command: string }
   | { readonly action: 'break' }
+  | { readonly action: 'label'; readonly name: string }
+  | { readonly action: 'reset'; readonly target: string }
 
 /** squash / fixup でまとめているコミットのメッセージ (fixup のものは skip)。 */
 export interface SquashPart {
@@ -55,7 +72,7 @@ export type SequenceType = 'cherry-pick' | 'revert' | 'rebase'
 export interface SequenceOperation {
   readonly type: SequenceType
   /** 適用中 (コンフリクトなどで止まっている) の項目。確定済みなら null。 */
-  readonly current: PickItem | null
+  readonly current: PickItem | MergeItem | null
   /** これから適用する項目。 */
   readonly todo: readonly TodoItem[]
   /** 操作を始める前の HEAD。--abort で戻る先。 */
@@ -70,6 +87,18 @@ export interface SequenceOperation {
   readonly squash: readonly SquashPart[] | null
   /** -m: マージコミットを cherry-pick / revert するときに基準にする親の番号 (1 始まり)。 */
   readonly mainline: number | null
+  /** rebase --rebase-merges の label で付けた名前 (refs/rewritten/<名前>)。 */
+  readonly labels?: Readonly<Record<string, CommitId>>
+}
+
+/** merge の行でマージする相手のコミット (label の名前か、コミットそのもの)。 */
+export function mergeTarget(repo: Repo, op: SequenceOperation, ref: string): CommitId {
+  return op.labels?.[ref] ?? resolveRef(repo, ref)
+}
+
+/** merge の行で作るコミットのメッセージ。 */
+export function mergeItemMessage(repo: Repo, item: MergeItem): string {
+  return item.id === null ? `Merge branch '${item.label}'` : getCommit(repo, item.id).message
 }
 
 /** 途中で止まっている操作 (コンフリクトの解消待ちなど)。 */
@@ -157,8 +186,23 @@ export interface Tag {
   readonly message?: string
 }
 
+/** git bisect の状態。 */
+export interface BisectState {
+  /** bisect を始めたときの HEAD (ブランチ名か、detached ならコミット ID)。bisect reset で戻る。 */
+  readonly start: string
+  readonly bad: CommitId | null
+  readonly good: readonly CommitId[]
+  readonly skipped: readonly CommitId[]
+  /** 見つかった最初の悪いコミット。 */
+  readonly found: CommitId | null
+  /** git bisect log の内容。 */
+  readonly log: readonly string[]
+}
+
 export interface Remote {
   readonly name: string
+  /** git remote add で指定した URL (模擬なので表示にだけ使う)。 */
+  readonly url: string
   readonly commits: Readonly<Record<CommitId, Commit>>
   readonly branches: Readonly<Record<string, CommitId>>
   readonly tags: Readonly<Record<string, Tag>>
@@ -178,12 +222,14 @@ export interface Repo {
   /** git stash のスタック。先頭が stash@{0} (最新)。 */
   readonly stash: readonly StashEntry[]
   readonly tags: Readonly<Record<string, Tag>>
+  readonly bisect: BisectState | null
   /** HEAD とブランチの reflog。キーは "HEAD" かブランチ名で、先頭が最新 (HEAD@{0})。 */
   readonly reflogs: Readonly<Record<string, readonly ReflogEntry[]>>
-  readonly remote: Remote
-  /** リモート追跡ブランチ (origin/main など)。キーはリモート上のブランチ名。 */
+  /** リモート (origin など)。キーはリモートの名前。 */
+  readonly remotes: Readonly<Record<string, Remote>>
+  /** リモート追跡ブランチ。キーは "<リモート>/<ブランチ>" (origin/main など)。 */
   readonly remoteBranches: Readonly<Record<string, CommitId>>
-  /** ローカルブランチ → 追跡するリモートのブランチ名 (upstream)。 */
+  /** ローカルブランチ → 追跡するリモート追跡ブランチ (upstream、"origin/main" の形)。 */
   readonly upstreams: Readonly<Record<string, string>>
   /** 次に採番するコミット番号。 */
   readonly nextId: number
@@ -204,6 +250,7 @@ export class GitError extends Error {
 
 export const DEFAULT_BRANCH = 'main'
 export const REMOTE_NAME = 'origin'
+export const ORIGIN_URL = 'https://example.com/branch-lab.git'
 
 const BRANCH_NAME_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._/-]*$/
 
@@ -223,13 +270,22 @@ export function createRepo(): Repo {
     editor: null,
     stash: [],
     tags: {},
+    bisect: null,
     reflogs: {
       HEAD: [{ id: root.id, message: `clone: from ${REMOTE_NAME}` }],
       [DEFAULT_BRANCH]: [{ id: root.id, message: `clone: from ${REMOTE_NAME}` }],
     },
-    remote: { name: REMOTE_NAME, commits, branches: { [DEFAULT_BRANCH]: root.id }, tags: {} },
-    remoteBranches: { [DEFAULT_BRANCH]: root.id },
-    upstreams: { [DEFAULT_BRANCH]: DEFAULT_BRANCH },
+    remotes: {
+      [REMOTE_NAME]: {
+        name: REMOTE_NAME,
+        url: ORIGIN_URL,
+        commits,
+        branches: { [DEFAULT_BRANCH]: root.id },
+        tags: {},
+      },
+    },
+    remoteBranches: { [`${REMOTE_NAME}/${DEFAULT_BRANCH}`]: root.id },
+    upstreams: { [DEFAULT_BRANCH]: `${REMOTE_NAME}/${DEFAULT_BRANCH}` },
     nextId: 1,
   }
 }
@@ -304,6 +360,8 @@ export function reachableCommits(repo: Repo): Set<CommitId> {
   ]
   tips.push(headCommitId(repo))
   if (repo.operation?.type === 'merge') tips.push(repo.operation.theirs)
+  if (repo.bisect) tips.push(...(repo.bisect.bad === null ? [] : [repo.bisect.bad]), ...repo.bisect.good)
+  if (repo.operation && repo.operation.type !== 'merge') tips.push(...Object.values(repo.operation.labels ?? {}))
   const reachable = new Set<CommitId>()
   for (const tip of tips) {
     for (const id of ancestors(repo.commits, tip)) reachable.add(id)
@@ -313,9 +371,22 @@ export function reachableCommits(repo: Repo): Set<CommitId> {
 
 const REF_PATTERN = /^([^~^]+)((?:[~^]\d*)*)$/
 
-function remoteRefName(ref: string): string | null {
-  const prefix = `${REMOTE_NAME}/`
-  return ref.startsWith(prefix) ? ref.slice(prefix.length) : null
+/** "<リモート>/<ブランチ>" を分ける。リモートの名前でなければ null。 */
+export function splitRemoteRef(repo: Repo, ref: string): { remote: string; branch: string } | null {
+  for (const remote of Object.keys(repo.remotes)) {
+    if (ref.startsWith(`${remote}/`) && ref.length > remote.length + 1) {
+      return { remote, branch: ref.slice(remote.length + 1) }
+    }
+  }
+  return null
+}
+
+export function getRemote(repo: Repo, name: string): Remote {
+  const remote = repo.remotes[name]
+  if (!remote) {
+    throw new GitError(`fatal: '${name}' というリモートはありません (git remote で一覧を確認できます)`)
+  }
+  return remote
 }
 
 /** ref を解決できれば CommitId、できなければ null。 */
@@ -337,16 +408,14 @@ export function resolveRef(repo: Repo, ref: string): CommitId {
   if (!match) throw new GitError(`'${ref}' はコミットの指定として使えません`)
   const [, base = '', suffix = ''] = match
 
-  const remoteName = remoteRefName(base)
   const reflogRef = /^(.*)@\{(-?\d+)\}$/.exec(base)
   let id: CommitId
   if (reflogRef) id = resolveReflogRef(repo, reflogRef[1] ?? '', Number(reflogRef[2]))
   else if (base === 'HEAD' || base === '@') id = headCommitId(repo)
   else if (base in repo.tags) id = (repo.tags[base] as Tag).target
   else if (base in repo.branches) id = repo.branches[base] as CommitId
-  else if (remoteName !== null && remoteName in repo.remoteBranches) {
-    id = repo.remoteBranches[remoteName] as CommitId
-  } else if (base in repo.commits) id = base
+  else if (base in repo.remoteBranches) id = repo.remoteBranches[base] as CommitId
+  else if (base in repo.commits) id = base
   else throw new GitError(`'${base}' というブランチやコミットはありません`)
 
   for (const [, op, digits] of suffix.matchAll(/([~^])(\d*)/g)) {
@@ -419,7 +488,7 @@ export function refNames(repo: Repo, id: CommitId): string[] {
     if (tag.target === id) names.push(`tag: ${name}`)
   }
   for (const [name, target] of Object.entries(repo.remoteBranches)) {
-    if (target === id) names.push(`${REMOTE_NAME}/${name}`)
+    if (target === id) names.push(name)
   }
   return names
 }
@@ -806,16 +875,21 @@ export function commit(repo: Repo, options: CommitOptions = {}): OperationResult
 
   const headId = headCommitId(staged)
   const head = getCommit(staged, headId)
+  // rebase --rebase-merges の merge の行で止まっている場合は、マージコミットを作る
+  const sequence = op && op.type !== 'merge' ? op : null
+  const merging = sequence?.current?.action === 'merge' ? sequence.current : null
   const parents =
     options.amend ? head.parents
     : op?.type === 'merge' ? [headId, op.theirs]
+    : merging && sequence ? [headId, mergeTarget(staged, sequence, merging.label)]
     : [headId]
   const parentTree = options.amend
     ? (staged.commits[head.parents[0] ?? '']?.tree ?? {})
     : head.tree
 
-  const picked = op && op.type !== 'merge' && op.current ? getCommit(repo, op.current.id) : null
-  if (op?.type !== 'merge' && !options.allowEmpty && treesEqual(staged.index, parentTree)) {
+  const pickedId = op && op.type !== 'merge' && op.current ? op.current.id : null
+  const picked = pickedId === null ? null : getCommit(repo, pickedId)
+  if (op?.type !== 'merge' && !merging && !options.allowEmpty && treesEqual(staged.index, parentTree)) {
     if (options.amend) {
       throw new GitError('コミットの内容が親と同じになります。--allow-empty を付けてください')
     }
@@ -837,15 +911,17 @@ export function commit(repo: Repo, options: CommitOptions = {}): OperationResult
     tree: staged.index,
     ...(picked && op?.type !== 'revert' ? { source: picked.source ?? picked.id } : {}),
     ...(picked && op?.type === 'revert' ? { reverts: picked.id } : {}),
+    ...(merging && merging.id !== null ? { source: getCommit(repo, merging.id).source ?? merging.id } : {}),
     reflogAction:
       options.amend ? 'commit (amend)'
       : op?.type === 'merge' ? 'commit (merge)'
-      : picked && op ? (op.type === 'rebase' ? 'rebase (continue)' : op.type)
+      : (picked || merging) && op ? (op.type === 'rebase' ? 'rebase (continue)' : op.type)
       : 'commit',
   }
   const defaultMessage =
     options.amend ? head.message
     : op?.type === 'merge' ? op.message
+    : merging ? mergeItemMessage(repo, merging)
     : picked && op?.type === 'revert' ? revertMessage(picked, op.mainline)
     : picked ? picked.message
     : ''
@@ -894,8 +970,17 @@ export function createBranch(repo: Repo, name: string, startPoint = 'HEAD'): Ope
   if (name in repo.branches) {
     throw new GitError(`fatal: ブランチ '${name}' はすでに存在します`)
   }
-  const next: Repo = { ...repo, branches: { ...repo.branches, [name]: resolveRef(repo, startPoint) } }
-  return { repo: logRefs(repo, next, `branch: Created from ${startPoint}`), output: '' }
+  // Git と同じく、リモート追跡ブランチから作ったブランチはそれを upstream にする (branch.autoSetupMerge)
+  const tracking = startPoint in repo.remoteBranches
+  const next: Repo = {
+    ...repo,
+    branches: { ...repo.branches, [name]: resolveRef(repo, startPoint) },
+    ...(tracking ? { upstreams: { ...repo.upstreams, [name]: startPoint } } : {}),
+  }
+  return {
+    repo: logRefs(repo, next, `branch: Created from ${startPoint}`),
+    output: tracking ? `ブランチ '${name}' は '${startPoint}' を追跡するように設定されました。` : '',
+  }
 }
 
 export function listBranches(repo: Repo, options: { readonly remotes?: boolean } = {}): string {
@@ -907,7 +992,7 @@ export function listBranches(repo: Repo, options: { readonly remotes?: boolean }
   }
   if (options.remotes) {
     for (const name of Object.keys(repo.remoteBranches).sort()) {
-      lines.push(`  remotes/${REMOTE_NAME}/${name}`)
+      lines.push(`  remotes/${name}`)
     }
   }
   return lines.join('\n')
@@ -973,12 +1058,11 @@ export function setUpstream(repo: Repo, remoteRef: string, branch?: string): Ope
   const name = branch ?? currentBranch(repo)
   if (name === null) throw new GitError('fatal: detached HEAD では upstream を設定できません')
   if (!(name in repo.branches)) throw new GitError(`error: ブランチ '${name}' は見つかりません`)
-  const remoteName = remoteRefName(remoteRef)
-  if (remoteName === null || !(remoteName in repo.remoteBranches)) {
+  if (!(remoteRef in repo.remoteBranches)) {
     throw new GitError(`fatal: '${remoteRef}' というリモート追跡ブランチはありません`)
   }
   return {
-    repo: { ...repo, upstreams: { ...repo.upstreams, [name]: remoteName } },
+    repo: { ...repo, upstreams: { ...repo.upstreams, [name]: remoteRef } },
     output: `ブランチ '${name}' は '${remoteRef}' を追跡するように設定されました。`,
   }
 }
@@ -996,11 +1080,11 @@ function leavingBehindWarning(before: Repo, after: Repo): string | null {
 }
 
 /** HEAD の今の位置の名前 (ブランチ名、detached ならコミット ID)。reflog に書く。 */
-function headLabel(repo: Repo): string {
+export function headLabel(repo: Repo): string {
   return repo.head.type === 'branch' ? repo.head.name : repo.head.id
 }
 
-function moveHead(repo: Repo, head: Head, targetId: CommitId, action: string, to: string): Repo {
+export function moveHead(repo: Repo, head: Head, targetId: CommitId, action: string, to: string): Repo {
   const { index, workdir } = carryChanges(repo, getCommit(repo, targetId).tree, action)
   return logRefs(repo, { ...repo, head, index, workdir }, `checkout: moving from ${headLabel(repo)} to ${to}`, {
     forceHead: true,
@@ -1018,30 +1102,38 @@ export function switchBranch(
 ): OperationResult {
   requireNoOperation(repo)
   if (options.create) {
-    const created = createBranch(repo, name, options.startPoint).repo
+    const { repo: created, output: tracking } = createBranch(repo, name, options.startPoint)
     const next = moveHead(created, { type: 'branch', name }, created.branches[name] as CommitId, 'switch', name)
     return {
       repo: next,
-      output: joinLines(leavingBehindWarning(repo, next), `新しいブランチ '${name}' に切り替えました`),
+      output: joinLines(leavingBehindWarning(repo, next), tracking, `新しいブランチ '${name}' に切り替えました`),
     }
   }
 
   if (!(name in repo.branches)) {
-    // origin にだけあるブランチは、追跡ブランチを作って切り替える
-    const remoteId = repo.remoteBranches[name]
-    if (remoteId === undefined) {
+    // リモートにだけあるブランチは、追跡ブランチを作って切り替える (同じ名前が 1 つのリモートにだけある場合)
+    const matches = Object.keys(repo.remoteBranches).filter((ref) => splitRemoteRef(repo, ref)?.branch === name)
+    if (matches.length === 0) {
       throw new GitError(`fatal: '${name}' というブランチはありません`)
     }
+    if (matches.length > 1) {
+      throw new GitError(
+        `fatal: '${name}' は複数のリモートにあります (${matches.join(', ')})。\n` +
+          `git switch -c ${name} <リモート>/${name} のように、どれを追跡するか指定してください`,
+      )
+    }
+    const tracking = matches[0] as string
+    const remoteId = repo.remoteBranches[tracking] as CommitId
     const created: Repo = logRefs(
       repo,
-      { ...repo, branches: { ...repo.branches, [name]: remoteId }, upstreams: { ...repo.upstreams, [name]: name } },
-      `branch: Created from ${REMOTE_NAME}/${name}`,
+      { ...repo, branches: { ...repo.branches, [name]: remoteId }, upstreams: { ...repo.upstreams, [name]: tracking } },
+      `branch: Created from ${tracking}`,
     )
     const next = moveHead(created, { type: 'branch', name }, remoteId, 'switch', name)
     return {
       repo: next,
       output: joinLines(
-        `ブランチ '${name}' は '${REMOTE_NAME}/${name}' を追跡するように設定されました。`,
+        `ブランチ '${name}' は '${tracking}' を追跡するように設定されました。`,
         `新しいブランチ '${name}' に切り替えました`,
       ),
     }
@@ -1196,7 +1288,7 @@ export function trackingLine(repo: Repo, branch: string): string | null {
   if (upstream === undefined) return null
   const remoteId = repo.remoteBranches[upstream]
   const localId = repo.branches[branch]
-  const name = `${REMOTE_NAME}/${upstream}`
+  const name = upstream
   if (remoteId === undefined || localId === undefined) {
     return `このブランチは '${name}' を追跡していますが、リモートにありません。`
   }
@@ -1225,6 +1317,9 @@ function statusLines(repo: Repo): string[] {
     const tracking = trackingLine(repo, branch)
     if (tracking) lines.push(tracking)
   }
+  if (repo.bisect) {
+    lines.push(`bisect 中です ('${repo.bisect.start}' から始めました)。git bisect good / bad で判定してください`)
+  }
   if (op?.type === 'merge') {
     lines.push(
       repo.conflicts.length > 0
@@ -1232,7 +1327,7 @@ function statusLines(repo: Repo): string[] {
         : 'すべてのコンフリクトが解消されました。"git commit" でマージを完了してください',
     )
   } else if (op && op.current !== null) {
-    lines.push(`${op.type} の途中です (${op.current.id} を適用中)`)
+    lines.push(`${op.type} の途中です (${op.current.action === 'merge' ? `merge ${op.current.label}` : op.current.id} を適用中)`)
   } else if (op?.type === 'rebase') {
     lines.push('コミットを修正できます。終わったら "git rebase --continue" を実行してください')
   }

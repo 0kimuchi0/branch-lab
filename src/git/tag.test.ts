@@ -64,10 +64,10 @@ describe('git tag', () => {
 describe('タグの push / fetch', () => {
   it('push origin <タグ> と --tags でリモートにタグを送る', () => {
     const repo = run(['git tag v1.0', 'git tag v0.9 C1'], twoCommits())
-    expect(out(repo, 'git push origin v1.0')).toBe('To origin\n * [new tag]         v1.0 -> v1.0')
+    expect(out(repo, 'git push origin v1.0')).toBe('To https://example.com/branch-lab.git\n * [new tag]         v1.0 -> v1.0')
     const pushed = run(['git push --tags'], repo)
-    expect(Object.keys(pushed.remote.tags).sort()).toEqual(['v0.9', 'v1.0'])
-    expect(pushed.remote.commits['C2']).toBeDefined()
+    expect(Object.keys(pushed.remotes.origin!.tags).sort()).toEqual(['v0.9', 'v1.0'])
+    expect(pushed.remotes.origin!.commits['C2']).toBeDefined()
     expect(computeRemoteLayout(pushed).labels.map((label) => label.text)).toContain('tag: v1.0')
     expect(out(pushed, 'git push --tags')).toBe('Everything up-to-date')
   })
@@ -75,7 +75,7 @@ describe('タグの push / fetch', () => {
   it('リモートに別のコミットを指す同じ名前のタグがあれば、-f がない限り拒否する', () => {
     const repo = run(['git tag v1.0 C1', 'git push origin v1.0', 'git tag -f v1.0 C2'], twoCommits())
     expect(executeCommand(repo, 'git push origin v1.0').output).toContain('(already exists)')
-    expect(run(['git push -f origin v1.0'], repo).remote.tags['v1.0']?.target).toBe('C2')
+    expect(run(['git push -f origin v1.0'], repo).remotes.origin!.tags['v1.0']?.target).toBe('C2')
   })
 
   it('fetch はリモートのタグを取り込み、手元の別のタグは上書きしない', () => {
@@ -91,9 +91,9 @@ describe('タグの push / fetch', () => {
   it('push origin --delete でリモートのタグやブランチを消す', () => {
     const repo = run(['git tag v1.0', 'git push origin v1.0', 'git switch -c topic', 'git push -u origin topic'], twoCommits())
     const deleted = run(['git push origin --delete v1.0', 'git push origin --delete topic'], repo)
-    expect(deleted.remote.tags).toEqual({})
-    expect(deleted.remote.branches['topic']).toBeUndefined()
-    expect(deleted.remoteBranches['topic']).toBeUndefined()
+    expect(deleted.remotes.origin!.tags).toEqual({})
+    expect(deleted.remotes.origin!.branches['topic']).toBeUndefined()
+    expect(deleted.remoteBranches['origin/topic']).toBeUndefined()
     expect(executeCommand(deleted, 'git push origin --delete nope').ok).toBe(false)
   })
 })

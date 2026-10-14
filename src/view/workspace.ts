@@ -2,7 +2,7 @@
  * 作業ディレクトリとステージに表示するファイルの一覧を作る純粋関数。
  * 作業ディレクトリはステージと、ステージは HEAD と比べた状態を付ける。
  */
-import { headTree, type Repo } from '../git/model'
+import { headTree, REMOTE_NAME, type Repo } from '../git/model'
 import { changedPaths } from '../git/tree'
 
 export type FileState = 'clean' | 'untracked' | 'added' | 'modified' | 'deleted' | 'conflict'
@@ -58,4 +58,11 @@ export function stagedFiles(repo: Repo): AreaFile[] {
       : 'modified'
     return { path, state, content }
   })
+}
+
+/** 画面に並べるリモート名。origin を先頭にして、残りは名前順。 */
+export function remoteNames(repo: Repo): string[] {
+  return Object.keys(repo.remotes).sort(
+    (a, b) => Number(b === REMOTE_NAME) - Number(a === REMOTE_NAME) || a.localeCompare(b),
+  )
 }

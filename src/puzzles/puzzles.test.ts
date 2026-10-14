@@ -25,6 +25,23 @@ describe('PUZZLES', () => {
 })
 
 describe('isSolved', () => {
+  it('rebase-merges: ふつうの rebase で一直線にすると不正解', () => {
+    const built = buildPuzzle(puzzle('rebase-merges'))
+    expect(isSolved(built, run(['git rebase main'], built.start))).toBe(false)
+  })
+
+  it('remotes: origin に push しなければ不正解、pull upstream main でも正解', () => {
+    const built = buildPuzzle(puzzle('remotes'))
+    expect(isSolved(built, run(['git pull upstream main'], built.start))).toBe(false)
+    expect(isSolved(built, run(['git pull upstream main', 'git push'], built.start))).toBe(true)
+  })
+
+  it('bisect: タグを付けても bisect を終えていなければ不正解', () => {
+    const built = buildPuzzle(puzzle('bisect'))
+    expect(isSolved(built, run(['git bisect start main C1', 'git tag bug C5'], built.start))).toBe(false)
+    expect(isSolved(built, run(['git tag bug C5'], built.start))).toBe(true)
+  })
+
   it('コミット ID がずれても、履歴の形と由来が同じなら正解', () => {
     const built = buildPuzzle(puzzle('branch'))
     const repo = run(

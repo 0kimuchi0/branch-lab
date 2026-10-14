@@ -1,7 +1,8 @@
-import { useMemo } from 'react'
+import { Fragment, useMemo } from 'react'
 import { computeLayout, computeRemoteLayout } from '../graph/layout'
 import { parseEditorSave } from '../git/commands'
 import type { BuiltPuzzle } from '../puzzles/puzzles'
+import { remoteNames } from '../view/workspace'
 import { GraphView } from './GraphView'
 
 /** 解答例の 1 行。エディタの保存は、書く内容がわかる形にする。 */
@@ -26,7 +27,10 @@ export function PuzzlePanel({ puzzles, index, solved, solvedIds, onSelect }: Puz
   const { puzzle } = built
   const goal = built.goals[0] ?? built.start
   const local = useMemo(() => computeLayout(goal), [goal])
-  const remote = useMemo(() => computeRemoteLayout(goal), [goal])
+  const remotes = useMemo(
+    () => remoteNames(goal).map((name) => ({ name, layout: computeRemoteLayout(goal, name) })),
+    [goal],
+  )
   const isLast = index === puzzles.length - 1
 
   return (
@@ -74,10 +78,12 @@ export function PuzzlePanel({ puzzles, index, solved, solvedIds, onSelect }: Puz
         <h3>目標の履歴{puzzle.checkRemote ? ' (ローカル)' : ''}</h3>
         <GraphView layout={local} label="目標のローカルリポジトリのコミットグラフ" />
         {puzzle.checkRemote && (
-          <>
-            <h3>目標の履歴 (リモート origin)</h3>
-            <GraphView layout={remote} label="目標のリモートリポジトリのコミットグラフ" />
-          </>
+          remotes.map(({ name, layout }) => (
+            <Fragment key={name}>
+              <h3>目標の履歴 (リモート {name})</h3>
+              <GraphView layout={layout} label={`目標のリモートリポジトリ ${name} のコミットグラフ`} />
+            </Fragment>
+          ))
         )}
         <p className="puzzle-note">
           コミット ID やメッセージは違っていても、履歴の形と各コミットの由来が同じなら正解です。
