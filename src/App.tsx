@@ -183,6 +183,7 @@ export default function App() {
         </p>
         <div className="header-row">
           <p className="status" aria-live="polite">
+            {Object.keys(session.repo.worktrees).length > 0 && `${session.repo.worktree} — `}
             HEAD: {branch ?? '(detached)'} @ {headCommitId(session.repo)}
           </p>
           <ShareButton getUrl={() => shareUrl(hash || encodeShare(shared))} />

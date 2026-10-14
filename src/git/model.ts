@@ -247,6 +247,84 @@ export interface Repo {
   /** git config で設定した値。キーは "rerere.enabled" のような小文字の名前。 */
   readonly config: Readonly<Record<string, string>>
   readonly rerere: RerereState
+  /** 今いる worktree のパス (メインの worktree は MAIN_WORKTREE)。 */
+  readonly worktree: string
+  /**
+   * ほかの worktree (git worktree add で作ったもの・今いないメインの worktree) の状態。キーはパス。
+   * 今いる worktree の状態は Repo の head・index・workdir などにある。
+   */
+  readonly worktrees: Readonly<Record<string, WorktreeState>>
+}
+
+/** worktree ごとに持つ状態 (それ以外のブランチ・コミット・stash・設定などは共有する)。 */
+export interface WorktreeState {
+  readonly head: Head
+  readonly index: Tree
+  readonly workdir: Tree
+  readonly conflicts: readonly Conflict[]
+  readonly operation: Operation | null
+  readonly editor: Editor | null
+  readonly bisect: BisectState | null
+  /** この worktree の HEAD の reflog。 */
+  readonly headReflog: readonly ReflogEntry[]
+  readonly rererePending: RerereState['pending']
+}
+
+/** メインの worktree (clone したディレクトリ) のパス。 */
+export const MAIN_WORKTREE = '~/branch-lab'
+
+/** 今いる worktree の状態を取り出す。 */
+export function currentWorktreeState(repo: Repo): WorktreeState {
+  return {
+    head: repo.head,
+    index: repo.index,
+    workdir: repo.workdir,
+    conflicts: repo.conflicts,
+    operation: repo.operation,
+    editor: repo.editor,
+    bisect: repo.bisect,
+    headReflog: repo.reflogs['HEAD'] ?? [],
+    rererePending: repo.rerere.pending,
+  }
+}
+
+/** 別の worktree に移る (cd)。今いる worktree の状態はしまっておく。 */
+export function enterWorktree(repo: Repo, path: string): Repo {
+  if (path === repo.worktree) return repo
+  const target = repo.worktrees[path]
+  if (target === undefined) throw new GitError(`fatal: '${path}' は worktree ではありません`)
+  const worktrees = { ...repo.worktrees, [repo.worktree]: currentWorktreeState(repo) }
+  delete worktrees[path]
+  return {
+    ...repo,
+    head: target.head,
+    index: target.index,
+    workdir: target.workdir,
+    conflicts: target.conflicts,
+    operation: target.operation,
+    editor: target.editor,
+    bisect: target.bisect,
+    reflogs: { ...repo.reflogs, HEAD: target.headReflog },
+    rerere: { ...repo.rerere, pending: target.rererePending },
+    worktree: path,
+    worktrees,
+  }
+}
+
+/** ほかの worktree で使っている (チェックアウトしている、またはその上で rebase している) ブランチなら、その worktree のパス。 */
+export function branchWorktree(repo: Repo, name: string): string | null {
+  for (const [path, state] of Object.entries(repo.worktrees)) {
+    if (state.head.type === 'branch' && state.head.name === name) return path
+    if (state.operation && state.operation.type !== 'merge' && state.operation.branch === name) return path
+    if (state.bisect && state.bisect.start === name) return path
+  }
+  return null
+}
+
+/** ほかの worktree で使っているブランチには切り替えられない。 */
+export function requireBranchFree(repo: Repo, name: string): void {
+  const path = branchWorktree(repo, name)
+  if (path !== null) throw new GitError(`fatal: '${name}' is already used by worktree at '${path}'`)
 }
 
 /** git rerere の記録 (.git/rr-cache と MERGE_RR)。 */
@@ -304,6 +382,8 @@ export function createRepo(): Repo {
     bisect: null,
     config: {},
     rerere: EMPTY_RERERE,
+    worktree: MAIN_WORKTREE,
+    worktrees: {},
     reflogs: {
       HEAD: [{ id: root.id, message: `clone: from ${REMOTE_NAME}` }],
       [DEFAULT_BRANCH]: [{ id: root.id, message: `clone: from ${REMOTE_NAME}` }],
@@ -394,7 +474,13 @@ export function reachableCommits(repo: Repo): Set<CommitId> {
   tips.push(headCommitId(repo))
   if (repo.operation?.type === 'merge') tips.push(repo.operation.theirs)
   if (repo.bisect) tips.push(...(repo.bisect.bad === null ? [] : [repo.bisect.bad]), ...repo.bisect.good)
-  if (repo.operation && repo.operation.type !== 'merge') tips.push(...Object.values(repo.operation.labels ?? {}))
+  for (const state of [currentWorktreeState(repo), ...Object.values(repo.worktrees)]) {
+    tips.push(state.head.type === 'branch' ? (repo.branches[state.head.name] as CommitId) : state.head.id)
+    const op = state.operation
+    if (op?.type === 'merge') tips.push(op.theirs)
+    else if (op) tips.push(op.origHead, ...Object.values(op.labels ?? {}))
+    if (state.bisect) tips.push(...(state.bisect.bad === null ? [] : [state.bisect.bad]), ...state.bisect.good)
+  }
   const reachable = new Set<CommitId>()
   for (const tip of tips) {
     for (const id of ancestors(repo.commits, tip)) reachable.add(id)
@@ -1043,7 +1129,9 @@ export function listBranches(repo: Repo, options: { readonly remotes?: boolean }
   const lines: string[] = []
   if (repo.head.type === 'detached') lines.push(`* (HEAD detached at ${repo.head.id})`)
   for (const name of Object.keys(repo.branches).sort()) {
-    lines.push(`${name === current ? '*' : ' '} ${name}`)
+    // ほかの worktree でチェックアウトしているブランチには + を付ける (Git と同じ)
+    const mark = name === current ? '*' : branchWorktree(repo, name) !== null ? '+' : ' '
+    lines.push(`${mark} ${name}`)
   }
   if (options.remotes) {
     for (const name of Object.keys(repo.remoteBranches).sort()) {
@@ -1060,6 +1148,10 @@ export function deleteBranch(repo: Repo, name: string, force = false): Operation
   }
   if (name === currentBranch(repo)) {
     throw new GitError(`error: 現在いるブランチ '${name}' は削除できません`)
+  }
+  const usedBy = branchWorktree(repo, name)
+  if (usedBy !== null) {
+    throw new GitError(`error: cannot delete branch '${name}' used by worktree at '${usedBy}'`)
   }
   const upstream = repo.upstreams[name]
   const upstreamId = upstream === undefined ? undefined : repo.remoteBranches[upstream]
@@ -1099,13 +1191,20 @@ export function renameBranch(repo: Repo, from: string, to: string): OperationRes
   }
   const head: Head =
     repo.head.type === 'branch' && repo.head.name === from ? { type: 'branch', name: to } : repo.head
+  // ほかの worktree でチェックアウトしていれば、そちらの HEAD も付け替える
+  const worktrees = Object.fromEntries(
+    Object.entries(repo.worktrees).map(([path, state]): [string, WorktreeState] => [
+      path,
+      state.head.type === 'branch' && state.head.name === from ? { ...state, head: { type: 'branch', name: to } } : state,
+    ]),
+  )
   const reflogs: Record<string, readonly ReflogEntry[]> = { ...repo.reflogs }
   reflogs[to] = [
     { id: target, message: `Branch: renamed refs/heads/${from} to refs/heads/${to}` },
     ...(reflogs[from] ?? []),
   ]
   delete reflogs[from]
-  return { repo: { ...repo, branches, upstreams, head, reflogs }, output: '' }
+  return { repo: { ...repo, branches, upstreams, head, reflogs, worktrees }, output: '' }
 }
 
 /** git branch -u origin/<ブランチ>: branch の upstream を設定する。 */
@@ -1197,6 +1296,7 @@ export function switchBranch(
   if (currentBranch(repo) === name) {
     return { repo, output: `すでに '${name}' にいます` }
   }
+  requireBranchFree(repo, name)
   const next = moveHead(repo, { type: 'branch', name }, repo.branches[name] as CommitId, 'switch', name)
   return {
     repo: next,

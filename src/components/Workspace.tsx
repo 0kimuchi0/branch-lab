@@ -2,7 +2,7 @@ import { useMemo, type ReactNode } from 'react'
 import { getCommit, type Repo } from '../git/model'
 import { changedPaths } from '../git/tree'
 import { computeLayout, computeRemoteLayout } from '../graph/layout'
-import { remoteNames, stagedFiles, workdirFiles } from '../view/workspace'
+import { remoteNames, stagedFiles, workdirFiles, worktreeRows } from '../view/workspace'
 import { FileArea } from './FileArea'
 import { GraphView } from './GraphView'
 
@@ -63,12 +63,14 @@ export function Workspace({ repo }: { readonly repo: Repo }) {
   )
   const workdir = useMemo(() => workdirFiles(repo), [repo])
   const staged = useMemo(() => stagedFiles(repo), [repo])
+  const worktrees = useMemo(() => worktreeRows(repo), [repo])
+  const many = worktrees.length > 1
 
   return (
     <div className="workspace">
       <OperationBanner repo={repo} />
       <div className="file-areas">
-        <Area title="作業ディレクトリ" hint="echo / rm で編集">
+        <Area title={many ? `作業ディレクトリ (${repo.worktree})` : '作業ディレクトリ'} hint="echo / rm で編集">
           <FileArea files={workdir} emptyText="ファイルはありません" />
         </Area>
         <Flow>
@@ -97,6 +99,18 @@ export function Workspace({ repo }: { readonly repo: Repo }) {
           <GraphView layout={layout} label={`リモートリポジトリ ${name} のコミットグラフ`} />
         </Area>
       ))}
+      {many && (
+        <Area title="worktree" hint="cd <パス> で移動 (コミットとブランチは共有)" className="area-stash">
+          <ul className="stash-list">
+            {worktrees.map((row) => (
+              <li key={row.path}>
+                <code>{row.path}</code> {row.checkedOut}
+                {row.current && <span className="stash-files">← 今いる場所</span>}
+              </li>
+            ))}
+          </ul>
+        </Area>
+      )}
       {repo.stash.length > 0 && (
         <Area title="スタッシュ" hint="git stash で退避した変更 (pop / apply で戻す)" className="area-stash">
           <ul className="stash-list">

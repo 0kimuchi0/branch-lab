@@ -46,6 +46,7 @@ import {
 } from './model'
 import { getConfig, listConfig, setConfig, unsetConfig } from './config'
 import { rerereCommand } from './rerere'
+import { changeDirectory, worktreeAdd, worktreeList, worktreePrune, worktreeRemove } from './worktree'
 import { bisectLog, bisectMark, bisectReset, bisectRunning, bisectStart } from './bisect'
 import { blame, gitDiff, show } from './inspect'
 import { createTag, deleteTags, listTags } from './tag'
@@ -83,6 +84,7 @@ export const HELP_TEXT = [
   'ファイルの操作 (シェルのコマンド):',
   '  echo "内容" > ファイル     ファイルを上書きする (>> なら追記)',
   '  touch / cat / ls / rm      作成・表示・一覧・削除',
+  '  cd <パス> / pwd            worktree の間を移動する・今いる場所を表示する',
   '',
   'Git のコマンド (先頭の git は省略できます。rm だけは git rm と区別します):',
   '  status / log [--oneline] [--all] / reflog [<ブランチ>]',
@@ -105,6 +107,7 @@ export const HELP_TEXT = [
   '  fetch [<リモート> | --all] / pull [--rebase | --no-rebase] [<リモート> [<ブランチ>]]',
   '  config <キー> [<値>] / config --unset <キー> / config --list   (rerere.enabled・pull.rebase・merge.ff など)',
   '  rerere [status | diff | remaining | forget <パス> | clear]   (git config rerere.enabled true で有効)',
+  '  worktree add [-b <ブランチ>] [--detach] <パス> [<コミット>] / worktree list / worktree remove [-f] <パス>',
   '  remote [-v] / remote add <名前> <URL> / remove / rename / set-url / get-url',
   '  (merge / rebase / cherry-pick / revert は --continue・--abort が使えます)',
   '',
@@ -613,6 +616,35 @@ function runPull(repo: Repo, args: readonly string[]): OperationResult {
   })
 }
 
+function runWorktree(repo: Repo, args: readonly string[]): OperationResult {
+  const [sub, ...rest] = args
+  switch (sub) {
+    case 'add': {
+      const parsed = parseArgs(rest, { flags: ['--detach'], values: ['-b', '-B'], aliases: { '-d': '--detach' } })
+      const text = 'git worktree add [-b <新しいブランチ>] [--detach] <パス> [<コミット>]'
+      const [path, commitish, ...extra] = parsed.positional
+      if (path === undefined || extra.length > 0) usage(text)
+      const newBranch = parsed.values.get('-b') ?? parsed.values.get('-B')
+      return worktreeAdd(repo, path, commitish, {
+        ...(newBranch === undefined ? {} : { newBranch }),
+        detach: parsed.flags.has('--detach'),
+      })
+    }
+    case 'list': {
+      parseArgs(rest, { flags: [] })
+      return worktreeList(repo)
+    }
+    case 'remove': {
+      const parsed = parseArgs(rest, { flags: ['-f'], aliases: { '--force': '-f' } })
+      return worktreeRemove(repo, requireOne(parsed.positional, 'git worktree remove [-f] <パス>'), parsed.flags.has('-f'))
+    }
+    case 'prune':
+      return worktreePrune(repo)
+    default:
+      throw new GitError(`使い方: git worktree add / list / remove / prune${sub === undefined ? '' : ` (未対応のサブコマンド: ${sub})`}`)
+  }
+}
+
 function runConfig(repo: Repo, args: readonly string[]): OperationResult {
   const parsed = parseArgs(args, {
     flags: ['--global', '--local', '--system', '-l', '--unset'],
@@ -838,6 +870,8 @@ function runGit(repo: Repo, name: string, args: readonly string[], raw: string):
       return runBisect(repo, args, raw)
     case 'config':
       return runConfig(repo, args)
+    case 'worktree':
+      return runWorktree(repo, args)
     case 'rerere': {
       const [sub, ...paths] = args
       return rerereCommand(repo, sub, paths)
@@ -877,7 +911,7 @@ function requireOne(args: readonly string[], text: string): string {
   return args[0] as string
 }
 
-const SHELL_COMMANDS = new Set(['echo', 'touch', 'cat', 'ls', 'rm'])
+const SHELL_COMMANDS = new Set(['echo', 'touch', 'cat', 'ls', 'rm', 'cd', 'pwd'])
 
 function runShell(repo: Repo, name: string, tokens: readonly Token[]): OperationResult {
   const args = tokens.map((token) => token.value)
@@ -892,6 +926,11 @@ function runShell(repo: Repo, name: string, tokens: readonly Token[]): Operation
       return readFile(repo, requireOne(args, 'cat <ファイル>'))
     case 'ls':
       return listFiles(repo)
+    case 'cd':
+      if (args.length > 1) usage('cd <ディレクトリ>')
+      return changeDirectory(repo, args[0])
+    case 'pwd':
+      return { repo, output: repo.worktree }
     default: {
       const paths = args.filter((arg) => arg !== '-f')
       if (paths.length === 0) usage('rm <ファイル>...')
