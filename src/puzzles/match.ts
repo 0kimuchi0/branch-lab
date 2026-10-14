@@ -94,13 +94,15 @@ export function matchesGoal(actual: Repo, goal: Repo, options: MatchOptions): bo
     }
   }
   if (options.checkRemote) {
-    return branchesMatch(
-      actual.remote.commits,
-      actual.remote.branches,
-      goal.remote.commits,
-      goal.remote.branches,
-      options.setupNextId,
-    )
+    const names = new Set([...Object.keys(actual.remotes), ...Object.keys(goal.remotes)])
+    for (const name of names) {
+      const a = actual.remotes[name]
+      const g = goal.remotes[name]
+      if (!a || !g) return false
+      if (!branchesMatch(a.commits, a.branches, g.commits, g.branches, options.setupNextId)) {
+        return false
+      }
+    }
   }
   return true
 }

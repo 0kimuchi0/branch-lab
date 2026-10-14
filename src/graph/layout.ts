@@ -251,10 +251,14 @@ export function computeLayout(repo: Repo): GraphLayout {
       refs.push({ key: `bisect:good:${index}`, text: 'bisect/good', kind: 'bisect', target })
     })
   }
-  for (const name of branchOrder(Object.keys(repo.remoteBranches))) {
+  const remoteFirst = `${REMOTE_NAME}/${DEFAULT_BRANCH}`
+  const remoteRefs = Object.keys(repo.remoteBranches).sort(
+    (a, b) => Number(b === remoteFirst) - Number(a === remoteFirst),
+  )
+  for (const name of remoteRefs) {
     refs.push({
       key: `remote:${name}`,
-      text: `${REMOTE_NAME}/${name}`,
+      text: name,
       kind: 'remote',
       target: repo.remoteBranches[name] as CommitId,
     })
@@ -262,7 +266,6 @@ export function computeLayout(repo: Repo): GraphLayout {
   return layoutGraph(repo.commits, refs)
 }
 
-/** リモート (origin) のグラフ。 */
 function tagRefs(tags: Repo['tags']): GraphRef[] {
   return Object.keys(tags)
     .sort((a, b) => a.localeCompare(b, 'en', { numeric: true }))
@@ -274,13 +277,16 @@ function tagRefs(tags: Repo['tags']): GraphRef[] {
     }))
 }
 
-export function computeRemoteLayout(repo: Repo): GraphLayout {
-  const refs: GraphRef[] = branchOrder(Object.keys(repo.remote.branches)).map((name) => ({
-    key: `branch:${name}`,
-    text: name,
+/** リモート (既定は origin) のグラフ。 */
+export function computeRemoteLayout(repo: Repo, name = 'origin'): GraphLayout {
+  const remote = repo.remotes[name]
+  if (!remote) return layoutGraph({}, [])
+  const refs: GraphRef[] = branchOrder(Object.keys(remote.branches)).map((branch) => ({
+    key: `branch:${branch}`,
+    text: branch,
     kind: 'branch',
-    target: repo.remote.branches[name] as CommitId,
+    target: remote.branches[branch] as CommitId,
   }))
-  refs.push(...tagRefs(repo.remote.tags))
-  return layoutGraph(repo.remote.commits, refs)
+  refs.push(...tagRefs(remote.tags))
+  return layoutGraph(remote.commits, refs)
 }

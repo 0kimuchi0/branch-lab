@@ -192,7 +192,7 @@ export const PUZZLES: readonly Puzzle[] = [
       'git push',
     ],
     solutions: [['git tag v1.0 C2', 'git push origin v1.0']],
-    check: (repo) => repo.tags['v1.0']?.target === 'C2' && repo.remote.tags['v1.0']?.target === 'C2',
+    check: (repo) => repo.tags['v1.0']?.target === 'C2' && repo.remotes.origin?.tags['v1.0']?.target === 'C2',
   },
   {
     id: 'reflog',

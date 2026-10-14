@@ -30,9 +30,9 @@ describe('createRepo', () => {
     expect(headCommitId(repo)).toBe('C0')
     expect(repo.workdir).toEqual({ 'README.md': '# BranchLab\n' })
     expect(repo.index).toEqual(repo.workdir)
-    expect(repo.remote.branches).toEqual({ main: 'C0' })
-    expect(repo.remoteBranches).toEqual({ main: 'C0' })
-    expect(repo.upstreams).toEqual({ main: 'main' })
+    expect(repo.remotes.origin!.branches).toEqual({ main: 'C0' })
+    expect(repo.remoteBranches).toEqual({ 'origin/main': 'C0' })
+    expect(repo.upstreams).toEqual({ main: 'origin/main' })
   })
 })
 
@@ -139,7 +139,7 @@ describe('branch / switch', () => {
   it('origin にだけあるブランチへの switch は追跡ブランチを作る', () => {
     const repo = run(['git switch -c topic', 'git commit --allow-empty -m t', 'git push -u origin topic', 'git switch main', 'git branch -D topic', 'git switch topic'])
     expect(repo.branches['topic']).toBe('C1')
-    expect(repo.upstreams['topic']).toBe('topic')
+    expect(repo.upstreams['topic']).toBe('origin/topic')
   })
 
   it('存在しないブランチへの switch はエラーになる', () => {

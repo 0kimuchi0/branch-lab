@@ -11,7 +11,7 @@ import {
 } from './history'
 import {
   GitError,
-  REMOTE_NAME,
+  getRemote,
   add,
   commit,
   createBranch,
@@ -43,7 +43,19 @@ import {
 import { bisectLog, bisectMark, bisectReset, bisectRunning, bisectStart } from './bisect'
 import { blame, gitDiff, show } from './inspect'
 import { createTag, deleteTags, listTags } from './tag'
-import { fetch, pull, push, pushDelete, pushTags, teammateCommit } from './remote'
+import {
+  addRemote,
+  fetch,
+  listRemotes,
+  pull,
+  push,
+  pushDelete,
+  pushTags,
+  removeRemote,
+  renameRemote,
+  setRemoteUrl,
+  teammateCommit,
+} from './remote'
 import {
   stashApply,
   stashBranch,
@@ -82,14 +94,15 @@ export const HELP_TEXT = [
   '  tag [-a] [-m "…"] [-f] <タグ> [<コミット>] / tag -l [<パターン>] / tag -d <タグ>',
   '  bisect start [<悪い> [<良い>]] / bisect good / bad / skip / reset / log / run [!] <コマンド>',
   '  stash [push [-m "…"] [-u] [-k]] / stash list / show [-p] / apply / pop [--index] / drop / clear / branch',
-  '  push [-u] [-f] [--tags] [origin <ブランチ|タグ>] / push origin --delete <名前>',
-  '  fetch / pull [--rebase | --no-rebase]',
+  '  push [-u] [-f] [--tags] [<リモート> [<ブランチ|タグ>]] / push <リモート> --delete <名前>',
+  '  fetch [<リモート> | --all] / pull [--rebase | --no-rebase] [<リモート> [<ブランチ>]]',
+  '  remote [-v] / remote add <名前> <URL> / remove / rename / set-url / get-url',
   '  (merge / rebase / cherry-pick / revert は --continue・--abort が使えます)',
   '',
   '<コミット> の例: C1, main, v1.0, origin/main, HEAD~1, HEAD^2, HEAD@{1}, main@{2}',
   '',
   'このアプリ独自のコマンド:',
-  '  teammate [<ブランチ>]   他の人が origin に push したことにする',
+  '  teammate [<リモート>] [<ブランチ>]   他の人がリモートに push したことにする',
 ].join('\n')
 
 interface Token {
@@ -243,7 +256,7 @@ function runBranch(repo: Repo, args: readonly string[]): OperationResult {
   const [first, second] = parsed.positional
   const upstream = parsed.values.get('-u')
   if (upstream !== undefined) {
-    atMost(parsed, 1, 'git branch -u origin/<ブランチ> [<ブランチ>]')
+    atMost(parsed, 1, 'git branch -u <リモート>/<ブランチ> [<ブランチ>]')
     return setUpstream(repo, upstream, first)
   }
   if (parsed.flags.has('-d') || parsed.flags.has('-D')) {
@@ -504,13 +517,21 @@ function runStash(repo: Repo, args: readonly string[]): OperationResult {
   }
 }
 
-function parseRemoteArgs(positional: readonly string[], text: string): string | undefined {
+/** [<リモート> [<ブランチ>]] の形の引数を読む。リモートが存在するかを確かめる。 */
+function parseRemoteArgs(
+  repo: Repo,
+  positional: readonly string[],
+  text: string,
+): { readonly remote?: string; readonly branch?: string } {
   const [remote, branch, ...rest] = positional
   if (rest.length > 0) usage(text)
-  if (remote !== undefined && remote !== REMOTE_NAME) {
-    throw new GitError(`fatal: '${remote}' というリモートはありません (使えるのは ${REMOTE_NAME} だけです)`)
+  if (remote === undefined) return {}
+  if (!(remote in repo.remotes)) {
+    throw new GitError(
+      `fatal: '${remote}' はリモートリポジトリではありません\n` + 'リモートの一覧は git remote -v で確認できます',
+    )
   }
-  return branch
+  return { remote, ...(branch === undefined ? {} : { branch }) }
 }
 
 function runPush(repo: Repo, args: readonly string[]): OperationResult {
@@ -518,22 +539,32 @@ function runPush(repo: Repo, args: readonly string[]): OperationResult {
     flags: ['-u', '-f', '--tags', '-d'],
     aliases: { '--set-upstream': '-u', '--force': '-f', '--delete': '-d' },
   })
-  const text = 'git push [-u] [-f] [--tags] [origin [<ブランチ|タグ>]] / git push origin --delete <名前>'
-  const branch = parseRemoteArgs(parsed.positional, text)
+  const text = 'git push [-u] [-f] [--tags] [<リモート> [<ブランチ|タグ>]] / git push <リモート> --delete <名前>'
+  const { remote, branch } = parseRemoteArgs(repo, parsed.positional, text)
+  const force = parsed.flags.has('-f')
   if (parsed.flags.has('-d')) {
-    if (branch === undefined) usage(text)
-    return pushDelete(repo, branch)
+    if (branch === undefined || remote === undefined) usage(text)
+    return pushDelete(repo, branch, remote)
   }
   if (parsed.flags.has('--tags')) {
     if (branch !== undefined) usage(text)
-    return pushTags(repo, Object.keys(repo.tags).sort(), { force: parsed.flags.has('-f') })
+    return pushTags(repo, Object.keys(repo.tags).sort(), { force, ...(remote === undefined ? {} : { remote }) })
   }
   return push(repo, {
+    ...(remote === undefined ? {} : { remote }),
     ...(branch === undefined ? {} : { branch }),
-    explicit: branch !== undefined,
-    force: parsed.flags.has('-f'),
+    force,
     setUpstream: parsed.flags.has('-u'),
   })
+}
+
+function runFetch(repo: Repo, args: readonly string[]): OperationResult {
+  const parsed = parseArgs(args, { flags: ['--all'] })
+  const text = 'git fetch [<リモート>] / git fetch --all'
+  const { remote, branch } = parseRemoteArgs(repo, parsed.positional, text)
+  if (branch !== undefined || (parsed.flags.has('--all') && remote !== undefined)) usage(text)
+  const result = fetch(repo, { ...(remote === undefined ? {} : { remote }), all: parsed.flags.has('--all') })
+  return result.output === '' ? { ...result, output: '(新しいコミットはありません)' } : result
 }
 
 function runPull(repo: Repo, args: readonly string[]): OperationResult {
@@ -541,19 +572,64 @@ function runPull(repo: Repo, args: readonly string[]): OperationResult {
     flags: ['--rebase', '--no-rebase', '--ff-only', '--no-edit'],
     aliases: { '-r': '--rebase' },
   })
-  const branch = parseRemoteArgs(parsed.positional, 'git pull [--rebase | --no-rebase] [origin]')
-  if (branch !== undefined) {
-    throw new GitError('このアプリの pull では、ブランチを指定せずに upstream から取り込みます')
-  }
+  const text = 'git pull [--rebase | --no-rebase] [<リモート> [<ブランチ>]]'
+  const { remote, branch } = parseRemoteArgs(repo, parsed.positional, text)
   if (parsed.flags.has('--rebase') && parsed.flags.has('--no-rebase')) {
     throw new GitError('fatal: --rebase と --no-rebase は同時に指定できません')
   }
   return pull(repo, {
+    ...(remote === undefined ? {} : { remote }),
+    ...(branch === undefined ? {} : { branch }),
     ...(parsed.flags.has('--rebase') ? { rebase: true } : {}),
     ...(parsed.flags.has('--no-rebase') ? { rebase: false } : {}),
     fastForwardOnly: parsed.flags.has('--ff-only'),
     noEdit: parsed.flags.has('--no-edit'),
   })
+}
+
+function runRemote(repo: Repo, args: readonly string[]): OperationResult {
+  const parsed = parseArgs(args, { flags: ['-v'], aliases: { '--verbose': '-v' } })
+  const [sub, ...rest] = parsed.positional
+  const exactly = (count: number, text: string): string[] => {
+    if (rest.length !== count) usage(text)
+    return rest
+  }
+  switch (sub) {
+    case undefined:
+      return listRemotes(repo, parsed.flags.has('-v'))
+    case 'add': {
+      const [name, url] = exactly(2, 'git remote add <名前> <URL>') as [string, string]
+      return addRemote(repo, name, url)
+    }
+    case 'remove':
+    case 'rm': {
+      const [name] = exactly(1, 'git remote remove <名前>') as [string]
+      return removeRemote(repo, name)
+    }
+    case 'rename': {
+      const [from, to] = exactly(2, 'git remote rename <古い名前> <新しい名前>') as [string, string]
+      return renameRemote(repo, from, to)
+    }
+    case 'set-url': {
+      const [name, url] = exactly(2, 'git remote set-url <名前> <URL>') as [string, string]
+      return setRemoteUrl(repo, name, url)
+    }
+    case 'get-url': {
+      const [name] = exactly(1, 'git remote get-url <名前>') as [string]
+      return { repo, output: getRemote(repo, name).url }
+    }
+    default:
+      throw new GitError(`error: 未対応の remote のサブコマンドです: ${sub}`)
+  }
+}
+
+/** teammate [<リモート>] [<ブランチ>]: 1 つだけ書いたときは、リモート名ならそのリモートの main とみなす。 */
+function runTeammate(repo: Repo, args: readonly string[]): OperationResult {
+  const [first, second, ...rest] = args
+  if (rest.length > 0) usage('teammate [<リモート>] [<ブランチ>]')
+  if (second !== undefined) return teammateCommit(repo, second, first)
+  if (first !== undefined && first in repo.remotes) return teammateCommit(repo, undefined, first)
+  return teammateCommit(repo, first)
 }
 
 function runGit(repo: Repo, name: string, args: readonly string[], raw: string): OperationResult {
@@ -713,14 +789,10 @@ function runGit(repo: Repo, name: string, args: readonly string[], raw: string):
     }
     case 'push':
       return runPush(repo, args)
-    case 'fetch': {
-      const parsed = parseArgs(args, { flags: [] })
-      if (parseRemoteArgs(parsed.positional, 'git fetch [origin]') !== undefined) {
-        usage('git fetch [origin]')
-      }
-      const result = fetch(repo)
-      return result.output === '' ? { ...result, output: '(新しいコミットはありません)' } : result
-    }
+    case 'fetch':
+      return runFetch(repo, args)
+    case 'remote':
+      return runRemote(repo, args)
     case 'pull':
       return runPull(repo, args)
     default:
@@ -893,10 +965,8 @@ function executeOnce(repo: Repo, input: string): CommandResult {
   try {
     let result: OperationResult
     if (!isGit && SHELL_COMMANDS.has(name)) result = runShell(repo, name, rest)
-    else if (!isGit && name === 'teammate') {
-      if (args.length > 1) usage('teammate [<ブランチ>]')
-      result = teammateCommit(repo, args[0])
-    } else if (name === 'help') result = { repo, output: HELP_TEXT }
+    else if (!isGit && name === 'teammate') result = runTeammate(repo, args)
+    else if (name === 'help') result = { repo, output: HELP_TEXT }
     else result = runGit(repo, name, args, input)
     return { ...result, ok: true }
   } catch (error) {
