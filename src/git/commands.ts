@@ -2,12 +2,15 @@ import {
   abortOperation,
   cherryPick,
   continueOperation,
-  merge,
+  mergeMany,
+  parseStrategy,
+  parseStrategyOption,
   rebase,
   rebaseInteractive,
   revert,
   saveEditor,
   skipOperation,
+  type MergeStrategy,
 } from './history'
 import {
   GitError,
@@ -88,8 +91,9 @@ export const HELP_TEXT = [
   '  branch [<名前> [<起点>]] / branch -d <名前> / branch -m <新しい名前>',
   '  switch <名前> / switch - / switch -c <名前> / switch --detach <コミット>',
   '  checkout <名前|コミット> / checkout -b <名前>',
-  '  merge <ブランチ> [--no-ff] [--no-edit] / rebase [-i] [-r] [-x <コマンド>] <ブランチ>',
-  '  cherry-pick [-e] [-m <親>] [--allow-empty] <コミット>... / revert [--no-edit] [-m <親>] <コミット>...',
+  '  merge [--no-ff] [--no-edit] [-s ours|octopus] [-X ours|theirs] <ブランチ>... (2 つ以上なら octopus)',
+  '  rebase [-i] [-r] [-x <コマンド>] [-X ours|theirs] <ブランチ>',
+  '  cherry-pick [-e] [-m <親>] [-X …] [--allow-empty] <コミット>... / revert [--no-edit] [-m <親>] [-X …] <コミット>...',
   '  reset [--soft | --mixed | --hard] [<コミット>]',
   '  tag [-a] [-m "…"] [-f] <タグ> [<コミット>] / tag -l [<パターン>] / tag -d <タグ>',
   '  bisect start [<悪い> [<良い>]] / bisect good / bad / skip / reset / log / run [!] <コマンド>',
@@ -188,6 +192,16 @@ function parseArgs(
     }
   }
   return { flags, values, allValues, positional, paths }
+}
+
+/** -s <ストラテジー> と -X <オプション> を読む。 */
+function strategyOptions(parsed: ParsedArgs): { strategy?: MergeStrategy; favor?: 'ours' | 'theirs' } {
+  const strategy = parsed.values.get('-s')
+  const option = parsed.values.get('-X')
+  return {
+    ...(strategy === undefined ? {} : { strategy: parseStrategy(strategy) }),
+    ...(option === undefined ? {} : { favor: parseStrategyOption(option) }),
+  }
 }
 
 function usage(text: string): never {
@@ -570,7 +584,8 @@ function runFetch(repo: Repo, args: readonly string[]): OperationResult {
 function runPull(repo: Repo, args: readonly string[]): OperationResult {
   const parsed = parseArgs(args, {
     flags: ['--rebase', '--no-rebase', '--ff-only', '--no-edit'],
-    aliases: { '-r': '--rebase' },
+    values: ['-s', '-X'],
+    aliases: { '-r': '--rebase', '--strategy': '-s', '--strategy-option': '-X' },
   })
   const text = 'git pull [--rebase | --no-rebase] [<リモート> [<ブランチ>]]'
   const { remote, branch } = parseRemoteArgs(repo, parsed.positional, text)
@@ -584,6 +599,7 @@ function runPull(repo: Repo, args: readonly string[]): OperationResult {
     ...(parsed.flags.has('--no-rebase') ? { rebase: false } : {}),
     fastForwardOnly: parsed.flags.has('--ff-only'),
     noEdit: parsed.flags.has('--no-edit'),
+    ...strategyOptions(parsed),
   })
 }
 
@@ -712,14 +728,16 @@ function runGit(repo: Repo, name: string, args: readonly string[], raw: string):
     case 'merge': {
       const parsed = parseArgs(args, {
         flags: ['--no-ff', '--ff-only', '--no-edit', ...CONTROL_FLAGS.slice(0, 2)],
-        values: ['-m'],
+        values: ['-m', '-s', '-X'],
+        aliases: { '--strategy': '-s', '--strategy-option': '-X' },
       })
       const control = sequencerControl(repo, 'merge', parsed)
       if (control) return control
-      if (parsed.positional.length !== 1) usage('git merge <ブランチ>')
+      if (parsed.positional.length === 0) usage('git merge [-s <ストラテジー>] [-X <オプション>] <ブランチ>...')
       const message = parsed.values.get('-m')
-      return merge(repo, parsed.positional[0] as string, {
+      return mergeMany(repo, parsed.positional, {
         ...(message === undefined ? {} : { message }),
+        ...strategyOptions(parsed),
         noEdit: parsed.flags.has('--no-edit'),
         noFastForward: parsed.flags.has('--no-ff'),
         fastForwardOnly: parsed.flags.has('--ff-only'),
@@ -728,15 +746,19 @@ function runGit(repo: Repo, name: string, args: readonly string[], raw: string):
     case 'rebase': {
       const parsed = parseArgs(args, {
         flags: [...CONTROL_FLAGS, '-i', '-r'],
-        values: ['-x'],
-        aliases: { '--interactive': '-i', '--exec': '-x', '--rebase-merges': '-r' },
+        values: ['-x', '-X'],
+        aliases: { '--interactive': '-i', '--exec': '-x', '--rebase-merges': '-r', '--strategy-option': '-X' },
       })
       const control = sequencerControl(repo, 'rebase', parsed)
       if (control) return control
       if (parsed.positional.length !== 1) usage('git rebase [-i] [-r] [-x <コマンド>] <ブランチ>')
       const upstream = parsed.positional[0] as string
       const exec = parsed.values.get('-x')
-      const options = { ...(exec === undefined ? {} : { exec }), rebaseMerges: parsed.flags.has('-r') }
+      const options = {
+        ...(exec === undefined ? {} : { exec }),
+        ...strategyOptions(parsed),
+        rebaseMerges: parsed.flags.has('-r'),
+      }
       return parsed.flags.has('-i')
         ? rebaseInteractive(repo, upstream, options)
         : rebase(repo, upstream, options)
@@ -744,8 +766,8 @@ function runGit(repo: Repo, name: string, args: readonly string[], raw: string):
     case 'cherry-pick': {
       const parsed = parseArgs(args, {
         flags: [...CONTROL_FLAGS, '--allow-empty', '-e'],
-        values: ['-m'],
-        aliases: { '--edit': '-e', '--mainline': '-m' },
+        values: ['-m', '-X'],
+        aliases: { '--edit': '-e', '--mainline': '-m', '--strategy-option': '-X' },
       })
       const mainline = parseMainline(parsed)
       return (
@@ -753,6 +775,7 @@ function runGit(repo: Repo, name: string, args: readonly string[], raw: string):
         cherryPick(repo, parsed.positional, {
           allowEmpty: parsed.flags.has('--allow-empty'),
           edit: parsed.flags.has('-e'),
+          ...strategyOptions(parsed),
           ...(mainline === undefined ? {} : { mainline }),
         })
       )
@@ -760,14 +783,15 @@ function runGit(repo: Repo, name: string, args: readonly string[], raw: string):
     case 'revert': {
       const parsed = parseArgs(args, {
         flags: [...CONTROL_FLAGS, '--no-edit'],
-        values: ['-m'],
-        aliases: { '--mainline': '-m' },
+        values: ['-m', '-X'],
+        aliases: { '--mainline': '-m', '--strategy-option': '-X' },
       })
       const mainline = parseMainline(parsed)
       return (
         sequencerControl(repo, 'revert', parsed) ??
         revert(repo, parsed.positional, {
           noEdit: parsed.flags.has('--no-edit'),
+          ...strategyOptions(parsed),
           ...(mainline === undefined ? {} : { mainline }),
         })
       )

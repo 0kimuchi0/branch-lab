@@ -39,13 +39,13 @@ export interface PickItem {
 }
 
 /**
- * rebase --rebase-merges の merge の行。label の位置のコミットを HEAD にマージする。
+ * rebase --rebase-merges の merge の行。label の位置のコミットを HEAD にマージする (2 つ以上なら octopus)。
  * id は -C / -c で指定した元のマージコミット (メッセージをそこから取る)。edit ならメッセージをエディタで編集する。
  */
 export interface MergeItem {
   readonly action: 'merge'
   readonly id: CommitId | null
-  readonly label: string
+  readonly labels: readonly string[]
   readonly edit: boolean
 }
 
@@ -89,6 +89,8 @@ export interface SequenceOperation {
   readonly mainline: number | null
   /** rebase --rebase-merges の label で付けた名前 (refs/rewritten/<名前>)。 */
   readonly labels?: Readonly<Record<string, CommitId>>
+  /** -X ours / -X theirs: コンフリクトする箇所をどちらの側で解決するか。 */
+  readonly favor?: 'ours' | 'theirs'
 }
 
 /** merge の行でマージする相手のコミット (label の名前か、コミットそのもの)。 */
@@ -98,7 +100,14 @@ export function mergeTarget(repo: Repo, op: SequenceOperation, ref: string): Com
 
 /** merge の行で作るコミットのメッセージ。 */
 export function mergeItemMessage(repo: Repo, item: MergeItem): string {
-  return item.id === null ? `Merge branch '${item.label}'` : getCommit(repo, item.id).message
+  if (item.id !== null) return getCommit(repo, item.id).message
+  return `Merge ${item.labels.length > 1 ? 'branches' : 'branch'} ${joinNames(item.labels.map((label) => `'${label}'`))}`
+}
+
+/** "a", "a and b", "a, b and c" の形に並べる (Git のマージメッセージと同じ)。 */
+export function joinNames(names: readonly string[]): string {
+  if (names.length <= 1) return names.join('')
+  return `${names.slice(0, -1).join(', ')} and ${names.at(-1)}`
 }
 
 /** 途中で止まっている操作 (コンフリクトの解消待ちなど)。 */
@@ -156,6 +165,7 @@ export type AfterEdit =
       readonly origHead: CommitId
       readonly branch: string | null
       readonly commits: readonly CommitId[]
+      readonly favor?: 'ours' | 'theirs'
     }
 
 /** 開いているエディタ。Git がエディタを開いて、閉じられるのを待っている状態。 */
@@ -881,7 +891,7 @@ export function commit(repo: Repo, options: CommitOptions = {}): OperationResult
   const parents =
     options.amend ? head.parents
     : op?.type === 'merge' ? [headId, op.theirs]
-    : merging && sequence ? [headId, mergeTarget(staged, sequence, merging.label)]
+    : merging && sequence ? [headId, ...merging.labels.map((label) => mergeTarget(staged, sequence, label))]
     : [headId]
   const parentTree = options.amend
     ? (staged.commits[head.parents[0] ?? '']?.tree ?? {})
@@ -1327,7 +1337,7 @@ function statusLines(repo: Repo): string[] {
         : 'すべてのコンフリクトが解消されました。"git commit" でマージを完了してください',
     )
   } else if (op && op.current !== null) {
-    lines.push(`${op.type} の途中です (${op.current.action === 'merge' ? `merge ${op.current.label}` : op.current.id} を適用中)`)
+    lines.push(`${op.type} の途中です (${op.current.action === 'merge' ? `merge ${op.current.labels.join(' ')}` : op.current.id} を適用中)`)
   } else if (op?.type === 'rebase') {
     lines.push('コミットを修正できます。終わったら "git rebase --continue" を実行してください')
   }

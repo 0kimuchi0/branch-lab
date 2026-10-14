@@ -5,7 +5,6 @@
 import {
   EDITOR_WAITING,
   GitError,
-  REMOTE_NAME,
   ancestors,
   carryChanges,
   cleanupMessage,
@@ -17,6 +16,7 @@ import {
   headCommitId,
   headTree,
   isAncestor,
+  joinNames,
   logRefs,
   mergeBase,
   mergeItemMessage,
@@ -71,12 +71,50 @@ function conflictLines(conflicts: readonly Conflict[]): string[] {
 
 // ---- merge ----
 
-export function mergeMessage(repo: Repo, ref: string): string {
+/**
+ * マージコミットの既定のメッセージ。Git と同じく、ブランチ・タグ・リモート追跡ブランチ・コミットに分けて並べる
+ * (例: Merge branches 'a' and 'b', tag 'v1' and commit 'C3' into topic)。
+ */
+export function mergeMessage(repo: Repo, refs: string | readonly string[]): string {
+  const list = typeof refs === 'string' ? [refs] : refs
+  const groups: Array<[string, string, string[]]> = [
+    ['branch', 'branches', []],
+    ['tag', 'tags', []],
+    ['remote-tracking branch', 'remote-tracking branches', []],
+    ['commit', 'commits', []],
+  ]
+  for (const ref of list) {
+    const kind =
+      ref in repo.branches ? 0
+      : ref in repo.tags ? 1
+      : ref in repo.remoteBranches ? 2
+      : 3
+    ;(groups[kind] as [string, string, string[]])[2].push(`'${ref}'`)
+  }
+  const parts = groups
+    .filter(([, , names]) => names.length > 0)
+    .map(([one, many, names]) => `${names.length > 1 ? many : one} ${joinNames(names)}`)
   const current = currentBranch(repo)
   const into = current === null || current === 'main' ? '' : ` into ${current}`
-  if (ref in repo.branches) return `Merge branch '${ref}'${into}`
-  if (ref.startsWith(`${REMOTE_NAME}/`)) return `Merge remote-tracking branch '${ref}'${into}`
-  return `Merge commit '${ref}'${into}`
+  return `Merge ${joinNames(parts)}${into}`
+}
+
+export type MergeStrategy = 'ort' | 'ours' | 'octopus'
+
+/** -s で指定したストラテジーの名前を、このアプリで扱う名前にする (recursive・resolve は ort と同じに扱う)。 */
+export function parseStrategy(name: string): MergeStrategy {
+  if (name === 'ort' || name === 'recursive' || name === 'resolve') return 'ort'
+  if (name === 'ours' || name === 'octopus') return name
+  if (name === 'subtree') throw new GitError('subtree ストラテジーはこのアプリでは未対応です')
+  throw new GitError(
+    `Could not find merge strategy '${name}'.\nAvailable strategies are: octopus ours recursive resolve subtree.`,
+  )
+}
+
+/** -X で指定したオプション。このアプリでは ours と theirs に対応する。 */
+export function parseStrategyOption(name: string): 'ours' | 'theirs' {
+  if (name === 'ours' || name === 'theirs') return name
+  throw new GitError(`error: 未対応のストラテジーのオプションです: -X ${name} (ours か theirs が使えます)`)
 }
 
 export interface MergeOptions {
@@ -92,6 +130,68 @@ export interface MergeOptions {
   readonly fastForwardOnly?: boolean
   /** reflog に書く操作の名前 (既定は "merge <ref>"、git pull なら "pull")。 */
   readonly reflogAction?: string
+  /** -s: マージのストラテジー。 */
+  readonly strategy?: MergeStrategy
+  /** -X ours / -X theirs */
+  readonly favor?: 'ours' | 'theirs'
+}
+
+/** id と、すでにマージしたコミットたちとの共通の祖先のうち、いちばん新しいもの。 */
+function bestMergeBase(repo: Repo, id: CommitId, merged: readonly CommitId[]): CommitId | null {
+  const candidates = merged.map((other) => mergeBase(repo, id, other)).filter((base): base is CommitId => base !== null)
+  return candidates.find((base) => candidates.every((other) => other === base || !isAncestor(repo, base, other))) ?? null
+}
+
+/**
+ * first の tree に heads を順にマージする (octopus)。コンフリクトが出たところで止める。
+ * 2 つ目以降の基準 (merge base) は、それまでにマージしたコミットとの共通の祖先にする。
+ */
+function mergeHeadTrees(
+  repo: Repo,
+  first: CommitId,
+  tree: Tree,
+  heads: ReadonlyArray<{ readonly id: CommitId; readonly label: string }>,
+  favor: 'ours' | 'theirs' | undefined,
+): { readonly tree: Tree; readonly conflicts: readonly Conflict[]; readonly failed: string | null } {
+  let current = tree
+  const merged = [first]
+  for (const head of heads) {
+    const baseId = bestMergeBase(repo, head.id, merged)
+    const result = mergeTrees(baseId === null ? {} : getCommit(repo, baseId).tree, current, getCommit(repo, head.id).tree, {
+      ours: 'HEAD',
+      theirs: head.label,
+      ...(favor ? { favor } : {}),
+    })
+    if (result.conflicts.length > 0) return { tree: result.tree, conflicts: result.conflicts, failed: head.label }
+    current = result.tree
+    merged.push(head.id)
+  }
+  return { tree: current, conflicts: [], failed: null }
+}
+
+/** マージコミットを作る (-m / --no-edit ならそのまま、そうでなければエディタを開く)。 */
+function finishMerge(
+  merged: Repo,
+  pending: PendingCommit,
+  defaultMessage: string,
+  options: MergeOptions,
+  lines: readonly string[],
+): OperationResult {
+  const message = options.message?.trim()
+  if (message || options.noEdit) {
+    const created = createCommit(merged, pending, message || defaultMessage)
+    return { repo: created.repo, output: [...lines, created.output].join('\n') }
+  }
+  const editor: Editor = {
+    file: 'MERGE_MSG',
+    text: messageTemplate(
+      merged,
+      defaultMessage,
+      'マージする理由を説明してください (特に、更新された上流をトピックブランチにマージする場合)。',
+    ),
+    after: { kind: 'commit', commit: pending, operation: null },
+  }
+  return { repo: openEditor(merged, editor), output: [...lines.slice(0, -1), EDITOR_WAITING].join('\n') }
 }
 
 export function merge(repo: Repo, ref: string, options: MergeOptions = {}): OperationResult {
@@ -120,12 +220,18 @@ export function merge(repo: Repo, ref: string, options: MergeOptions = {}): Oper
     throw new GitError('fatal: fast-forward できないため、マージを中止しました')
   }
 
+  // -s ours は相手の変更を一切取り込まず、履歴だけをマージする
+  const strategy = options.strategy === 'ours' ? 'ours' : 'ort'
   const baseId = mergeBase(repo, ours, theirs)
   const baseTree = baseId === null ? {} : getCommit(repo, baseId).tree
-  const result = mergeTrees(baseTree, headTree(repo), getCommit(repo, theirs).tree, {
-    ours: 'HEAD',
-    theirs: ref,
-  })
+  const result =
+    strategy === 'ours'
+      ? { tree: headTree(repo), conflicts: [] }
+      : mergeTrees(baseTree, headTree(repo), getCommit(repo, theirs).tree, {
+          ours: 'HEAD',
+          theirs: ref,
+          ...(options.favor ? { favor: options.favor } : {}),
+        })
   const defaultMessage = options.defaultMessage ?? mergeMessage(repo, ref)
   const carried = carryChanges(repo, result.tree, 'merge')
 
@@ -148,27 +254,90 @@ export function merge(repo: Repo, ref: string, options: MergeOptions = {}): Oper
     }
   }
 
-  const merged: Repo = { ...repo, ...carried }
   const pending: PendingCommit = {
     parents: [ours, theirs],
     tree: result.tree,
-    reflogMessage: `${options.reflogAction ?? `merge ${ref}`}: Merge made by the 'ort' strategy.`,
+    reflogMessage: `${options.reflogAction ?? `merge ${ref}`}: Merge made by the '${strategy}' strategy.`,
   }
-  const message = options.message?.trim()
-  if (message || options.noEdit) {
-    const created = createCommit(merged, pending, message || defaultMessage)
-    return { repo: created.repo, output: `Merge made by the 'ort' strategy.\n${created.output}` }
+  return finishMerge({ ...repo, ...carried }, pending, defaultMessage, options, [
+    `Merge made by the '${strategy}' strategy.`,
+  ])
+}
+
+/**
+ * git merge <ブランチ>...: 2 つ以上を指定すると octopus でまとめてマージする。
+ * Git と同じく、コンフリクトが出る octopus は中止し、何も変えない。
+ */
+export function mergeMany(repo: Repo, refs: readonly string[], options: MergeOptions = {}): OperationResult {
+  if (refs.length === 0) throw new GitError('使い方: git merge <ブランチ>...')
+  if (refs.length === 1) return merge(repo, refs[0] as string, options)
+  requireNoOperation(repo)
+  if (options.strategy === 'ort') {
+    throw new GitError('fatal: ort (recursive) ストラテジーは 2 つ以上のブランチを一度にマージできません (octopus か ours を使ってください)')
   }
-  const editor: Editor = {
-    file: 'MERGE_MSG',
-    text: messageTemplate(
-      merged,
-      defaultMessage,
-      'マージする理由を説明してください (特に、更新された上流をトピックブランチにマージする場合)。',
-    ),
-    after: { kind: 'commit', commit: pending, operation: null },
+  const ours = headCommitId(repo)
+  const lines: string[] = []
+  const heads: Array<{ readonly ref: string; readonly id: CommitId }> = []
+  for (const ref of refs) {
+    const id = resolveRef(repo, ref)
+    if (isAncestor(repo, id, ours) || heads.some((head) => isAncestor(repo, id, head.id))) {
+      lines.push(`Already up to date with ${ref}`)
+      continue
+    }
+    heads.push({ ref, id })
   }
-  return { repo: openEditor(merged, editor), output: EDITOR_WAITING }
+  // ほかのブランチの祖先になっているものは親にしない (Git の reduce_heads)
+  const reduced = heads.filter((head) => !heads.some((other) => other !== head && isAncestor(repo, head.id, other.id)))
+  if (reduced.length === 0) return { repo, output: [...lines, 'Already up to date.'].join('\n') }
+  if (reduced.length === 1) {
+    const single = merge(repo, (reduced[0] as { ref: string }).ref, options)
+    return { ...single, output: [...lines, single.output].join('\n') }
+  }
+  if (options.fastForwardOnly) {
+    throw new GitError('fatal: fast-forward できないため、マージを中止しました')
+  }
+
+  const strategy = options.strategy === 'ours' ? 'ours' : 'octopus'
+  // HEAD がどれかの祖先なら、fast-forward してそこからマージする (HEAD は親にしない)
+  const keepHead = strategy === 'ours' || options.noFastForward || !reduced.some((head) => isAncestor(repo, ours, head.id))
+  const first = keepHead ? ours : (reduced[0] as { id: CommitId }).id
+  if (!keepHead) lines.push(`Fast-forwarding to: ${(reduced[0] as { ref: string }).ref}`)
+  const rest = keepHead ? reduced : reduced.slice(1)
+  let tree: Tree = keepHead ? headTree(repo) : getCommit(repo, first).tree
+  if (strategy === 'octopus') {
+    for (const head of rest) lines.push(`Trying simple merge with ${head.ref}`)
+    const result = mergeHeadTrees(
+      repo,
+      first,
+      tree,
+      rest.map((head) => ({ id: head.id, label: head.ref })),
+      options.favor,
+    )
+    if (result.failed !== null) {
+      throw new GitError(
+        [
+          ...lines.slice(0, lines.length - rest.length + rest.findIndex((head) => head.ref === result.failed) + 1),
+          'Simple merge did not work, trying automatic merge.',
+          ...conflictLines(result.conflicts),
+          'Automated merge did not work.',
+          'Should not be doing an octopus.',
+          'Merge with strategy octopus failed.',
+        ].join('\n'),
+      )
+    }
+    tree = result.tree
+  }
+  const carried = carryChanges(repo, tree, 'merge')
+  const names = reduced.map((head) => head.ref)
+  const pending: PendingCommit = {
+    parents: [...(keepHead ? [ours] : []), ...reduced.map((head) => head.id)],
+    tree,
+    reflogMessage: `${options.reflogAction ?? `merge ${names.join(' ')}`}: Merge made by the '${strategy}' strategy.`,
+  }
+  return finishMerge({ ...repo, ...carried }, pending, options.defaultMessage ?? mergeMessage(repo, names), options, [
+    ...lines,
+    `Merge made by the '${strategy}' strategy.`,
+  ])
 }
 
 // ---- cherry-pick / revert / rebase ----
@@ -380,7 +549,7 @@ function applyItem(repo: Repo, op: SequenceOperation, todoItem: TodoItem): Step 
       ? `parent of ${item.id} (${subject(picked.message)})`
       : `${item.id} (${subject(picked.message)})`
   const ours = headTree(repo)
-  const result = mergeTrees(base, ours, theirs, { ours: 'HEAD', theirs: label })
+  const result = mergeTrees(base, ours, theirs, { ours: 'HEAD', theirs: label, ...(op.favor ? { favor: op.favor } : {}) })
   const carried = carryChanges(repo, result.tree, op.type)
   const stoppedOp: SequenceOperation = { ...rest, current: item }
 
@@ -423,22 +592,28 @@ function applyItem(repo: Repo, op: SequenceOperation, todoItem: TodoItem): Step 
 function mergePending(repo: Repo, op: SequenceOperation, item: MergeItem, tree: Tree, action: string): PendingCommit {
   const original = item.id === null ? null : getCommit(repo, item.id)
   return {
-    parents: [headCommitId(repo), mergeTarget(repo, op, item.label)],
+    parents: [headCommitId(repo), ...item.labels.map((label) => mergeTarget(repo, op, label))],
     tree,
     ...(original ? { source: original.source ?? original.id } : {}),
     reflogAction: action,
   }
 }
 
-/** rebase --rebase-merges の merge の行: label の位置のコミットを HEAD にマージする。 */
+/** rebase --rebase-merges の merge の行: label の位置のコミットを HEAD にマージする (2 つ以上なら octopus)。 */
 function applyMerge(repo: Repo, rest: SequenceOperation, item: MergeItem): Step {
   const ours = headCommitId(repo)
-  const theirs = mergeTarget(repo, rest, item.label)
+  const theirs = item.labels.map((label) => ({ id: mergeTarget(repo, rest, label), label }))
   const original = item.id === null ? null : getCommit(repo, item.id)
   const message = mergeItemMessage(repo, item)
 
   // 親が変わっていないマージコミットは、作り直さずにそのまま使う
-  if (original && !item.edit && original.parents.length === 2 && original.parents[0] === ours && original.parents[1] === theirs) {
+  const parents = [ours, ...theirs.map((head) => head.id)]
+  if (
+    original &&
+    !item.edit &&
+    original.parents.length === parents.length &&
+    original.parents.every((parent, index) => parent === parents[index])
+  ) {
     const moved: Repo = logRefs(
       repo,
       { ...repo, head: { type: 'detached', id: original.id }, ...carryChanges(repo, original.tree, 'rebase') },
@@ -447,9 +622,7 @@ function applyMerge(repo: Repo, rest: SequenceOperation, item: MergeItem): Step 
     return { status: 'continue', repo: moved, op: rest, lines: [] }
   }
 
-  const baseId = mergeBase(repo, ours, theirs)
-  const baseTree = baseId === null ? {} : getCommit(repo, baseId).tree
-  const result = mergeTrees(baseTree, headTree(repo), getCommit(repo, theirs).tree, { ours: 'HEAD', theirs: item.label })
+  const result = mergeHeadTrees(repo, ours, headTree(repo), theirs, rest.favor)
   const carried = carryChanges(repo, result.tree, 'rebase')
   const stoppedOp: SequenceOperation = { ...rest, current: item }
   if (result.conflicts.length > 0) {
@@ -458,7 +631,7 @@ function applyMerge(repo: Repo, rest: SequenceOperation, item: MergeItem): Step 
       repo: { ...applyConflicted(repo, carried, result.conflicts), operation: stoppedOp },
       lines: [
         ...conflictLines(result.conflicts),
-        `error: ${item.label} をマージできませんでした${original ? ` (${original.id} ${subject(original.message)})` : ''}`,
+        `error: ${item.labels.join(' ')} をマージできませんでした${original ? ` (${original.id} ${subject(original.message)})` : ''}`,
         STOP_HINTS.rebase,
       ],
     }
@@ -518,7 +691,12 @@ function startPicks(
   repo: Repo,
   type: 'cherry-pick' | 'revert',
   refs: readonly string[],
-  options: { readonly keepEmpty: boolean; readonly edit: boolean; readonly mainline: number | null },
+  options: {
+    readonly keepEmpty: boolean
+    readonly edit: boolean
+    readonly mainline: number | null
+    readonly favor: 'ours' | 'theirs' | undefined
+  },
 ): OperationResult {
   requireNoOperation(repo)
   if (refs.length === 0) {
@@ -538,6 +716,7 @@ function startPicks(
       edit: options.edit,
       squash: null,
       mainline: options.mainline,
+      ...(options.favor ? { favor: options.favor } : {}),
     },
     [],
   )
@@ -547,12 +726,18 @@ function startPicks(
 export function cherryPick(
   repo: Repo,
   refs: readonly string[],
-  options: { readonly allowEmpty?: boolean; readonly edit?: boolean; readonly mainline?: number } = {},
+  options: {
+    readonly allowEmpty?: boolean
+    readonly edit?: boolean
+    readonly mainline?: number
+    readonly favor?: 'ours' | 'theirs'
+  } = {},
 ): OperationResult {
   return startPicks(repo, 'cherry-pick', refs, {
     keepEmpty: options.allowEmpty ?? false,
     edit: options.edit ?? false,
     mainline: options.mainline ?? null,
+    favor: options.favor,
   })
 }
 
@@ -560,12 +745,13 @@ export function cherryPick(
 export function revert(
   repo: Repo,
   refs: readonly string[],
-  options: { readonly noEdit?: boolean; readonly mainline?: number } = {},
+  options: { readonly noEdit?: boolean; readonly mainline?: number; readonly favor?: 'ours' | 'theirs' } = {},
 ): OperationResult {
   return startPicks(repo, 'revert', refs, {
     keepEmpty: false,
     edit: !options.noEdit,
     mainline: options.mainline ?? null,
+    favor: options.favor,
   })
 }
 
@@ -684,6 +870,7 @@ function startRebase(
   origHead: CommitId,
   branch: string | null,
   items: readonly TodoItem[],
+  favor?: 'ours' | 'theirs',
 ): OperationResult {
   const tree = getCommit(repo, onto).tree
   const { index, workdir } = carryChanges({ ...repo, editor: null }, tree, 'rebase')
@@ -705,6 +892,7 @@ function startRebase(
       edit: false,
       squash: null,
       mainline: null,
+      ...(favor ? { favor } : {}),
     },
     [],
   )
@@ -715,6 +903,8 @@ export interface RebaseOptions {
   readonly exec?: string
   /** -r / --rebase-merges: マージコミットも作り直して、ブランチの形を保つ。 */
   readonly rebaseMerges?: boolean
+  /** -X ours / -X theirs (rebase では ours が付け替え先、theirs が付け替えるコミット)。 */
+  readonly favor?: 'ours' | 'theirs'
 }
 
 /** rebase で実行する todo の行 (-i ではエディタに出す内容)。 */
@@ -754,7 +944,7 @@ export function rebase(repo: Repo, upstreamRef: string, options: RebaseOptions =
     }
   }
   const items = parseTodo(repo, rebaseTodoLines(repo, head, upstream, options).join('\n'))
-  return startRebase(repo, upstream, head, branch, items)
+  return startRebase(repo, upstream, head, branch, items, options.favor)
 }
 
 const TODO_HELP = [
@@ -802,7 +992,14 @@ export function rebaseInteractive(
       ...TODO_HELP,
       '',
     ].join('\n'),
-    after: { kind: 'todo', onto, origHead: head, branch: currentBranch(repo), commits },
+    after: {
+      kind: 'todo',
+      onto,
+      origHead: head,
+      branch: currentBranch(repo),
+      commits,
+      ...(options.favor ? { favor: options.favor } : {}),
+    },
   }
   return { repo: openEditor(repo, editor), output: EDITOR_WAITING }
 }
@@ -880,13 +1077,11 @@ export function parseTodo(repo: Repo, text: string): TodoItem[] {
       const original = option === null ? null : words[1]
       const names = words.slice(option === null ? 0 : 2)
       if (original === undefined) throw new GitError(`error: ${index + 1} 行目に ${option} のコミットがありません`)
-      if (names.length > 1) {
-        throw new GitError(`error: ${index + 1} 行目: 3 つ以上の親を持つマージ (octopus) はこのアプリでは未対応です`)
-      }
+      if (names.length === 0) target(undefined)
       items.push({
         action,
         id: original === null ? null : resolveRef(repo, original),
-        label: target(names[0]),
+        labels: names.map((name) => target(name)),
         edit: option !== '-C',
       })
       return
@@ -932,7 +1127,7 @@ export function saveEditor(repo: Repo, text?: string): OperationResult {
     if (items.length === 0) {
       return { repo: { ...repo, editor: null }, output: 'Nothing to do (todo が空のため、rebase を中止しました)' }
     }
-    return startRebase(repo, after.onto, after.origHead, after.branch, items)
+    return startRebase(repo, after.onto, after.origHead, after.branch, items, after.favor)
   }
 
   const message = cleanupMessage(content)
@@ -1013,7 +1208,7 @@ export function skipOperation(repo: Repo, type: SequenceType): OperationResult {
   return runSequence(
     cleaned,
     { ...op, current: null, squash: null },
-    op.current === null ? [] : [`${op.current.action === 'merge' ? `merge ${op.current.label}` : op.current.id} を飛ばしました`],
+    op.current === null ? [] : [`${op.current.action === 'merge' ? `merge ${op.current.labels.join(' ')}` : op.current.id} を飛ばしました`],
   )
 }
 

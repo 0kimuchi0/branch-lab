@@ -72,11 +72,14 @@ function withNewline(lines: readonly string[]): string[] {
 export interface MergeLabels {
   readonly ours: string
   readonly theirs: string
+  /** -X ours / -X theirs: 両方が変えた箇所は、コンフリクトにせずにこちらの側を採る。 */
+  readonly favor?: 'ours' | 'theirs'
 }
 
 /**
  * diff3 による行単位の 3-way マージ。
- * 両方が同じ箇所を別々に変えたときだけ、Git と同じ形式のコンフリクトマーカーを入れる。
+ * 両方が同じ箇所を別々に変えたときだけ、Git と同じ形式のコンフリクトマーカーを入れる
+ * (labels.favor があれば、マーカーを入れずにその側を採る)。
  */
 export function mergeText(
   base: string,
@@ -101,6 +104,7 @@ export function mergeText(
     const bChunk = b.slice(k, bEnd)
     if (sameLines(aChunk, oChunk)) out.push(...bChunk)
     else if (sameLines(bChunk, oChunk) || sameLines(aChunk, bChunk)) out.push(...aChunk)
+    else if (labels.favor) out.push(...(labels.favor === 'ours' ? aChunk : bChunk))
     else {
       // Git と同じく、両側で共通する先頭と末尾の行はマーカーの外に出す
       let head = 0
