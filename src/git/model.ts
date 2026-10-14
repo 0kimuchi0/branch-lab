@@ -4,6 +4,7 @@
  */
 import {
   changedPaths,
+  conflictKey,
   treesEqual,
   withFile,
   type Conflict,
@@ -243,6 +244,26 @@ export interface Repo {
   readonly upstreams: Readonly<Record<string, string>>
   /** 次に採番するコミット番号。 */
   readonly nextId: number
+  /** git config で設定した値。キーは "rerere.enabled" のような小文字の名前。 */
+  readonly config: Readonly<Record<string, string>>
+  readonly rerere: RerereState
+}
+
+/** git rerere の記録 (.git/rr-cache と MERGE_RR)。 */
+export interface RerereState {
+  /** 今コンフリクトしていて、解決を記録する対象のパス → コンフリクトの鍵と、そのときの内容 (preimage)。 */
+  readonly pending: Readonly<Record<string, { readonly key: string; readonly preimage: string }>>
+  /** 記録した解決: コンフリクトの鍵 → 解決したあとの内容 (postimage)。 */
+  readonly resolved: Readonly<Record<string, string>>
+}
+
+export const EMPTY_RERERE: RerereState = { pending: {}, resolved: {} }
+
+/** git config の真偽値 (true / yes / on / 1)。未設定なら undefined。 */
+export function configBool(repo: Repo, key: string): boolean | undefined {
+  const value = repo.config[key]
+  if (value === undefined) return undefined
+  return ['true', 'yes', 'on', '1'].includes(value.toLowerCase())
 }
 
 export interface OperationResult {
@@ -281,6 +302,8 @@ export function createRepo(): Repo {
     stash: [],
     tags: {},
     bisect: null,
+    config: {},
+    rerere: EMPTY_RERERE,
     reflogs: {
       HEAD: [{ id: root.id, message: `clone: from ${REMOTE_NAME}` }],
       [DEFAULT_BRANCH]: [{ id: root.id, message: `clone: from ${REMOTE_NAME}` }],
@@ -865,9 +888,31 @@ export interface CommitOptions {
 /** コミットを作る。output は git commit の 1 行目と同じ形。 */
 export function createCommit(repo: Repo, pending: PendingCommit, message: string): { repo: Repo; output: string } {
   const { reflogAction, reflogMessage, ...fields } = pending
-  const { repo: next, commit: created } = addCommit(repo, { ...fields, message })
+  const recorded = recordResolutions(repo, fields.tree)
+  const { repo: next, commit: created } = addCommit(recorded.repo, { ...fields, message })
   const entry = reflogMessage ?? `${reflogAction ?? 'commit'}: ${subject(message)}`
-  return { repo: logRefs(repo, next, entry), output: commitSummary(created, currentBranch(next)) }
+  return {
+    repo: logRefs(recorded.repo, next, entry),
+    output: [...recorded.lines, commitSummary(created, currentBranch(next))].join('\n'),
+  }
+}
+
+/**
+ * rerere: コンフリクトを解決した内容を記録する (コミットするときと git rerere で呼ぶ)。
+ * tree の内容にまだコンフリクトマーカーが残っているパスは記録しない。
+ */
+export function recordResolutions(repo: Repo, tree: Tree, clear = true): { repo: Repo; lines: string[] } {
+  const entries = Object.entries(repo.rerere.pending)
+  if (entries.length === 0) return { repo, lines: [] }
+  const resolved = { ...repo.rerere.resolved }
+  const lines: string[] = []
+  for (const [path, { key }] of entries) {
+    const content = tree[path]
+    if (content === undefined || conflictKey(content) !== null || resolved[key] === content) continue
+    resolved[key] = content
+    lines.push(`Recorded resolution for '${path}'.`)
+  }
+  return { repo: { ...repo, rerere: { pending: clear ? {} : repo.rerere.pending, resolved } }, lines }
 }
 
 /** ステージ (インデックス) の内容でコミットする。メッセージがなければエディタを開く。 */
@@ -1198,9 +1243,9 @@ export function reset(
   const logged = logRefs(repo, moved, `reset: moving to ${target}`, { forceHead: true, forceBranch: true })
   const cleared: Repo =
     mode === 'hard' && repo.operation?.type !== 'rebase'
-      ? { ...logged, operation: null, conflicts: [] }
+      ? { ...logged, operation: null, conflicts: [], rerere: { ...logged.rerere, pending: {} } }
       : mode === 'hard'
-        ? { ...logged, conflicts: [] }
+        ? { ...logged, conflicts: [], rerere: { ...logged.rerere, pending: {} } }
         : logged
   const next: Repo =
     mode === 'soft' ? cleared

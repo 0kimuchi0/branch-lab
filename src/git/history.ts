@@ -43,22 +43,25 @@ import {
   type TodoAction,
   type TodoItem,
 } from './model'
+import { rerereClear, rerereOnConflict } from './rerere'
 import { finishTag } from './tag'
 import { mergeTrees, treesEqual, withFile, type Conflict, type Tree } from './tree'
 
 /**
  * コンフリクトで止まった状態にする。作業ディレクトリにはマーカー付きの内容を、
  * ステージのコンフリクトしたファイルには HEAD 側の内容を置く。
+ * lines は、コンフリクトの一覧と rerere の出力 (rerere.enabled のとき)。
  */
 function applyConflicted(
   repo: Repo,
   carried: { readonly index: Tree; readonly workdir: Tree },
   conflicts: readonly Conflict[],
-): Repo {
+): { repo: Repo; lines: string[] } {
   const head = headTree(repo)
   let index = carried.index
   for (const conflict of conflicts) index = withFile(index, conflict.path, head[conflict.path])
-  return { ...repo, index, workdir: carried.workdir, conflicts }
+  const recorded = rerereOnConflict({ ...repo, index, workdir: carried.workdir, conflicts })
+  return { repo: recorded.repo, lines: [...conflictLines(conflicts), ...recorded.lines] }
 }
 
 function conflictLines(conflicts: readonly Conflict[]): string[] {
@@ -245,9 +248,9 @@ export function merge(repo: Repo, ref: string, options: MergeOptions = {}): Oper
       result.conflicts,
     )
     return {
-      repo: stopped,
+      repo: stopped.repo,
       output: [
-        ...conflictLines(result.conflicts),
+        ...stopped.lines,
         '自動マージに失敗しました。コンフリクトを解消してから結果をコミットしてください。',
         '(ファイルを編集して git add し、git commit を実行します。中止するには git merge --abort)',
       ].join('\n'),
@@ -554,11 +557,12 @@ function applyItem(repo: Repo, op: SequenceOperation, todoItem: TodoItem): Step 
   const stoppedOp: SequenceOperation = { ...rest, current: item }
 
   if (result.conflicts.length > 0) {
+    const stopped = applyConflicted(repo, carried, result.conflicts)
     return {
       status: 'stop',
-      repo: { ...applyConflicted(repo, carried, result.conflicts), operation: stoppedOp },
+      repo: { ...stopped.repo, operation: stoppedOp },
       lines: [
-        ...conflictLines(result.conflicts),
+        ...stopped.lines,
         `error: ${item.id} (${subject(picked.message)}) を適用できませんでした`,
         STOP_HINTS[op.type],
       ],
@@ -626,11 +630,12 @@ function applyMerge(repo: Repo, rest: SequenceOperation, item: MergeItem): Step 
   const carried = carryChanges(repo, result.tree, 'rebase')
   const stoppedOp: SequenceOperation = { ...rest, current: item }
   if (result.conflicts.length > 0) {
+    const stopped = applyConflicted(repo, carried, result.conflicts)
     return {
       status: 'stop',
-      repo: { ...applyConflicted(repo, carried, result.conflicts), operation: stoppedOp },
+      repo: { ...stopped.repo, operation: stoppedOp },
       lines: [
-        ...conflictLines(result.conflicts),
+        ...stopped.lines,
         `error: ${item.labels.join(' ')} をマージできませんでした${original ? ` (${original.id} ${subject(original.message)})` : ''}`,
         STOP_HINTS.rebase,
       ],
@@ -1204,7 +1209,7 @@ export function continueOperation(repo: Repo, type: Operation['type']): Operatio
 export function skipOperation(repo: Repo, type: SequenceType): OperationResult {
   const op = requireOperation(repo, type) as SequenceOperation
   const tree = headTree(repo)
-  const cleaned: Repo = { ...repo, index: tree, workdir: tree, conflicts: [] }
+  const cleaned: Repo = { ...rerereClear(repo), index: tree, workdir: tree, conflicts: [] }
   return runSequence(
     cleaned,
     { ...op, current: null, squash: null },
@@ -1217,7 +1222,7 @@ export function abortOperation(repo: Repo, type: Operation['type']): OperationRe
   if (op.type === 'merge') {
     const tree = headTree(repo)
     return {
-      repo: { ...repo, operation: null, conflicts: [], index: tree, workdir: tree },
+      repo: { ...rerereClear(repo), operation: null, conflicts: [], index: tree, workdir: tree },
       output: 'マージを中止しました',
     }
   }
@@ -1234,7 +1239,7 @@ export function abortOperation(repo: Repo, type: Operation['type']): OperationRe
   return {
     repo: logRefs(
       repo,
-      { ...restored, operation: null, conflicts: [], index: tree, workdir: tree },
+      { ...rerereClear(restored), operation: null, conflicts: [], index: tree, workdir: tree },
       `${type} (abort): returning to ${where}`,
       { forceHead: true },
     ),

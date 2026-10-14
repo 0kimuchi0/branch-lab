@@ -14,6 +14,7 @@ import {
 } from './history'
 import {
   GitError,
+  configBool,
   getRemote,
   add,
   commit,
@@ -43,6 +44,8 @@ import {
   type Repo,
   type ResetMode,
 } from './model'
+import { getConfig, listConfig, setConfig, unsetConfig } from './config'
+import { rerereCommand } from './rerere'
 import { bisectLog, bisectMark, bisectReset, bisectRunning, bisectStart } from './bisect'
 import { blame, gitDiff, show } from './inspect'
 import { createTag, deleteTags, listTags } from './tag'
@@ -100,6 +103,8 @@ export const HELP_TEXT = [
   '  stash [push [-m "…"] [-u] [-k]] / stash list / show [-p] / apply / pop [--index] / drop / clear / branch',
   '  push [-u] [-f] [--tags] [<リモート> [<ブランチ|タグ>]] / push <リモート> --delete <名前>',
   '  fetch [<リモート> | --all] / pull [--rebase | --no-rebase] [<リモート> [<ブランチ>]]',
+  '  config <キー> [<値>] / config --unset <キー> / config --list   (rerere.enabled・pull.rebase・merge.ff など)',
+  '  rerere [status | diff | remaining | forget <パス> | clear]   (git config rerere.enabled true で有効)',
   '  remote [-v] / remote add <名前> <URL> / remove / rename / set-url / get-url',
   '  (merge / rebase / cherry-pick / revert は --continue・--abort が使えます)',
   '',
@@ -592,15 +597,40 @@ function runPull(repo: Repo, args: readonly string[]): OperationResult {
   if (parsed.flags.has('--rebase') && parsed.flags.has('--no-rebase')) {
     throw new GitError('fatal: --rebase と --no-rebase は同時に指定できません')
   }
+  // オプションがなければ pull.rebase / pull.ff の設定を使う
+  const rebaseConfig = configBool(repo, 'pull.rebase')
+  const rebase =
+    parsed.flags.has('--rebase') ? true
+    : parsed.flags.has('--no-rebase') ? false
+    : rebaseConfig
   return pull(repo, {
     ...(remote === undefined ? {} : { remote }),
     ...(branch === undefined ? {} : { branch }),
-    ...(parsed.flags.has('--rebase') ? { rebase: true } : {}),
-    ...(parsed.flags.has('--no-rebase') ? { rebase: false } : {}),
-    fastForwardOnly: parsed.flags.has('--ff-only'),
+    ...(rebase === undefined ? {} : { rebase }),
+    fastForwardOnly: parsed.flags.has('--ff-only') || (rebase === undefined && repo.config['pull.ff'] === 'only'),
     noEdit: parsed.flags.has('--no-edit'),
     ...strategyOptions(parsed),
   })
+}
+
+function runConfig(repo: Repo, args: readonly string[]): OperationResult {
+  const parsed = parseArgs(args, {
+    flags: ['--global', '--local', '--system', '-l', '--unset'],
+    aliases: { '--list': '-l' },
+  })
+  const [key, value, ...rest] = parsed.positional
+  const text = 'git config <キー> [<値>] / git config --unset <キー> / git config --list'
+  if (rest.length > 0) usage(text)
+  if (parsed.flags.has('-l')) {
+    if (key !== undefined) usage(text)
+    return listConfig(repo)
+  }
+  if (key === undefined) usage(text)
+  if (parsed.flags.has('--unset')) {
+    if (value !== undefined) usage(text)
+    return unsetConfig(repo, key)
+  }
+  return value === undefined ? getConfig(repo, key) : setConfig(repo, key, value)
 }
 
 function runRemote(repo: Repo, args: readonly string[]): OperationResult {
@@ -727,7 +757,7 @@ function runGit(repo: Repo, name: string, args: readonly string[], raw: string):
       return runCheckout(repo, args)
     case 'merge': {
       const parsed = parseArgs(args, {
-        flags: ['--no-ff', '--ff-only', '--no-edit', ...CONTROL_FLAGS.slice(0, 2)],
+        flags: ['--ff', '--no-ff', '--ff-only', '--no-edit', ...CONTROL_FLAGS.slice(0, 2)],
         values: ['-m', '-s', '-X'],
         aliases: { '--strategy': '-s', '--strategy-option': '-X' },
       })
@@ -735,12 +765,14 @@ function runGit(repo: Repo, name: string, args: readonly string[], raw: string):
       if (control) return control
       if (parsed.positional.length === 0) usage('git merge [-s <ストラテジー>] [-X <オプション>] <ブランチ>...')
       const message = parsed.values.get('-m')
+      // --ff / --no-ff / --ff-only がなければ merge.ff の設定 (false なら --no-ff、only なら --ff-only) を使う
+      const ffConfig = parsed.flags.has('--ff') ? undefined : repo.config['merge.ff']
       return mergeMany(repo, parsed.positional, {
         ...(message === undefined ? {} : { message }),
         ...strategyOptions(parsed),
         noEdit: parsed.flags.has('--no-edit'),
-        noFastForward: parsed.flags.has('--no-ff'),
-        fastForwardOnly: parsed.flags.has('--ff-only'),
+        noFastForward: parsed.flags.has('--no-ff') || ffConfig === 'false',
+        fastForwardOnly: parsed.flags.has('--ff-only') || ffConfig === 'only',
       })
     }
     case 'rebase': {
@@ -804,6 +836,12 @@ function runGit(repo: Repo, name: string, args: readonly string[], raw: string):
       return runTag(repo, args)
     case 'bisect':
       return runBisect(repo, args, raw)
+    case 'config':
+      return runConfig(repo, args)
+    case 'rerere': {
+      const [sub, ...paths] = args
+      return rerereCommand(repo, sub, paths)
+    }
     case 'reflog': {
       const parsed = parseArgs(args, { flags: [] })
       const [first, second, ...rest] = parsed.positional

@@ -203,3 +203,33 @@ export function mergeTrees(
   }
   return { tree, conflicts }
 }
+
+/**
+ * rerere でコンフリクトを見分けるための鍵。コンフリクトマーカーのラベルを取り除き、
+ * 各コンフリクトの 2 つの側を並べ替えてそろえる (ours と theirs が入れ替わっても同じ鍵になる)。
+ * マーカーがなければ null。
+ */
+export function conflictKey(text: string): string | null {
+  const out: string[] = []
+  let sides: [string[], string[]] | null = null
+  let side = 0
+  let found = false
+  for (const line of splitLines(text)) {
+    if (sides === null && line.startsWith('<<<<<<<')) {
+      sides = [[], []]
+      side = 0
+      found = true
+    } else if (sides !== null && side === 0 && line.startsWith('=======')) {
+      side = 1
+    } else if (sides !== null && side === 1 && line.startsWith('>>>>>>>')) {
+      const [a, b] = sides.map((lines) => lines.join('')).sort() as [string, string]
+      out.push('<<<<<<<\n', a, '=======\n', b, '>>>>>>>\n')
+      sides = null
+    } else if (sides !== null) {
+      sides[side]?.push(line)
+    } else {
+      out.push(line)
+    }
+  }
+  return found && sides === null ? out.join('') : null
+}
