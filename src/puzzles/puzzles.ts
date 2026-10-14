@@ -208,6 +208,75 @@ export const PUZZLES: readonly Puzzle[] = [
     ],
     solutions: [['git reset --hard HEAD@{1}']],
   },
+  {
+    id: 'bisect',
+    title: 'バグを入れたコミットを探す',
+    description:
+      'app.txt に「バグ」という行が紛れ込んでいます。C1 の時点では問題ありませんでした。git bisect で原因のコミットを探し、そのコミットに bug というタグを付けて、bisect を終わらせましょう。',
+    hint: 'git bisect start main C1 で始めると、真ん中のコミットに移動します。cat app.txt で「バグ」があれば git bisect bad、なければ git bisect good と答えていくと、原因のコミットがわかります。git tag bug <コミット> でタグを付けてから、git bisect reset で main に戻ります。',
+    setup: Array.from({ length: 8 }, (_, i) => [
+      `echo "機能 ${i + 1}" >> app.txt`,
+      ...(i === 4 ? ['echo "バグ" >> app.txt'] : []),
+      'git add app.txt',
+      `git commit -m "機能 ${i + 1}"`,
+    ]).flat(),
+    solutions: [
+      [
+        'git bisect start main C1',
+        'git bisect good',
+        'git bisect bad',
+        'git bisect bad',
+        'git tag bug C5',
+        'git bisect reset',
+      ],
+    ],
+    checkHead: true,
+    check: (repo) => repo.tags['bug']?.target === 'C5' && repo.bisect === null,
+  },
+  {
+    id: 'rebase-merges',
+    title: 'マージの形を保ったまま rebase する',
+    description:
+      'topic ブランチには、途中で feature をマージした履歴があります。このマージの形を崩さずに、topic を main の最新の上に付け替えましょう。',
+    hint: 'ふつうの git rebase main はマージコミットを取り除いて一直線にしてしまいます。git rebase --rebase-merges main (-r) なら、マージも作り直してブランチの形を保ちます。',
+    setup: [
+      'git switch -c topic',
+      ...change('topic.txt', 'topic 1', 'topic の作業 1'),
+      'git switch -c feature',
+      ...change('feature.txt', 'feature', 'feature の作業'),
+      'git switch topic',
+      ...change('topic.txt', 'topic 2', 'topic の作業 2'),
+      'git merge --no-edit feature',
+      'git branch -d feature',
+      'git switch main',
+      ...change('README.md', '更新', 'README を更新'),
+      'git switch topic',
+    ],
+    solutions: [['git rebase -r main']],
+  },
+  {
+    id: 'remotes',
+    title: 'フォーク元の更新を取り込む',
+    description:
+      'あなたの origin は、元のプロジェクトをフォークしたものです。元のプロジェクトは upstream という名前でリモートに登録してあります (git remote -v で確認できます)。upstream に入った新しいコミットを main に取り込み、自分の origin にも push しましょう。',
+    hint: 'git fetch upstream で upstream の新しいコミットを取得し、git merge upstream/main (または git pull upstream main) で取り込みます。最後に git push で origin に送ります。',
+    setup: [
+      ...change('app.txt', 'はじめの機能', 'はじめの機能'),
+      'git push',
+      'git remote add upstream https://example.com/original.git',
+      'git push upstream main',
+      'teammate upstream',
+      'teammate upstream',
+    ],
+    solutions: [
+      [
+        'git fetch upstream',
+        'git merge upstream/main',
+        'git push',
+      ],
+    ],
+    checkRemote: true,
+  },
 ]
 
 function runAll(repo: Repo, lines: readonly string[]): Repo {
