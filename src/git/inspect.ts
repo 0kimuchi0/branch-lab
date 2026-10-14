@@ -9,6 +9,7 @@ import {
   type OperationResult,
   type Repo,
 } from './model'
+import { tagHeader } from './tag'
 import type { Tree } from './tree'
 
 export interface GitDiffOptions extends Omit<DiffOptions, 'only'> {
@@ -57,7 +58,7 @@ export function show(repo: Repo, ref = 'HEAD', options: Omit<DiffOptions, 'only'
   const id = resolveRef(repo, ref)
   const commit = getCommit(repo, id)
   const names = refNames(repo, id)
-  const lines = [`commit ${id}${names.length > 0 ? ` (${names.join(', ')})` : ''}`]
+  const lines = [...tagHeader(repo, ref), `commit ${id}${names.length > 0 ? ` (${names.join(', ')})` : ''}`]
   if (commit.parents.length > 1) lines.push(`Merge: ${commit.parents.join(' ')}`)
   lines.push('', ...commit.message.split('\n').map((line) => (line === '' ? '' : `    ${line}`)))
   if (commit.parents.length <= 1) {

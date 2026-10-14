@@ -12,6 +12,7 @@ import {
   getCommit,
   headCommitId,
   headTree,
+  logRefs,
   requireNoConflicts,
   requireNoEditor,
   status,
@@ -190,7 +191,12 @@ export function stashBranch(repo: Repo, name: string, ref?: string): OperationRe
   const created = createBranch(repo, name, entry.base).repo
   const tree = getCommit(repo, entry.base).tree
   const moved = carryChanges(created, tree, 'stash branch')
-  const switched: Repo = { ...created, head: { type: 'branch', name }, ...moved }
+  const switched: Repo = logRefs(
+    created,
+    { ...created, head: { type: 'branch', name }, ...moved },
+    `checkout: moving from ${currentBranch(created) ?? headCommitId(created)} to ${name}`,
+    { forceHead: true },
+  )
   const popped = stashPop(switched, stashRef(position), { index: true })
   return { repo: popped.repo, output: `新しいブランチ '${name}' に切り替えました\n${popped.output}` }
 }

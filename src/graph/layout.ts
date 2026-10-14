@@ -43,7 +43,7 @@ export interface LayoutEdge {
   readonly reachable: boolean
 }
 
-export type LabelKind = 'branch' | 'current' | 'head' | 'remote'
+export type LabelKind = 'branch' | 'current' | 'head' | 'tag' | 'remote'
 
 export interface LayoutLabel {
   readonly key: string
@@ -132,7 +132,8 @@ const LABEL_ORDER: Readonly<Record<LabelKind, number>> = {
   current: 0,
   head: 0,
   branch: 1,
-  remote: 2,
+  tag: 2,
+  remote: 3,
 }
 
 /** コミットと参照からグラフの座標を計算する。 */
@@ -241,6 +242,7 @@ export function computeLayout(repo: Repo): GraphLayout {
   if (repo.operation?.type === 'merge') {
     refs.push({ key: 'merge-head', text: 'MERGE_HEAD', kind: 'head', target: repo.operation.theirs })
   }
+  refs.push(...tagRefs(repo.tags))
   for (const name of branchOrder(Object.keys(repo.remoteBranches))) {
     refs.push({
       key: `remote:${name}`,
@@ -253,6 +255,17 @@ export function computeLayout(repo: Repo): GraphLayout {
 }
 
 /** リモート (origin) のグラフ。 */
+function tagRefs(tags: Repo['tags']): GraphRef[] {
+  return Object.keys(tags)
+    .sort((a, b) => a.localeCompare(b, 'en', { numeric: true }))
+    .map((name) => ({
+      key: `tag:${name}`,
+      text: `tag: ${name}`,
+      kind: 'tag',
+      target: (tags[name] as Repo['tags'][string]).target,
+    }))
+}
+
 export function computeRemoteLayout(repo: Repo): GraphLayout {
   const refs: GraphRef[] = branchOrder(Object.keys(repo.remote.branches)).map((name) => ({
     key: `branch:${name}`,
@@ -260,5 +273,6 @@ export function computeRemoteLayout(repo: Repo): GraphLayout {
     kind: 'branch',
     target: repo.remote.branches[name] as CommitId,
   }))
+  refs.push(...tagRefs(repo.remote.tags))
   return layoutGraph(repo.remote.commits, refs)
 }

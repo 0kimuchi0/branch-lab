@@ -177,6 +177,45 @@ describe('revert', () => {
   })
 })
 
+describe('マージコミットの cherry-pick / revert (-m)', () => {
+  /** feature (C1: f.txt) を main (C2: m.txt) にマージした C3 を持つ Repo。 */
+  const merged = () => run(['git merge --no-edit feature'], diverged())
+
+  it('-m 1 は 1 番目の親 (main 側) からの変更、つまり feature で入った変更を複製する', () => {
+    const repo = run(['git switch -c other C0', 'git cherry-pick -m 1 C3'], merged())
+    expect(repo.commits['C4']).toMatchObject({ parents: ['C0'], message: "Merge branch 'feature'", source: 'C3' })
+    expect(repo.workdir).toEqual({ 'README.md': '# BranchLab\n', 'f.txt': 'f\n' })
+  })
+
+  it('-m 2 は 2 番目の親 (feature 側) からの変更を複製する', () => {
+    const repo = run(['git switch -c other C0', 'git cherry-pick -m 2 C3'], merged())
+    expect(repo.workdir).toEqual({ 'README.md': '# BranchLab\n', 'm.txt': 'm\n' })
+  })
+
+  it('revert -m 1 はマージで取り込んだ変更を打ち消し、メッセージに基準の親を書く', () => {
+    const repo = run(['git revert --no-edit -m 1 C3'], merged())
+    expect(repo.commits['C4']).toMatchObject({
+      parents: ['C3'],
+      reverts: 'C3',
+      message: "Revert \"Merge branch 'feature'\"\n\nThis reverts commit C3, reversing\nchanges made to C2.",
+    })
+    expect(repo.workdir['f.txt']).toBeUndefined()
+    expect(repo.workdir['m.txt']).toBe('m\n')
+  })
+
+  it('-m なしのマージコミット、存在しない親の番号はエラーになる', () => {
+    const repo = merged()
+    expect(fail(repo, 'git revert --no-edit C3')).toContain('-m オプションが指定されていません')
+    expect(fail(repo, 'git revert --no-edit -m 3 C3')).toContain('3 番目の親がありません')
+    expect(fail(repo, 'git revert --no-edit -m x C3')).toContain('親の番号')
+  })
+
+  it('マージでないコミットにも -m 1 は指定できる', () => {
+    const repo = run(['git switch -c other C0', 'git cherry-pick -m 1 C1'], diverged())
+    expect(repo.commits['C3']?.source).toBe('C1')
+  })
+})
+
 describe('rebase', () => {
   it('現在のブランチのコミットを upstream の先に付け替える', () => {
     const repo = run(['git switch feature', 'git rebase main'], diverged())

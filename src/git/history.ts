@@ -17,6 +17,7 @@ import {
   headCommitId,
   headTree,
   isAncestor,
+  logRefs,
   mergeBase,
   messageTemplate,
   openEditor,
@@ -35,9 +36,11 @@ import {
   type SequenceOperation,
   type SequenceType,
   type SquashPart,
+  type PickItem,
   type TodoAction,
   type TodoItem,
 } from './model'
+import { finishTag } from './tag'
 import { mergeTrees, treesEqual, withFile, type Conflict, type Tree } from './tree'
 
 /**
@@ -84,6 +87,8 @@ export interface MergeOptions {
   readonly noFastForward?: boolean
   /** --ff-only: fast-forward できない場合は中止する。 */
   readonly fastForwardOnly?: boolean
+  /** reflog に書く操作の名前 (既定は "merge <ref>"、git pull なら "pull")。 */
+  readonly reflogAction?: string
 }
 
 export function merge(repo: Repo, ref: string, options: MergeOptions = {}): OperationResult {
@@ -103,7 +108,7 @@ export function merge(repo: Repo, ref: string, options: MergeOptions = {}): Oper
         ? { ...repo, branches: { ...repo.branches, [repo.head.name]: theirs } }
         : { ...repo, head: { type: 'detached', id: theirs } }
     return {
-      repo: { ...moved, index, workdir },
+      repo: logRefs(repo, { ...moved, index, workdir }, `${options.reflogAction ?? `merge ${ref}`}: Fast-forward`),
       output: `Updating ${ours}..${theirs}\nFast-forward`,
     }
   }
@@ -141,7 +146,11 @@ export function merge(repo: Repo, ref: string, options: MergeOptions = {}): Oper
   }
 
   const merged: Repo = { ...repo, ...carried }
-  const pending: PendingCommit = { parents: [ours, theirs], tree: result.tree }
+  const pending: PendingCommit = {
+    parents: [ours, theirs],
+    tree: result.tree,
+    reflogMessage: `${options.reflogAction ?? `merge ${ref}`}: Merge made by the 'ort' strategy.`,
+  }
   const message = options.message?.trim()
   if (message || options.noEdit) {
     const created = createCommit(merged, pending, message || defaultMessage)
@@ -180,12 +189,25 @@ const EDIT_STOP = [
 
 function mergeCommitError(id: CommitId): GitError {
   return new GitError(
-    `error: ${id} はマージコミットですが、-m オプションが指定されていません (このアプリでは未対応です)`,
+    `error: コミット ${id} はマージコミットですが、-m オプションが指定されていません。\n` +
+      '(-m 1 なら 1 番目の親、-m 2 なら 2 番目の親を基準に変更を取り出します)',
   )
 }
 
-function parentTreeOf(repo: Repo, picked: Commit): Tree {
-  return picked.parents[0] === undefined ? {} : getCommit(repo, picked.parents[0]).tree
+/** 変更を取り出すときに基準にする親。マージコミットは -m で親を選ぶ必要がある。 */
+function checkMainline(picked: Commit, mainline: number | null): void {
+  if (mainline === null) {
+    if (picked.parents.length > 1) throw mergeCommitError(picked.id)
+    return
+  }
+  if (mainline < 1 || mainline > Math.max(1, picked.parents.length)) {
+    throw new GitError(`error: コミット ${picked.id} には ${mainline} 番目の親がありません`)
+  }
+}
+
+function parentTreeOf(repo: Repo, picked: Commit, mainline: number | null): Tree {
+  const parent = picked.parents[(mainline ?? 1) - 1]
+  return parent === undefined ? {} : getCommit(repo, parent).tree
 }
 
 /** squash のエディタに出す、まとめるコミットのメッセージ。 */
@@ -230,7 +252,7 @@ function waitForEditor(repo: Repo, stoppedOp: SequenceOperation, editor: Editor)
 function completeItem(
   repo: Repo,
   op: SequenceOperation,
-  item: TodoItem,
+  item: PickItem,
   tree: Tree,
   fromContinue: boolean,
 ): Step {
@@ -244,7 +266,7 @@ function completeItem(
       { message: picked.message, skip: item.action === 'fixup' },
     ]
     // まとめた結果は、直前のコミットを置き換える
-    const pending: PendingCommit = { parents: head.parents, tree }
+    const pending: PendingCommit = { parents: head.parents, tree, reflogAction: `rebase (${item.action})` }
     const next = op.todo[0]
     if (next?.action === 'squash' || next?.action === 'fixup') {
       const kept = parts.filter((part) => !part.skip).map((part) => part.message)
@@ -267,8 +289,9 @@ function completeItem(
     parents: [head.id],
     tree,
     ...(op.type === 'revert' ? { reverts: picked.id } : { source: picked.source ?? picked.id }),
+    reflogAction: op.type === 'rebase' ? `rebase (${item.action})` : op.type,
   }
-  const message = op.type === 'revert' ? revertMessage(picked) : picked.message
+  const message = op.type === 'revert' ? revertMessage(picked, op.mainline) : picked.message
   const nextOp: SequenceOperation = { ...op, current: null }
 
   if (item.action === 'reword' || fromContinue || op.edit) {
@@ -291,9 +314,22 @@ function completeItem(
 }
 
 /** todo の先頭の項目を HEAD に適用する (revert なら逆向きに)。 */
-function applyItem(repo: Repo, op: SequenceOperation, item: TodoItem): Step {
+function applyItem(repo: Repo, op: SequenceOperation, todoItem: TodoItem): Step {
+  if (todoItem.action === 'exec') {
+    // exec はコマンドを実行する層 (commands.ts) が実行して続ける。ここでは todo に残したまま止まる
+    return { status: 'stop', repo: { ...repo, operation: op }, lines: [] }
+  }
+  if (todoItem.action === 'break') {
+    const head = getCommit(repo, headCommitId(repo))
+    return {
+      status: 'stop',
+      repo: { ...repo, operation: { ...op, todo: op.todo.slice(1), current: null } },
+      lines: [`${head.id} (${subject(head.message)}) で停止しました (break)`, '続けるには git rebase --continue を実行してください。'],
+    }
+  }
+  const item = todoItem
   const picked = getCommit(repo, item.id)
-  if (picked.parents.length > 1) throw mergeCommitError(item.id)
+  checkMainline(picked, op.mainline)
   const headId = headCommitId(repo)
   const rest: SequenceOperation = { ...op, todo: op.todo.slice(1), current: null }
 
@@ -303,12 +339,12 @@ function applyItem(repo: Repo, op: SequenceOperation, item: TodoItem): Step {
     (item.action === 'pick' || item.action === 'edit') &&
     picked.parents[0] === headId
   ) {
-    const moved: Repo = {
-      ...repo,
-      head: { type: 'detached', id: picked.id },
-      index: picked.tree,
-      workdir: picked.tree,
-    }
+    // 追跡していないファイルは、ほかの経路と同じく残す
+    const moved: Repo = logRefs(
+      repo,
+      { ...repo, head: { type: 'detached', id: picked.id }, ...carryChanges(repo, picked.tree, 'rebase') },
+      `rebase (${item.action}): ${subject(picked.message)}`,
+    )
     if (item.action === 'edit') {
       return {
         status: 'stop',
@@ -319,7 +355,7 @@ function applyItem(repo: Repo, op: SequenceOperation, item: TodoItem): Step {
     return { status: 'continue', repo: moved, op: rest, lines: [] }
   }
 
-  const parentTree = parentTreeOf(repo, picked)
+  const parentTree = parentTreeOf(repo, picked, op.mainline)
   const [base, theirs] = op.type === 'revert' ? [picked.tree, parentTree] : [parentTree, picked.tree]
   const label =
     op.type === 'revert'
@@ -389,13 +425,16 @@ function finishSequence(repo: Repo, op: SequenceOperation, lines: string[]): Ope
     return { repo: { ...repo, operation: null }, output: lines.join('\n') }
   }
   lines.push(`Successfully rebased and updated refs/heads/${op.branch}.`)
+  // reflog: まずブランチを付け替え、次に HEAD をブランチに戻す (Git と同じく 2 行に分けて記録する)
+  const moved = logRefs(
+    repo,
+    { ...repo, operation: null, branches: { ...repo.branches, [op.branch]: tip } },
+    `rebase (finish): refs/heads/${op.branch} onto ${tip}`,
+  )
   return {
-    repo: {
-      ...repo,
-      operation: null,
-      branches: { ...repo.branches, [op.branch]: tip },
-      head: { type: 'branch', name: op.branch },
-    },
+    repo: logRefs(moved, { ...moved, head: { type: 'branch', name: op.branch } }, `rebase (finish): returning to refs/heads/${op.branch}`, {
+      forceHead: true,
+    }),
     output: lines.join('\n'),
   }
 }
@@ -404,27 +443,26 @@ function startPicks(
   repo: Repo,
   type: 'cherry-pick' | 'revert',
   refs: readonly string[],
-  options: { readonly keepEmpty: boolean; readonly edit: boolean },
+  options: { readonly keepEmpty: boolean; readonly edit: boolean; readonly mainline: number | null },
 ): OperationResult {
   requireNoOperation(repo)
   if (refs.length === 0) {
     throw new GitError(`使い方: git ${type} <コミット>...`)
   }
   const ids = refs.map((ref) => resolveRef(repo, ref))
-  for (const id of ids) {
-    if (getCommit(repo, id).parents.length > 1) throw mergeCommitError(id)
-  }
+  for (const id of ids) checkMainline(getCommit(repo, id), options.mainline)
   return runSequence(
     repo,
     {
       type,
       current: null,
-      todo: ids.map((id): TodoItem => ({ action: 'pick', id })),
+      todo: ids.map((id): PickItem => ({ action: 'pick', id })),
       origHead: headCommitId(repo),
       branch: currentBranch(repo),
       keepEmpty: options.keepEmpty,
       edit: options.edit,
       squash: null,
+      mainline: options.mainline,
     },
     [],
   )
@@ -434,11 +472,12 @@ function startPicks(
 export function cherryPick(
   repo: Repo,
   refs: readonly string[],
-  options: { readonly allowEmpty?: boolean; readonly edit?: boolean } = {},
+  options: { readonly allowEmpty?: boolean; readonly edit?: boolean; readonly mainline?: number } = {},
 ): OperationResult {
   return startPicks(repo, 'cherry-pick', refs, {
     keepEmpty: options.allowEmpty ?? false,
     edit: options.edit ?? false,
+    mainline: options.mainline ?? null,
   })
 }
 
@@ -446,9 +485,13 @@ export function cherryPick(
 export function revert(
   repo: Repo,
   refs: readonly string[],
-  options: { readonly noEdit?: boolean } = {},
+  options: { readonly noEdit?: boolean; readonly mainline?: number } = {},
 ): OperationResult {
-  return startPicks(repo, 'revert', refs, { keepEmpty: false, edit: !options.noEdit })
+  return startPicks(repo, 'revert', refs, {
+    keepEmpty: false,
+    edit: !options.noEdit,
+    mainline: options.mainline ?? null,
+  })
 }
 
 /** HEAD にあって upstream にないコミットを、古いものから順に並べる (マージコミットは除く)。 */
@@ -485,7 +528,12 @@ function startRebase(
 ): OperationResult {
   const tree = getCommit(repo, onto).tree
   const { index, workdir } = carryChanges({ ...repo, editor: null }, tree, 'rebase')
-  const detached: Repo = { ...repo, head: { type: 'detached', id: onto }, index, workdir, editor: null }
+  const detached: Repo = logRefs(
+    repo,
+    { ...repo, head: { type: 'detached', id: onto }, index, workdir, editor: null },
+    `rebase (start): checkout ${onto}`,
+    { forceHead: true },
+  )
   return runSequence(
     detached,
     {
@@ -497,23 +545,35 @@ function startRebase(
       keepEmpty: true,
       edit: false,
       squash: null,
+      mainline: null,
     },
     [],
   )
 }
 
+/** 各コミットの後ろに exec の行を入れる (git rebase -x)。 */
+function withExec(items: readonly TodoItem[], command: string | undefined): TodoItem[] {
+  if (command === undefined) return [...items]
+  return items.flatMap((item): TodoItem[] => [item, { action: 'exec', command }])
+}
+
+export interface RebaseOptions {
+  /** -x / --exec: 各コミットを適用したあとに実行するコマンド。 */
+  readonly exec?: string
+}
+
 /** git rebase <upstream>: 現在のブランチのコミットを upstream の先に付け替える。 */
-export function rebase(repo: Repo, upstreamRef: string): OperationResult {
+export function rebase(repo: Repo, upstreamRef: string, options: RebaseOptions = {}): OperationResult {
   requireNoOperation(repo)
   requireCleanForRebase(repo)
   const upstream = resolveRef(repo, upstreamRef)
   const head = headCommitId(repo)
   const branch = currentBranch(repo)
 
-  if (isAncestor(repo, upstream, head)) {
+  if (isAncestor(repo, upstream, head) && options.exec === undefined) {
     return { repo, output: `Current branch ${branch ?? 'HEAD'} is up to date.` }
   }
-  if (isAncestor(repo, head, upstream)) {
+  if (isAncestor(repo, head, upstream) && head !== upstream) {
     const tree = getCommit(repo, upstream).tree
     const { index, workdir } = carryChanges(repo, tree, 'rebase')
     const moved: Repo =
@@ -521,12 +581,12 @@ export function rebase(repo: Repo, upstreamRef: string): OperationResult {
         ? { ...repo, head: { type: 'detached', id: upstream } }
         : { ...repo, branches: { ...repo.branches, [branch]: upstream } }
     return {
-      repo: { ...moved, index, workdir },
+      repo: logRefs(repo, { ...moved, index, workdir }, `rebase (finish): ${branch === null ? 'HEAD' : `refs/heads/${branch}`} onto ${upstream}`),
       output: `Fast-forwarded ${branch ?? 'HEAD'} to ${upstreamRef}.`,
     }
   }
   const items = commitsToReplay(repo, head, upstream).map((id): TodoItem => ({ action: 'pick', id }))
-  return startRebase(repo, upstream, head, branch, items)
+  return startRebase(repo, upstream, head, branch, withExec(items, options.exec))
 }
 
 const TODO_HELP = [
@@ -537,6 +597,8 @@ const TODO_HELP = [
   '# s, squash <コミット> = コミットを使うが、直前のコミットにまとめる',
   '# f, fixup <コミット> = squash と同じだが、このコミットのメッセージは捨てる',
   '# d, drop <コミット> = コミットを取り除く',
+  '# x, exec <コマンド> = コマンドを実行する (失敗したらそこで止まる)',
+  '# b, break = ここで止まる (git rebase --continue で続ける)',
   '#',
   '# 行は並べ替えられます。上から順に実行されます。',
   '# 行を消すと、そのコミットは失われます。',
@@ -544,7 +606,11 @@ const TODO_HELP = [
 ]
 
 /** git rebase -i <upstream>: todo をエディタで編集してから rebase する。 */
-export function rebaseInteractive(repo: Repo, upstreamRef: string): OperationResult {
+export function rebaseInteractive(
+  repo: Repo,
+  upstreamRef: string,
+  options: RebaseOptions = {},
+): OperationResult {
   requireNoOperation(repo)
   requireCleanForRebase(repo)
   const onto = resolveRef(repo, upstreamRef)
@@ -553,7 +619,10 @@ export function rebaseInteractive(repo: Repo, upstreamRef: string): OperationRes
   const lines =
     commits.length === 0
       ? ['noop']
-      : commits.map((id) => `pick ${id} ${subject(getCommit(repo, id).message)}`)
+      : commits.flatMap((id) => [
+          `pick ${id} ${subject(getCommit(repo, id).message)}`,
+          ...(options.exec === undefined ? [] : [`exec ${options.exec}`]),
+        ])
   const editor: Editor = {
     file: 'git-rebase-todo',
     text: [
@@ -569,7 +638,11 @@ export function rebaseInteractive(repo: Repo, upstreamRef: string): OperationRes
   return { repo: openEditor(repo, editor), output: EDITOR_WAITING }
 }
 
-const TODO_ACTIONS: Readonly<Record<string, TodoAction | 'drop'>> = {
+const TODO_ACTIONS: Readonly<Record<string, TodoAction | 'drop' | 'exec' | 'break'>> = {
+  x: 'exec',
+  exec: 'exec',
+  b: 'break',
+  break: 'break',
   p: 'pick',
   pick: 'pick',
   r: 'reword',
@@ -594,6 +667,16 @@ export function parseTodo(repo: Repo, text: string): TodoItem[] {
     const action = TODO_ACTIONS[word]
     if (action === undefined) {
       throw new GitError(`error: ${index + 1} 行目のコマンド '${word}' はわかりません: ${line}`)
+    }
+    if (action === 'break') {
+      items.push({ action })
+      return
+    }
+    if (action === 'exec') {
+      const command = line.slice(word.length).trim()
+      if (command === '') throw new GitError(`error: ${index + 1} 行目に実行するコマンドがありません`)
+      items.push({ action, command })
+      return
     }
     if (ref === undefined) {
       throw new GitError(`error: ${index + 1} 行目にコミットがありません: ${line}`)
@@ -620,6 +703,10 @@ export function saveEditor(repo: Repo, text?: string): OperationResult {
   if (!editor) throw new GitError('エディタは開いていません')
   const content = text ?? editor.text
   const after = editor.after
+
+  if (after.kind === 'tag') {
+    return finishTag({ ...repo, editor: null }, after.name, after.target, content)
+  }
 
   if (after.kind === 'todo') {
     const items = parseTodo(repo, content)
@@ -720,8 +807,14 @@ export function abortOperation(repo: Repo, type: Operation['type']): OperationRe
           head: { type: 'branch', name: op.branch },
           branches: { ...repo.branches, [op.branch]: op.origHead },
         }
+  const where = op.branch === null ? op.origHead : `refs/heads/${op.branch}`
   return {
-    repo: { ...restored, operation: null, conflicts: [], index: tree, workdir: tree },
+    repo: logRefs(
+      repo,
+      { ...restored, operation: null, conflicts: [], index: tree, workdir: tree },
+      `${type} (abort): returning to ${where}`,
+      { forceHead: true },
+    ),
     output: `${type} を中止し、${op.origHead} に戻しました`,
   }
 }

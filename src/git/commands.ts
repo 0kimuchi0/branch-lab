@@ -18,10 +18,13 @@ import {
   deleteBranch,
   detachHead,
   gitRemove,
+  hasTrackedChanges,
   listBranches,
   listFiles,
   log,
+  previousBranch,
   readFile,
+  reflog,
   removeFile,
   renameBranch,
   reset,
@@ -38,7 +41,8 @@ import {
   type ResetMode,
 } from './model'
 import { gitDiff, show } from './inspect'
-import { fetch, pull, push, teammateCommit } from './remote'
+import { createTag, deleteTags, listTags } from './tag'
+import { fetch, pull, push, pushDelete, pushTags, teammateCommit } from './remote'
 import {
   stashApply,
   stashBranch,
@@ -62,22 +66,24 @@ export const HELP_TEXT = [
   '  touch / cat / ls / rm      作成・表示・一覧・削除',
   '',
   'Git のコマンド (先頭の git は省略できます。rm だけは git rm と区別します):',
-  '  status / log [--oneline] [--all]',
+  '  status / log [--oneline] [--all] / reflog [<ブランチ>]',
   '  diff [--staged] [<コミット> [<コミット>]] [--stat] [-- <ファイル>] / show [<コミット>]',
   '  add <ファイル>... / add .        restore [--staged] <ファイル>...',
   '  commit [-m "メッセージ"] [-a] [--allow-empty] [--amend] [--no-edit]',
   '  (-m を付けないとエディタが開きます。merge・revert・--continue なども同じです)',
   '  branch [<名前> [<起点>]] / branch -d <名前> / branch -m <新しい名前>',
-  '  switch <名前> / switch -c <名前> / switch --detach <コミット>',
+  '  switch <名前> / switch - / switch -c <名前> / switch --detach <コミット>',
   '  checkout <名前|コミット> / checkout -b <名前>',
-  '  merge <ブランチ> [--no-ff] [--no-edit] / rebase [-i] <ブランチ>',
-  '  cherry-pick [-e] [--allow-empty] <コミット>... / revert [--no-edit] <コミット>...',
+  '  merge <ブランチ> [--no-ff] [--no-edit] / rebase [-i] [-x <コマンド>] <ブランチ>',
+  '  cherry-pick [-e] [-m <親>] [--allow-empty] <コミット>... / revert [--no-edit] [-m <親>] <コミット>...',
   '  reset [--soft | --mixed | --hard] [<コミット>]',
+  '  tag [-a] [-m "…"] [-f] <タグ> [<コミット>] / tag -l [<パターン>] / tag -d <タグ>',
   '  stash [push [-m "…"] [-u] [-k]] / stash list / show [-p] / apply / pop [--index] / drop / clear / branch',
-  '  push [-u] [-f] [origin <ブランチ>] / fetch / pull [--rebase | --no-rebase]',
+  '  push [-u] [-f] [--tags] [origin <ブランチ|タグ>] / push origin --delete <名前>',
+  '  fetch / pull [--rebase | --no-rebase]',
   '  (merge / rebase / cherry-pick / revert は --continue・--abort が使えます)',
   '',
-  '<コミット> の例: C1, main, origin/main, HEAD~1, HEAD^2',
+  '<コミット> の例: C1, main, v1.0, origin/main, HEAD~1, HEAD^2, HEAD@{1}, main@{2}',
   '',
   'このアプリ独自のコマンド:',
   '  teammate [<ブランチ>]   他の人が origin に push したことにする',
@@ -193,6 +199,14 @@ function sequencerControl(
 
 const CONTROL_FLAGS = ['--continue', '--abort', '--skip']
 
+/** -m <親の番号> を読む。 */
+function parseMainline(parsed: ParsedArgs): number | undefined {
+  const value = parsed.values.get('-m')
+  if (value === undefined) return undefined
+  if (!/^[1-9]\d*$/.test(value)) throw new GitError(`error: -m には親の番号 (1 以上の整数) を指定してください: ${value}`)
+  return Number(value)
+}
+
 function runCommit(repo: Repo, args: readonly string[]): OperationResult {
   // -am "msg" は -a -m "msg" と同じ
   const expanded = args.flatMap((arg) => (/^-[a-z]{2,}$/.test(arg) ? [...arg.slice(1)].map((c) => `-${c}`) : [arg]))
@@ -273,7 +287,8 @@ function runSwitch(repo: Repo, args: readonly string[]): OperationResult {
     })
   }
   atMost(parsed, 1, 'git switch <ブランチ>')
-  const target = parsed.positional[0]
+  // git switch - は、直前にいたブランチに戻る
+  const target = parsed.positional[0] === '-' ? previousBranch(repo) : parsed.positional[0]
   if (parsed.flags.has('--detach')) return detachHead(repo, target ?? 'HEAD')
   if (target === undefined) usage('git switch <ブランチ>')
   if (!(target in repo.branches) && !(target in repo.remoteBranches) && tryResolveRef(repo, target)) {
@@ -302,7 +317,7 @@ function runCheckout(repo: Repo, args: readonly string[]): OperationResult {
     })
   }
   atMost(parsed, 1, 'git checkout <ブランチ|コミット>')
-  const target = parsed.positional[0]
+  const target = parsed.positional[0] === '-' ? previousBranch(repo) : parsed.positional[0]
   if (target === undefined) usage('git checkout <ブランチ|コミット>')
   if (!parsed.flags.has('--detach') && (target in repo.branches || target in repo.remoteBranches)) {
     return switchBranch(repo, target)
@@ -319,7 +334,9 @@ function runReset(repo: Repo, args: readonly string[]): OperationResult {
   const mode: ResetMode | undefined = modes[0]
   const [target, ...rest] = parsed.positional
 
-  if (parsed.paths !== null || (target !== undefined && tryResolveRef(repo, target) === null)) {
+  // HEAD@{n} や HEAD~n の形は、解決できなくてもファイルではなくコミットの指定として扱う
+  const looksLikeRef = target !== undefined && /@\{|[~^]/.test(target)
+  if (parsed.paths !== null || (target !== undefined && !looksLikeRef && tryResolveRef(repo, target) === null)) {
     if (mode !== undefined) {
       throw new GitError(`fatal: --${mode} はファイルを指定した reset では使えません`)
     }
@@ -347,6 +364,28 @@ function runRestore(repo: Repo, args: readonly string[]): OperationResult {
     return restore(first.repo, paths, { source: source ?? 'HEAD' })
   }
   return restore(repo, paths, { staged, ...(source === undefined ? {} : { source }) })
+}
+
+function runTag(repo: Repo, args: readonly string[]): OperationResult {
+  const parsed = parseArgs(args, {
+    flags: ['-a', '-d', '-f', '-l'],
+    values: ['-m'],
+    aliases: { '--annotate': '-a', '--delete': '-d', '--force': '-f', '--list': '-l', '--message': '-m' },
+  })
+  if (parsed.flags.has('-d')) return deleteTags(repo, parsed.positional)
+  const [name, target, ...rest] = parsed.positional
+  if (name === undefined || parsed.flags.has('-l')) {
+    atMost(parsed, 1, 'git tag -l [<パターン>]')
+    return listTags(repo, name)
+  }
+  if (rest.length > 0) usage('git tag [-a] [-m "メッセージ"] [-f] <タグ> [<コミット>]')
+  const message = parsed.values.get('-m')
+  return createTag(repo, name, {
+    ...(target === undefined ? {} : { target }),
+    ...(message === undefined ? {} : { message }),
+    annotate: parsed.flags.has('-a'),
+    force: parsed.flags.has('-f'),
+  })
 }
 
 function runStash(repo: Repo, args: readonly string[]): OperationResult {
@@ -416,11 +455,19 @@ function parseRemoteArgs(positional: readonly string[], text: string): string | 
 
 function runPush(repo: Repo, args: readonly string[]): OperationResult {
   const parsed = parseArgs(args, {
-    flags: ['-u', '-f'],
-    aliases: { '--set-upstream': '-u', '--force': '-f' },
+    flags: ['-u', '-f', '--tags', '-d'],
+    aliases: { '--set-upstream': '-u', '--force': '-f', '--delete': '-d' },
   })
-  const text = 'git push [-u] [-f] [origin [<ブランチ>]]'
+  const text = 'git push [-u] [-f] [--tags] [origin [<ブランチ|タグ>]] / git push origin --delete <名前>'
   const branch = parseRemoteArgs(parsed.positional, text)
+  if (parsed.flags.has('-d')) {
+    if (branch === undefined) usage(text)
+    return pushDelete(repo, branch)
+  }
+  if (parsed.flags.has('--tags')) {
+    if (branch !== undefined) usage(text)
+    return pushTags(repo, Object.keys(repo.tags).sort(), { force: parsed.flags.has('-f') })
+  }
   return push(repo, {
     ...(branch === undefined ? {} : { branch }),
     explicit: branch !== undefined,
@@ -527,38 +574,63 @@ function runGit(repo: Repo, name: string, args: readonly string[]): OperationRes
     case 'rebase': {
       const parsed = parseArgs(args, {
         flags: [...CONTROL_FLAGS, '-i'],
-        aliases: { '--interactive': '-i' },
+        values: ['-x'],
+        aliases: { '--interactive': '-i', '--exec': '-x' },
       })
       const control = sequencerControl(repo, 'rebase', parsed)
       if (control) return control
-      if (parsed.positional.length !== 1) usage('git rebase [-i] <ブランチ>')
+      if (parsed.positional.length !== 1) usage('git rebase [-i] [-x <コマンド>] <ブランチ>')
       const upstream = parsed.positional[0] as string
-      return parsed.flags.has('-i') ? rebaseInteractive(repo, upstream) : rebase(repo, upstream)
+      const exec = parsed.values.get('-x')
+      const options = exec === undefined ? {} : { exec }
+      return parsed.flags.has('-i')
+        ? rebaseInteractive(repo, upstream, options)
+        : rebase(repo, upstream, options)
     }
     case 'cherry-pick': {
       const parsed = parseArgs(args, {
         flags: [...CONTROL_FLAGS, '--allow-empty', '-e'],
-        aliases: { '--edit': '-e' },
+        values: ['-m'],
+        aliases: { '--edit': '-e', '--mainline': '-m' },
       })
+      const mainline = parseMainline(parsed)
       return (
         sequencerControl(repo, 'cherry-pick', parsed) ??
         cherryPick(repo, parsed.positional, {
           allowEmpty: parsed.flags.has('--allow-empty'),
           edit: parsed.flags.has('-e'),
+          ...(mainline === undefined ? {} : { mainline }),
         })
       )
     }
     case 'revert': {
-      const parsed = parseArgs(args, { flags: [...CONTROL_FLAGS, '--no-edit'] })
+      const parsed = parseArgs(args, {
+        flags: [...CONTROL_FLAGS, '--no-edit'],
+        values: ['-m'],
+        aliases: { '--mainline': '-m' },
+      })
+      const mainline = parseMainline(parsed)
       return (
         sequencerControl(repo, 'revert', parsed) ??
-        revert(repo, parsed.positional, { noEdit: parsed.flags.has('--no-edit') })
+        revert(repo, parsed.positional, {
+          noEdit: parsed.flags.has('--no-edit'),
+          ...(mainline === undefined ? {} : { mainline }),
+        })
       )
     }
     case 'reset':
       return runReset(repo, args)
     case 'stash':
       return runStash(repo, args)
+    case 'tag':
+      return runTag(repo, args)
+    case 'reflog': {
+      const parsed = parseArgs(args, { flags: [] })
+      const [first, second, ...rest] = parsed.positional
+      const ref = first === 'show' ? second : first
+      if (rest.length > 0 || (first !== 'show' && second !== undefined)) usage('git reflog [show] [<ブランチ>]')
+      return reflog(repo, ref)
+    }
     case 'push':
       return runPush(repo, args)
     case 'fetch': {
@@ -660,6 +732,63 @@ function runEditorSave(repo: Repo, input: string): CommandResult {
  * Git の規則に反する操作は例外にせず、ok: false と説明文で返す。
  */
 export function executeCommand(repo: Repo, input: string): CommandResult {
+  const result = executeOnce(repo, input)
+  return result.ok ? runPendingExec(result) : result
+}
+
+/**
+ * rebase の todo の先頭が exec なら、そのコマンドを実行して rebase を続ける。
+ * コマンドが失敗したり、コミットしていない変更を残したりしたら、Git と同じくそこで止まる。
+ */
+function runPendingExec(result: CommandResult): CommandResult {
+  let repo = result.repo
+  const lines = result.output === '' ? [] : [result.output]
+  for (;;) {
+    const op = repo.operation
+    const next = op?.type === 'rebase' && op.current === null && !repo.editor ? op.todo[0] : undefined
+    if (op?.type !== 'rebase' || next?.action !== 'exec') break
+    const before: Repo = { ...repo, operation: { ...op, todo: op.todo.slice(1) } }
+    lines.push(`Executing: ${next.command}`)
+    // exec の中のコマンドは、ここから入れ子にならないように 1 回だけ実行する
+    const ran = executeOnce(before, next.command)
+    if (ran.output) lines.push(ran.output)
+    const after: Repo = ran.ok ? ran.repo : before
+    if (!ran.ok) {
+      lines.push(
+        `warning: コマンドの実行に失敗しました: ${next.command}`,
+        '問題を直してから git rebase --continue を実行してください。',
+      )
+      repo = after
+      break
+    }
+    if (after.operation?.type !== 'rebase' || after.editor) {
+      // exec の中で rebase を終わらせた、またはエディタを開いた場合は、そのまま返す
+      repo = after
+      break
+    }
+    if (hasTrackedChanges(after)) {
+      lines.push(
+        `error: コマンドは成功しましたが、ステージか作業ディレクトリに変更を残しました: ${next.command}`,
+        'コミットするか stash してから git rebase --continue を実行してください。',
+      )
+      repo = after
+      break
+    }
+    try {
+      const continued = continueOperation(after, 'rebase')
+      if (continued.output) lines.push(continued.output)
+      repo = continued.repo
+    } catch (error) {
+      if (!(error instanceof GitError)) throw error
+      lines.push(error.message)
+      repo = after
+      break
+    }
+  }
+  return { repo, output: lines.join('\n'), ok: true }
+}
+
+function executeOnce(repo: Repo, input: string): CommandResult {
   if (input.startsWith(EDITOR_SAVE)) return runEditorSave(repo, input)
   if (repo.editor && input.trim() !== '') {
     return {

@@ -32,10 +32,17 @@ export type Head =
 /** rebase -i の todo の 1 行 (cherry-pick・revert・通常の rebase はすべて pick)。 */
 export type TodoAction = 'pick' | 'reword' | 'edit' | 'squash' | 'fixup'
 
-export interface TodoItem {
+/** コミットを適用する todo の行。 */
+export interface PickItem {
   readonly action: TodoAction
   readonly id: CommitId
 }
+
+/** rebase -i の todo の 1 行。exec はコマンドを実行し、break はそこで止まる。 */
+export type TodoItem =
+  | PickItem
+  | { readonly action: 'exec'; readonly command: string }
+  | { readonly action: 'break' }
 
 /** squash / fixup でまとめているコミットのメッセージ (fixup のものは skip)。 */
 export interface SquashPart {
@@ -48,7 +55,7 @@ export type SequenceType = 'cherry-pick' | 'revert' | 'rebase'
 export interface SequenceOperation {
   readonly type: SequenceType
   /** 適用中 (コンフリクトなどで止まっている) の項目。確定済みなら null。 */
-  readonly current: TodoItem | null
+  readonly current: PickItem | null
   /** これから適用する項目。 */
   readonly todo: readonly TodoItem[]
   /** 操作を始める前の HEAD。--abort で戻る先。 */
@@ -61,6 +68,8 @@ export interface SequenceOperation {
   readonly edit: boolean
   /** squash / fixup でまとめている途中のメッセージ。 */
   readonly squash: readonly SquashPart[] | null
+  /** -m: マージコミットを cherry-pick / revert するときに基準にする親の番号 (1 始まり)。 */
+  readonly mainline: number | null
 }
 
 /** 途中で止まっている操作 (コンフリクトの解消待ちなど)。 */
@@ -78,6 +87,16 @@ export interface PendingCommit {
   readonly tree: Tree
   readonly source?: CommitId
   readonly reverts?: CommitId
+  /** reflog に書く操作の名前 (既定は commit)。"<操作>: <件名>" の形で記録する。 */
+  readonly reflogAction?: string
+  /** reflog に書くメッセージ (件名の代わりにこれをそのまま記録する。マージなど)。 */
+  readonly reflogMessage?: string
+}
+
+/** reflog の 1 行。HEAD やブランチがどのコミットに移ったかと、そのときの操作。 */
+export interface ReflogEntry {
+  readonly id: CommitId
+  readonly message: string
 }
 
 /** エディタを保存して閉じたあとに続ける処理。 */
@@ -94,6 +113,13 @@ export type AfterEdit =
       readonly operation: SequenceOperation
       readonly stop?: boolean
     }
+  /** 注釈付きタグを作る (git tag -a でメッセージを書いた場合)。 */
+  | {
+      readonly kind: 'tag'
+      readonly name: string
+      readonly target: CommitId
+      readonly force: boolean
+    }
   /** rebase -i の todo を読んで rebase を始める。 */
   | {
       readonly kind: 'todo'
@@ -106,7 +132,7 @@ export type AfterEdit =
 /** 開いているエディタ。Git がエディタを開いて、閉じられるのを待っている状態。 */
 export interface Editor {
   /** 編集しているファイルの名前 (表示用)。 */
-  readonly file: 'COMMIT_EDITMSG' | 'MERGE_MSG' | 'git-rebase-todo'
+  readonly file: 'COMMIT_EDITMSG' | 'MERGE_MSG' | 'TAG_EDITMSG' | 'git-rebase-todo'
   /** エディタを開いたときの内容。 */
   readonly text: string
   readonly after: AfterEdit
@@ -125,10 +151,17 @@ export interface StashEntry {
   readonly untracked: Tree
 }
 
+/** タグ。message があれば注釈付きタグ (git tag -a)、なければ軽量タグ。 */
+export interface Tag {
+  readonly target: CommitId
+  readonly message?: string
+}
+
 export interface Remote {
   readonly name: string
   readonly commits: Readonly<Record<CommitId, Commit>>
   readonly branches: Readonly<Record<string, CommitId>>
+  readonly tags: Readonly<Record<string, Tag>>
 }
 
 export interface Repo {
@@ -144,6 +177,9 @@ export interface Repo {
   readonly editor: Editor | null
   /** git stash のスタック。先頭が stash@{0} (最新)。 */
   readonly stash: readonly StashEntry[]
+  readonly tags: Readonly<Record<string, Tag>>
+  /** HEAD とブランチの reflog。キーは "HEAD" かブランチ名で、先頭が最新 (HEAD@{0})。 */
+  readonly reflogs: Readonly<Record<string, readonly ReflogEntry[]>>
   readonly remote: Remote
   /** リモート追跡ブランチ (origin/main など)。キーはリモート上のブランチ名。 */
   readonly remoteBranches: Readonly<Record<string, CommitId>>
@@ -186,7 +222,12 @@ export function createRepo(): Repo {
     conflicts: [],
     editor: null,
     stash: [],
-    remote: { name: REMOTE_NAME, commits, branches: { [DEFAULT_BRANCH]: root.id } },
+    tags: {},
+    reflogs: {
+      HEAD: [{ id: root.id, message: `clone: from ${REMOTE_NAME}` }],
+      [DEFAULT_BRANCH]: [{ id: root.id, message: `clone: from ${REMOTE_NAME}` }],
+    },
+    remote: { name: REMOTE_NAME, commits, branches: { [DEFAULT_BRANCH]: root.id }, tags: {} },
     remoteBranches: { [DEFAULT_BRANCH]: root.id },
     upstreams: { [DEFAULT_BRANCH]: DEFAULT_BRANCH },
     nextId: 1,
@@ -254,9 +295,13 @@ export function mergeBase(repo: Repo, a: CommitId, b: CommitId): CommitId | null
   return best[0] ?? null
 }
 
-/** ブランチ・リモート追跡ブランチ・HEAD からたどれるコミット。 */
+/** ブランチ・タグ・リモート追跡ブランチ・HEAD からたどれるコミット。 */
 export function reachableCommits(repo: Repo): Set<CommitId> {
-  const tips = [...Object.values(repo.branches), ...Object.values(repo.remoteBranches)]
+  const tips = [
+    ...Object.values(repo.branches),
+    ...Object.values(repo.tags).map((tag) => tag.target),
+    ...Object.values(repo.remoteBranches),
+  ]
   tips.push(headCommitId(repo))
   if (repo.operation?.type === 'merge') tips.push(repo.operation.theirs)
   const reachable = new Set<CommitId>()
@@ -283,7 +328,8 @@ export function tryResolveRef(repo: Repo, ref: string): CommitId | null {
 }
 
 /**
- * コミットの指定 (ブランチ名・origin/<ブランチ名>・コミット ID・HEAD) を解決する。
+ * コミットの指定 (タグ名・ブランチ名・origin/<ブランチ名>・コミット ID・HEAD) を解決する。
+ * タグとブランチが同じ名前なら、Git と同じくタグを優先する。
  * 末尾の ~n は第 1 親を n 回、^n は n 番目の親をたどる (n の省略は 1)。
  */
 export function resolveRef(repo: Repo, ref: string): CommitId {
@@ -292,8 +338,11 @@ export function resolveRef(repo: Repo, ref: string): CommitId {
   const [, base = '', suffix = ''] = match
 
   const remoteName = remoteRefName(base)
+  const reflogRef = /^(.*)@\{(-?\d+)\}$/.exec(base)
   let id: CommitId
-  if (base === 'HEAD' || base === '@') id = headCommitId(repo)
+  if (reflogRef) id = resolveReflogRef(repo, reflogRef[1] ?? '', Number(reflogRef[2]))
+  else if (base === 'HEAD' || base === '@') id = headCommitId(repo)
+  else if (base in repo.tags) id = (repo.tags[base] as Tag).target
   else if (base in repo.branches) id = repo.branches[base] as CommitId
   else if (remoteName !== null && remoteName in repo.remoteBranches) {
     id = repo.remoteBranches[remoteName] as CommitId
@@ -311,6 +360,43 @@ export function resolveRef(repo: Repo, ref: string): CommitId {
   return id
 }
 
+/** n 個前に checkout していたブランチ (git switch - や @{-1})。 */
+export function previousBranch(repo: Repo, n = 1): string {
+  let count = 0
+  for (const entry of repo.reflogs['HEAD'] ?? []) {
+    const match = /^checkout: moving from (\S+) to /.exec(entry.message)
+    if (match && ++count === n) return match[1] as string
+  }
+  throw new GitError(`fatal: ${n} 個前に checkout していたブランチはありません`)
+}
+
+/** <名前>@{n}: reflog の n 個前。名前を省くと現在のブランチ、@{-n} は n 個前のブランチ。 */
+function resolveReflogRef(repo: Repo, name: string, n: number): CommitId {
+  if (n < 0) {
+    if (name !== '') throw new GitError(`'${name}@{${n}}' はコミットの指定として使えません`)
+    return resolveRef(repo, previousBranch(repo, -n))
+  }
+  const key = name === '' ? (currentBranch(repo) ?? 'HEAD') : name
+  const entries = repo.reflogs[key]
+  if (!entries) throw new GitError(`fatal: '${key}' の reflog はありません`)
+  const entry = entries[n]
+  if (!entry) throw new GitError(`fatal: '${key}' の reflog には ${entries.length} 個のエントリしかありません`)
+  return entry.id
+}
+
+/** git reflog [<ref>]: HEAD (またはブランチ) が移動した履歴を新しいものから表示する。 */
+export function reflog(repo: Repo, ref = 'HEAD'): OperationResult {
+  const key = ref === '@' ? 'HEAD' : ref
+  const entries = repo.reflogs[key]
+  if (!entries) throw new GitError(`fatal: '${ref}' の reflog はありません`)
+  const lines = entries.map((entry, index) => {
+    const names = refNames(repo, entry.id)
+    const decoration = names.length > 0 ? ` (${names.join(', ')})` : ''
+    return `${entry.id}${decoration} ${key}@{${index}}: ${entry.message}`
+  })
+  return { repo, output: lines.join('\n') }
+}
+
 function parentOf(repo: Repo, id: CommitId, index: number, ref: string): CommitId {
   const parent = repo.commits[id]?.parents[index]
   if (parent === undefined) {
@@ -324,9 +410,13 @@ export function refNames(repo: Repo, id: CommitId): string[] {
   const names: string[] = []
   const current = currentBranch(repo)
   if (repo.head.type === 'detached' && repo.head.id === id) names.push('HEAD')
+  // 現在のブランチを先頭に (git log と同じ "HEAD -> main, feature" の順)
+  if (current !== null && repo.branches[current] === id) names.push(`HEAD -> ${current}`)
   for (const [name, target] of Object.entries(repo.branches)) {
-    if (target !== id) continue
-    names.push(name === current ? `HEAD -> ${name}` : name)
+    if (target === id && name !== current) names.push(name)
+  }
+  for (const [name, tag] of Object.entries(repo.tags).sort(([a], [b]) => a.localeCompare(b))) {
+    if (tag.target === id) names.push(`tag: ${name}`)
   }
   for (const [name, target] of Object.entries(repo.remoteBranches)) {
     if (target === id) names.push(`${REMOTE_NAME}/${name}`)
@@ -567,6 +657,33 @@ export function restore(
 // ---- コミット ----
 
 /**
+ * before から after への HEAD とブランチの移動を reflog に記録する。
+ * HEAD は指すコミットが変わったとき (forceHead なら変わらなくても) に、
+ * ブランチは先端が変わったときに記録し、消えたブランチの reflog は消す。
+ */
+export function logRefs(
+  before: Repo,
+  after: Repo,
+  message: string,
+  options: { readonly forceHead?: boolean; readonly forceBranch?: boolean } = {},
+): Repo {
+  const reflogs: Record<string, readonly ReflogEntry[]> = {}
+  for (const [name, entries] of Object.entries(after.reflogs)) {
+    if (name === 'HEAD' || name in after.branches) reflogs[name] = entries
+  }
+  const add = (name: string, id: CommitId) => {
+    reflogs[name] = [{ id, message }, ...(reflogs[name] ?? [])]
+  }
+  const headId = headCommitId(after)
+  if (options.forceHead || headId !== headCommitId(before)) add('HEAD', headId)
+  const current = currentBranch(after)
+  for (const [name, id] of Object.entries(after.branches)) {
+    if (before.branches[name] !== id || (options.forceBranch && name === current)) add(name, id)
+  }
+  return { ...after, reflogs }
+}
+
+/**
  * 新しいコミットを作って HEAD (ブランチにいればそのブランチ) を進める。
  * ステージと作業ディレクトリは変更しない。
  */
@@ -668,8 +785,10 @@ export interface CommitOptions {
 
 /** コミットを作る。output は git commit の 1 行目と同じ形。 */
 export function createCommit(repo: Repo, pending: PendingCommit, message: string): { repo: Repo; output: string } {
-  const { repo: next, commit: created } = addCommit(repo, { ...pending, message })
-  return { repo: next, output: commitSummary(created, currentBranch(next)) }
+  const { reflogAction, reflogMessage, ...fields } = pending
+  const { repo: next, commit: created } = addCommit(repo, { ...fields, message })
+  const entry = reflogMessage ?? `${reflogAction ?? 'commit'}: ${subject(message)}`
+  return { repo: logRefs(repo, next, entry), output: commitSummary(created, currentBranch(next)) }
 }
 
 /** ステージ (インデックス) の内容でコミットする。メッセージがなければエディタを開く。 */
@@ -718,11 +837,16 @@ export function commit(repo: Repo, options: CommitOptions = {}): OperationResult
     tree: staged.index,
     ...(picked && op?.type !== 'revert' ? { source: picked.source ?? picked.id } : {}),
     ...(picked && op?.type === 'revert' ? { reverts: picked.id } : {}),
+    reflogAction:
+      options.amend ? 'commit (amend)'
+      : op?.type === 'merge' ? 'commit (merge)'
+      : picked && op ? (op.type === 'rebase' ? 'rebase (continue)' : op.type)
+      : 'commit',
   }
   const defaultMessage =
     options.amend ? head.message
     : op?.type === 'merge' ? op.message
-    : picked && op?.type === 'revert' ? revertMessage(picked)
+    : picked && op?.type === 'revert' ? revertMessage(picked, op.mainline)
     : picked ? picked.message
     : ''
   const finishedOp: Operation | null =
@@ -748,27 +872,30 @@ export function commit(repo: Repo, options: CommitOptions = {}): OperationResult
   return { repo: openEditor(staged, editor), output: EDITOR_WAITING }
 }
 
-export function revertMessage(commit: Commit): string {
-  return `Revert "${subject(commit.message)}"\n\nThis reverts commit ${commit.id}.`
+/** revert のメッセージ。マージコミットを -m で revert したときは、基準にした親も書く (Git と同じ)。 */
+export function revertMessage(commit: Commit, mainline: number | null = null): string {
+  const title = `Revert "${subject(commit.message)}"`
+  const parent = mainline === null || commit.parents.length < 2 ? undefined : commit.parents[mainline - 1]
+  return parent === undefined
+    ? `${title}\n\nThis reverts commit ${commit.id}.`
+    : `${title}\n\nThis reverts commit ${commit.id}, reversing\nchanges made to ${parent}.`
 }
 
 // ---- ブランチ ----
 
-function validateBranchName(name: string): void {
+export function validateRefName(name: string): void {
   if (!BRANCH_NAME_PATTERN.test(name) || name.includes('..') || name === 'HEAD') {
     throw new GitError(`fatal: '${name}' はブランチ名として使えません`)
   }
 }
 
 export function createBranch(repo: Repo, name: string, startPoint = 'HEAD'): OperationResult {
-  validateBranchName(name)
+  validateRefName(name)
   if (name in repo.branches) {
     throw new GitError(`fatal: ブランチ '${name}' はすでに存在します`)
   }
-  return {
-    repo: { ...repo, branches: { ...repo.branches, [name]: resolveRef(repo, startPoint) } },
-    output: '',
-  }
+  const next: Repo = { ...repo, branches: { ...repo.branches, [name]: resolveRef(repo, startPoint) } }
+  return { repo: logRefs(repo, next, `branch: Created from ${startPoint}`), output: '' }
 }
 
 export function listBranches(repo: Repo, options: { readonly remotes?: boolean } = {}): string {
@@ -809,8 +936,10 @@ export function deleteBranch(repo: Repo, name: string, force = false): Operation
   delete branches[name]
   const upstreams = { ...repo.upstreams }
   delete upstreams[name]
+  const reflogs = { ...repo.reflogs }
+  delete reflogs[name]
   return {
-    repo: { ...repo, branches, upstreams },
+    repo: { ...repo, branches, upstreams, reflogs },
     output: `ブランチ ${name} を削除しました (${target})`,
   }
 }
@@ -818,7 +947,7 @@ export function deleteBranch(repo: Repo, name: string, force = false): Operation
 export function renameBranch(repo: Repo, from: string, to: string): OperationResult {
   const target = repo.branches[from]
   if (target === undefined) throw new GitError(`error: ブランチ '${from}' は見つかりません`)
-  validateBranchName(to)
+  validateRefName(to)
   if (to in repo.branches) throw new GitError(`fatal: ブランチ '${to}' はすでに存在します`)
   const branches: Record<string, CommitId> = {}
   for (const [name, id] of Object.entries(repo.branches)) {
@@ -830,7 +959,13 @@ export function renameBranch(repo: Repo, from: string, to: string): OperationRes
   }
   const head: Head =
     repo.head.type === 'branch' && repo.head.name === from ? { type: 'branch', name: to } : repo.head
-  return { repo: { ...repo, branches, upstreams, head }, output: '' }
+  const reflogs: Record<string, readonly ReflogEntry[]> = { ...repo.reflogs }
+  reflogs[to] = [
+    { id: target, message: `Branch: renamed refs/heads/${from} to refs/heads/${to}` },
+    ...(reflogs[from] ?? []),
+  ]
+  delete reflogs[from]
+  return { repo: { ...repo, branches, upstreams, head, reflogs }, output: '' }
 }
 
 /** git branch -u origin/<ブランチ>: branch の upstream を設定する。 */
@@ -860,9 +995,16 @@ function leavingBehindWarning(before: Repo, after: Repo): string | null {
   )
 }
 
-function moveHead(repo: Repo, head: Head, targetId: CommitId, action: string): Repo {
+/** HEAD の今の位置の名前 (ブランチ名、detached ならコミット ID)。reflog に書く。 */
+function headLabel(repo: Repo): string {
+  return repo.head.type === 'branch' ? repo.head.name : repo.head.id
+}
+
+function moveHead(repo: Repo, head: Head, targetId: CommitId, action: string, to: string): Repo {
   const { index, workdir } = carryChanges(repo, getCommit(repo, targetId).tree, action)
-  return { ...repo, head, index, workdir }
+  return logRefs(repo, { ...repo, head, index, workdir }, `checkout: moving from ${headLabel(repo)} to ${to}`, {
+    forceHead: true,
+  })
 }
 
 function joinLines(...lines: Array<string | null>): string {
@@ -877,7 +1019,7 @@ export function switchBranch(
   requireNoOperation(repo)
   if (options.create) {
     const created = createBranch(repo, name, options.startPoint).repo
-    const next = moveHead(created, { type: 'branch', name }, created.branches[name] as CommitId, 'switch')
+    const next = moveHead(created, { type: 'branch', name }, created.branches[name] as CommitId, 'switch', name)
     return {
       repo: next,
       output: joinLines(leavingBehindWarning(repo, next), `新しいブランチ '${name}' に切り替えました`),
@@ -890,12 +1032,12 @@ export function switchBranch(
     if (remoteId === undefined) {
       throw new GitError(`fatal: '${name}' というブランチはありません`)
     }
-    const created: Repo = {
-      ...repo,
-      branches: { ...repo.branches, [name]: remoteId },
-      upstreams: { ...repo.upstreams, [name]: name },
-    }
-    const next = moveHead(created, { type: 'branch', name }, remoteId, 'switch')
+    const created: Repo = logRefs(
+      repo,
+      { ...repo, branches: { ...repo.branches, [name]: remoteId }, upstreams: { ...repo.upstreams, [name]: name } },
+      `branch: Created from ${REMOTE_NAME}/${name}`,
+    )
+    const next = moveHead(created, { type: 'branch', name }, remoteId, 'switch', name)
     return {
       repo: next,
       output: joinLines(
@@ -908,7 +1050,7 @@ export function switchBranch(
   if (currentBranch(repo) === name) {
     return { repo, output: `すでに '${name}' にいます` }
   }
-  const next = moveHead(repo, { type: 'branch', name }, repo.branches[name] as CommitId, 'switch')
+  const next = moveHead(repo, { type: 'branch', name }, repo.branches[name] as CommitId, 'switch', name)
   return {
     repo: next,
     output: joinLines(leavingBehindWarning(repo, next), `ブランチ '${name}' に切り替えました`),
@@ -919,7 +1061,7 @@ export function switchBranch(
 export function detachHead(repo: Repo, ref: string): OperationResult {
   requireNoOperation(repo)
   const id = resolveRef(repo, ref)
-  const next = moveHead(repo, { type: 'detached', id }, id, 'switch')
+  const next = moveHead(repo, { type: 'detached', id }, id, 'switch', ref)
   return {
     repo: next,
     output: joinLines(
@@ -951,12 +1093,13 @@ export function reset(
     repo.head.type === 'branch'
       ? { ...repo, branches: { ...repo.branches, [repo.head.name]: targetId } }
       : { ...repo, head: { type: 'detached', id: targetId } }
+  const logged = logRefs(repo, moved, `reset: moving to ${target}`, { forceHead: true, forceBranch: true })
   const cleared: Repo =
     mode === 'hard' && repo.operation?.type !== 'rebase'
-      ? { ...moved, operation: null, conflicts: [] }
+      ? { ...logged, operation: null, conflicts: [] }
       : mode === 'hard'
-        ? { ...moved, conflicts: [] }
-        : moved
+        ? { ...logged, conflicts: [] }
+        : logged
   const next: Repo =
     mode === 'soft' ? cleared
     : mode === 'mixed' ? { ...cleared, index: tree }
@@ -1136,7 +1279,12 @@ export function log(
   options: { readonly oneline?: boolean; readonly all?: boolean; readonly start?: string } = {},
 ): OperationResult {
   const tips = options.all
-    ? [...Object.values(repo.branches), ...Object.values(repo.remoteBranches), headCommitId(repo)]
+    ? [
+        ...Object.values(repo.branches),
+        ...Object.values(repo.tags).map((tag) => tag.target),
+        ...Object.values(repo.remoteBranches),
+        headCommitId(repo),
+      ]
     : [resolveRef(repo, options.start ?? 'HEAD')]
   const ids = new Set<CommitId>()
   for (const tip of tips) for (const id of ancestors(repo.commits, tip)) ids.add(id)

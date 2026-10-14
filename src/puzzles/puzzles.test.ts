@@ -72,6 +72,18 @@ describe('isSolved', () => {
     expect(isSolved(built, run(['echo "fix" > fix.txt', 'git add .', 'git commit -m fix'], built.start))).toBe(false)
   })
 
+  it('タグは push まで、付ける場所も含めて確かめる', () => {
+    const built = buildPuzzle(puzzle('tag'))
+    expect(isSolved(built, run(['git tag v1.0 C2'], built.start))).toBe(false)
+    expect(isSolved(built, run(['git tag v1.0', 'git push origin v1.0'], built.start))).toBe(false)
+    expect(isSolved(built, run(['git tag -m "最初のリリース" v1.0 HEAD~1', 'git push --tags'], built.start))).toBe(true)
+  })
+
+  it('reflog の代わりにコミット ID を指定して戻しても正解', () => {
+    const built = buildPuzzle(puzzle('reflog'))
+    expect(isSolved(built, run(['git reset --hard C3'], built.start))).toBe(true)
+  })
+
   it('エディタが開いたままでは正解にならない', () => {
     const built = buildPuzzle(puzzle('merge'))
     expect(isSolved(built, run(['git merge feature'], built.start))).toBe(false)
