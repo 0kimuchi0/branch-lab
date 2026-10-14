@@ -40,7 +40,7 @@ import {
   type Repo,
   type ResetMode,
 } from './model'
-import { gitDiff, show } from './inspect'
+import { blame, gitDiff, show } from './inspect'
 import { createTag, deleteTags, listTags } from './tag'
 import { fetch, pull, push, pushDelete, pushTags, teammateCommit } from './remote'
 import {
@@ -67,6 +67,7 @@ export const HELP_TEXT = [
   '',
   'Git のコマンド (先頭の git は省略できます。rm だけは git rm と区別します):',
   '  status / log [--oneline] [--all] / reflog [<ブランチ>]',
+  '  blame [-L <開始>,<終了>] <ファイル> [<コミット>]',
   '  diff [--staged] [<コミット> [<コミット>]] [--stat] [-- <ファイル>] / show [<コミット>]',
   '  add <ファイル>... / add .        restore [--staged] <ファイル>...',
   '  commit [-m "メッセージ"] [-a] [--allow-empty] [--amend] [--no-edit]',
@@ -531,6 +532,24 @@ function runGit(repo: Repo, name: string, args: readonly string[]): OperationRes
         ...(parsed.paths ? { paths: parsed.paths } : {}),
         nameOnly: parsed.flags.has('--name-only'),
         stat: parsed.flags.has('--stat'),
+      })
+    }
+    case 'blame': {
+      const expanded = args.flatMap((arg) => (/^-L\d/.test(arg) ? ['-L', arg.slice(2)] : [arg]))
+      const parsed = parseArgs(expanded, { values: ['-L'] })
+      const files = [...parsed.positional, ...(parsed.paths ?? [])]
+      // git blame <ファイル> [<コミット>] と git blame <コミット> -- <ファイル> のどちらの順でも書ける
+      const [path, rev] =
+        parsed.paths !== null && parsed.positional.length <= 1
+          ? [parsed.paths[0], parsed.positional[0]]
+          : [files[0], files[1]]
+      if (path === undefined || files.length > 2) usage('git blame [-L <開始>,<終了>] <ファイル> [<コミット>]')
+      const rangeText = parsed.values.get('-L')
+      const match = rangeText === undefined ? null : /^(\d+),(\d+)$/.exec(rangeText)
+      if (rangeText !== undefined && !match) usage('git blame -L <開始>,<終了> <ファイル>')
+      return blame(repo, path, {
+        ...(rev === undefined ? {} : { rev }),
+        ...(match ? { range: [Number(match[1]), Number(match[2])] as const } : {}),
       })
     }
     case 'add': {
