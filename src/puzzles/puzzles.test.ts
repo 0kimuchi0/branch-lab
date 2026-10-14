@@ -25,6 +25,29 @@ describe('PUZZLES', () => {
 })
 
 describe('isSolved', () => {
+  it('octopus: 1 つずつマージすると不正解', () => {
+    const built = buildPuzzle(puzzle('octopus'))
+    const repo = run(['git merge --no-edit docs', 'git merge --no-edit test', 'git merge --no-edit lint'], built.start)
+    expect(isSolved(built, repo)).toBe(false)
+  })
+
+  it('worktree: stash で解いても不正解、hotfix の中にいるままでも正解', () => {
+    const built = buildPuzzle(puzzle('worktree'))
+    const stashed = run(
+      ['git stash', 'git switch main', 'echo "修正" > fix.txt', 'git add fix.txt', 'git commit -m "急ぎの修正"', 'git switch feature', 'git stash pop'],
+      built.start,
+    )
+    expect(isSolved(built, stashed)).toBe(false)
+    const inside = run(['git worktree add ../hotfix main', 'cd ../hotfix', 'echo "修正" > fix.txt', 'git add fix.txt', 'git commit -m "急ぎの修正"'], built.start)
+    expect(isSolved(built, inside)).toBe(true)
+  })
+
+  it('rerere: rerere を有効にしないで解いても不正解', () => {
+    const built = buildPuzzle(puzzle('rerere'))
+    const repo = run(['git merge feature', 'echo "両方の変更" > README.md', 'git add README.md', 'git commit --no-edit'], built.start)
+    expect(isSolved(built, repo)).toBe(false)
+  })
+
   it('rebase-merges: ふつうの rebase で一直線にすると不正解', () => {
     const built = buildPuzzle(puzzle('rebase-merges'))
     expect(isSolved(built, run(['git rebase main'], built.start))).toBe(false)

@@ -18,7 +18,7 @@ npm run build    # 型チェックと本番ビルド
 画面上部のタブで 2 つのモードを切り替えられます。
 
 - **自由に試す**: clone 直後のリポジトリで、好きなコマンドを試せます。
-- **お題**: 「マージする」「コンフリクトを解消する」「コミットをまとめる」「作業を退避して急ぎの修正」「バグを入れたコミットを探す」など 17 問。
+- **お題**: 「マージする」「コンフリクトを解消する」「コミットをまとめる」「作業を退避して急ぎの修正」「バグを入れたコミットを探す」「サブモジュールを最新にする」など 21 問。
   目標のグラフと同じ履歴を作れたら正解です。コミット ID やメッセージが違っても、
   履歴の形と各コミットの由来 (コピーや revert を含む) が同じなら正解になります。
   クリアした記録はブラウザに保存されます。
@@ -43,6 +43,7 @@ URL のハッシュ (`#s=...`) には状態そのものではなく、モード�
 | --- | --- |
 | `echo "内容" > ファイル` / `>>` | ファイルを上書き / 追記する |
 | `touch` / `cat` / `ls` / `rm` | ファイルの作成・表示・一覧・削除 (`rm` は作業ディレクトリからだけ消す) |
+| `cd <パス>` / `pwd` | worktree やサブモジュールの中に移動する・今いる場所を表示する |
 
 ### Git のコマンド
 
@@ -60,15 +61,19 @@ URL のハッシュ (`#s=...`) には状態そのものではなく、モード�
 | `branch [<名前> [<起点>]]` / `-d` / `-D` / `-m` / `-u` | ブランチの一覧・作成・削除・名前の変更・upstream の設定 |
 | `switch <名前>` / `-c <名前> [<起点>]` / `--detach <コミット>` / `switch -` | ブランチを切り替える (リモートにだけあるブランチは追跡ブランチを作る、`-` は直前のブランチ) |
 | `checkout <名前\|コミット>` / `-b <名前>` / `-- <ファイル>` | switch と restore を兼ねる昔からのコマンド |
-| `merge <ブランチ> [--no-ff] [--ff-only] [--no-edit]` | fast-forward またはマージコミットでマージする |
-| `rebase [-i] [-r] [-x <コマンド>] <ブランチ>` | 現在のブランチのコミットを付け替える (`-i` は todo をエディタで編集する、`-r` / `--rebase-merges` はマージの形を保つ) |
-| `cherry-pick [-e] [-m <親>] [--allow-empty] <コミット>...` | コミットの変更を複製する (`-m` でマージコミットも) |
-| `revert [--no-edit] [-m <親>] <コミット>...` | コミットの変更を打ち消すコミットを作る |
+| `merge [--no-ff] [--ff-only] [--no-edit] [-s <ストラテジー>] [-X ours\|theirs] <ブランチ>...` | fast-forward またはマージコミットでマージする (2 つ以上なら octopus、`-s ours` は履歴だけをマージ) |
+| `rebase [-i] [-r] [-x <コマンド>] [-X ours\|theirs] <ブランチ>` | 現在のブランチのコミットを付け替える (`-i` は todo をエディタで編集する、`-r` / `--rebase-merges` はマージの形を保つ) |
+| `cherry-pick [-e] [-m <親>] [-X …] [--allow-empty] <コミット>...` | コミットの変更を複製する (`-m` でマージコミットも) |
+| `revert [--no-edit] [-m <親>] [-X …] <コミット>...` | コミットの変更を打ち消すコミットを作る |
 | `tag [-a] [-m "…"] [-f] <タグ> [<コミット>]` / `tag -l [<パターン>]` / `tag -d <タグ>` | タグを付ける・一覧を見る・消す |
 | `reset [--soft \| --mixed \| --hard] [<コミット>]` / `reset <ファイル>` | ブランチを移動する / ステージを戻す |
 | `stash [push] [-m "…"] [-u] [-k]` / `stash list` / `stash show [-p]` | 変更を退避する・一覧を見る |
 | `stash apply [--index]` / `stash pop [--index]` / `stash drop` / `stash clear` / `stash branch <名前>` | 退避した変更を戻す・消す |
 | `bisect start [<bad> [<good>...]]` / `good` / `bad` / `skip` / `reset` / `log` / `run <コマンド>` | 二分探索でバグを入れたコミットを探す (`new` / `old` も可) |
+| `config <キー> [<値>]` / `config --unset <キー>` / `config --list` | 設定を読み書きする (`rerere.enabled`・`rerere.autoUpdate`・`pull.rebase`・`pull.ff`・`merge.ff` が働く) |
+| `rerere` / `rerere status` / `diff` / `remaining` / `forget <パス>` / `clear` | コンフリクトの解決を記録し、同じコンフリクトで再利用する (`rerere.enabled` のとき) |
+| `worktree add [-b <ブランチ>] [--detach] <パス> [<コミット>]` / `worktree list` / `worktree remove [-f] <パス>` | 作業ディレクトリをもう 1 つ作る (`cd` で移る) |
+| `submodule add [-b <ブランチ>] <URL> [<パス>]` / `submodule [status]` / `init` / `update [--init] [--remote]` / `deinit` / `foreach <コマンド>` | サブモジュールを取り込む・記録したコミットにする (`cd` で中に入る) |
 | `remote [-v]` / `remote add <名前> <URL>` / `remove` / `rename` / `set-url` / `get-url` | リモートの一覧・追加・削除・名前の変更 |
 | `push [-u] [-f] [--tags] [<リモート> [<ブランチ\|タグ>]]` / `push <リモート> --delete <名前>` | リモートに送る・リモートの参照を消す |
 | `fetch [<リモート> \| --all]` / `pull [--rebase \| --no-rebase \| --ff-only] [--no-edit] [<リモート> [<ブランチ>]]` | リモートから取り込む (タグも取り込む) |
@@ -99,6 +104,19 @@ URL のハッシュ (`#s=...`) には状態そのものではなく、モード�
 
 先頭の `git` は省略できます (ただし `rm` はシェルの `rm`、`git rm` は Git の `rm` として区別します)。
 
+マージのストラテジーは `ort` (既定。`recursive`・`resolve` も同じ扱い)・`ours`・`octopus` です。
+`-X ours` / `-X theirs` は、両方が変えた箇所をコンフリクトにせずにその側で解決します
+(rebase では ours が付け替え先、theirs が付け替えるコミットの側です)。
+octopus マージでコンフリクトが出た場合は、本物と同じく中止して何も変えません。
+
+`git worktree add ../hotfix` は hotfix ブランチを作って `~/hotfix` に worktree を作ります。
+`cd ../hotfix` で移ると、HEAD・ステージ・作業ディレクトリ・途中の操作は worktree ごとに別々で、
+コミット・ブランチ・stash・設定は共有されます。ほかの worktree でチェックアウトしているブランチには切り替えられません。
+
+`git submodule add https://example.com/lib.git` は、その URL の模擬のリポジトリを `lib` に clone します。
+`cd lib` で中に入るとサブモジュールのリポジトリでコマンドが動き (コミット ID は `L1` のように頭文字が変わります)、
+`cd ..` で戻ると親からは `lib (new commits)` と見えるので、`git add lib` してコミットします。
+
 ### このアプリ独自のコマンド
 
 | コマンド | 内容 |
@@ -112,11 +130,16 @@ URL のハッシュ (`#s=...`) には状態そのものではなく、モード�
 - エディタは画面上の簡易エディタです。保存は `:wq "内容"` というコマンドとしてログと共有 URL に残ります。
 - リモートはブラウザの中で模擬しています。URL には接続せず、`remote add` で追加したリモートは空のリポジトリから始まります
   (`remote remove` するとそのリモートの中身も消えます)。
+- サブモジュールの取得元も模擬で、初めて使う URL なら README.md だけのリポジトリになります。
+  サブモジュールの中のサブモジュールと worktree、`--recurse-submodules` は未対応です。
+- ファイルシステムは模擬で、`cd` で移動できるのは worktree とサブモジュールだけです。パスは `~/branch-lab` のような形です。
+- `config` は 1 つだけで、`--global` と `--local` を区別しません。
+- `rerere` は、本物はコンフリクトの箇所 (hunk) ごとに解決を覚えますが、ここではファイル全体の内容で覚えます。
 - `blame` には作者と日時がなく、コミット ID と件名を表示します。`bisect run` のコマンドはこのアプリのコマンドで、成功なら good、失敗なら bad です
   (先頭に `!` を付けると逆になります)。
 - `stash` は本物ではコミットとして保存されますが、ここでは別に持ち、グラフには描きません。
 - `diff` には blob の `index` 行がなく、コンフリクト中のファイルは結合差分の代わりに `* Unmerged path` と表示します。
-- 3 つ以上の親を持つマージ (octopus)、ファイルを指定した `stash push`、タグへの署名などは未対応です。
+- `subtree` ストラテジー、ファイルを指定した `stash push`、タグへの署名などは未対応です。
 - reflog は HEAD とローカルブランチだけで、期限切れの削除 (`reflog expire`) はありません。
 
 ## 設計
@@ -129,12 +152,16 @@ src/
     tree.ts        ファイルのスナップショットと、行単位の 3-way マージ (diff3)
     diff.ts        unified 形式の差分
     model.ts       Git の内部モデル (コミット・ブランチ・HEAD・ステージ・作業ディレクトリ・リモート・エディタ)
-    history.ts     merge / cherry-pick / revert / rebase (-i) と --continue / --abort / --skip、エディタを閉じたあとの続き
+    history.ts     merge (octopus・ストラテジー) / cherry-pick / revert / rebase (-i, -r) と --continue / --abort / --skip、エディタを閉じたあとの続き
     inspect.ts     diff / show / blame
     bisect.ts      bisect
     stash.ts       stash
     tag.ts         tag
     remote.ts      remote / push / fetch / pull と teammate
+    config.ts      config
+    rerere.ts      rerere
+    worktree.ts    worktree と cd
+    submodule.ts   submodule と、サブモジュールの中でコマンドを実行するための同期
     commands.ts    入力文字列の解析と実行。規則違反は例外にせず結果として返す
   graph/
     layout.ts      コミットグラフの座標を計算する純粋関数 (ローカル・リモートの両方)
@@ -162,6 +189,6 @@ Vite として自動で認識されるので、設定ファイルはありませ
 
 ## 今後の拡張案
 
-- `rerere` (コンフリクトの解消を覚えて再利用する)
-- `worktree`、`submodule`
-- `merge` の octopus と、`-s ours` などのストラテジー
+- `clone` (別の URL から新しく clone する) と `--recurse-submodules`
+- `notes`、`sparse-checkout`
+- `log --graph` などの表示オプション

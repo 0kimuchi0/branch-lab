@@ -20,7 +20,7 @@ React + TypeScript + Vite、テストは Vitest。UI の文言は日本語。
 - `src/git/model.ts`: Git の内部モデル (コミットの DAG・ブランチ・HEAD・ステージ・作業ディレクトリ・リモート)。
   `Repo` は不変データで、すべての操作は新しい `Repo` を返す純粋関数。React には依存させない。
   Git の規則に反する操作は `GitError` を投げる。
-- `src/git/history.ts`: merge / cherry-pick / revert / rebase (-i) と、コンフリクトで止まった操作の再開・中止。
+- `src/git/history.ts`: merge (octopus・`-s`・`-X`) / cherry-pick / revert / rebase (-i, -r) と、コンフリクトで止まった操作の再開・中止。
 - エディタ: Git がエディタを開いて待つ状態は `Repo.editor` (開いた内容と、閉じたあとに続ける処理) で表す。
   保存は `:wq <JSON の文字列>` のコマンド (`saveEditor`) なので、ログと共有 URL でも再現できる。
   エディタが開いている間、ほかのコマンドは実行できない。
@@ -33,6 +33,14 @@ React + TypeScript + Vite、テストは Vitest。UI の文言は日本語。
 - `src/git/remote.ts`: remote / push / fetch / pull と、他の人の push を再現する teammate。
   リモートは `Repo.remotes` (名前 → コミット・ブランチ・タグ・URL)。リモート追跡ブランチ (`remoteBranches`) と
   upstream (`upstreams`) は `origin/main` のように、リモート名を含めた名前で持つ。
+- `src/git/config.ts`: config (`Repo.config`)。`src/git/rerere.ts`: rerere (`Repo.rerere`)。
+  コンフリクトで止まるときは `history.ts` の `applyConflicted` が rerere を呼び、解決はコミットするときに `createCommit` が記録する。
+- `src/git/worktree.ts`: worktree と cd。今いる worktree の状態は `Repo` の head・index・workdir などにあり、
+  ほかの worktree の状態は `Repo.worktrees` (`WorktreeState`) にしまう。`enterWorktree` で入れ替える。
+- `src/git/submodule.ts`: submodule。サブモジュールは別の `Repo` (`Repo.submodules`、コミット ID の頭文字は `idPrefix`) で、
+  親の tree には gitlink (`tree.ts` の `gitlink`) を入れる。`cd` で中にいる間 (`Repo.submodule`) は、
+  `executeCommand` がサブモジュールでコマンドを実行し、`syncLibraryIn` / `syncLibraryOut` で取得元 (`Repo.libraries`) と、
+  `syncSubmodules` で親の gitlink と同期する。画面に出すのは `activeRepo`。
 - `src/git/commands.ts`: 入力文字列の解析と実行。`GitError` は例外にせず `ok: false` で返す。
 - `src/graph/layout.ts`: グラフの座標を計算する純粋関数。
   x は祖先からの深さ、y はブランチごとのレーン (main が最上段)。どこからもたどれないコミットは後ろのレーンに薄く置く。
@@ -63,6 +71,6 @@ main に push すると https://branch-lab-dun.vercel.app にデプロイされ�
 
 ## 今後の予定
 
-- `rerere`
-- `worktree`、`submodule`
-- octopus マージとマージのストラテジー
+- `clone` と `--recurse-submodules`
+- `notes`、`sparse-checkout`
+- `log --graph` などの表示オプション
