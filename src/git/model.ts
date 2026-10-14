@@ -38,11 +38,28 @@ export interface PickItem {
   readonly id: CommitId
 }
 
-/** rebase -i の todo の 1 行。exec はコマンドを実行し、break はそこで止まる。 */
+/**
+ * rebase --rebase-merges の merge の行。label の位置のコミットを HEAD にマージする。
+ * id は -C / -c で指定した元のマージコミット (メッセージをそこから取る)。edit ならメッセージをエディタで編集する。
+ */
+export interface MergeItem {
+  readonly action: 'merge'
+  readonly id: CommitId | null
+  readonly label: string
+  readonly edit: boolean
+}
+
+/**
+ * rebase -i の todo の 1 行。exec はコマンドを実行し、break はそこで止まる。
+ * label・reset・merge は --rebase-merges で使う (HEAD に名前を付ける・名前の位置に戻る・マージする)。
+ */
 export type TodoItem =
   | PickItem
+  | MergeItem
   | { readonly action: 'exec'; readonly command: string }
   | { readonly action: 'break' }
+  | { readonly action: 'label'; readonly name: string }
+  | { readonly action: 'reset'; readonly target: string }
 
 /** squash / fixup でまとめているコミットのメッセージ (fixup のものは skip)。 */
 export interface SquashPart {
@@ -55,7 +72,7 @@ export type SequenceType = 'cherry-pick' | 'revert' | 'rebase'
 export interface SequenceOperation {
   readonly type: SequenceType
   /** 適用中 (コンフリクトなどで止まっている) の項目。確定済みなら null。 */
-  readonly current: PickItem | null
+  readonly current: PickItem | MergeItem | null
   /** これから適用する項目。 */
   readonly todo: readonly TodoItem[]
   /** 操作を始める前の HEAD。--abort で戻る先。 */
@@ -70,6 +87,18 @@ export interface SequenceOperation {
   readonly squash: readonly SquashPart[] | null
   /** -m: マージコミットを cherry-pick / revert するときに基準にする親の番号 (1 始まり)。 */
   readonly mainline: number | null
+  /** rebase --rebase-merges の label で付けた名前 (refs/rewritten/<名前>)。 */
+  readonly labels?: Readonly<Record<string, CommitId>>
+}
+
+/** merge の行でマージする相手のコミット (label の名前か、コミットそのもの)。 */
+export function mergeTarget(repo: Repo, op: SequenceOperation, ref: string): CommitId {
+  return op.labels?.[ref] ?? resolveRef(repo, ref)
+}
+
+/** merge の行で作るコミットのメッセージ。 */
+export function mergeItemMessage(repo: Repo, item: MergeItem): string {
+  return item.id === null ? `Merge branch '${item.label}'` : getCommit(repo, item.id).message
 }
 
 /** 途中で止まっている操作 (コンフリクトの解消待ちなど)。 */
@@ -332,6 +361,7 @@ export function reachableCommits(repo: Repo): Set<CommitId> {
   tips.push(headCommitId(repo))
   if (repo.operation?.type === 'merge') tips.push(repo.operation.theirs)
   if (repo.bisect) tips.push(...(repo.bisect.bad === null ? [] : [repo.bisect.bad]), ...repo.bisect.good)
+  if (repo.operation && repo.operation.type !== 'merge') tips.push(...Object.values(repo.operation.labels ?? {}))
   const reachable = new Set<CommitId>()
   for (const tip of tips) {
     for (const id of ancestors(repo.commits, tip)) reachable.add(id)
@@ -845,16 +875,21 @@ export function commit(repo: Repo, options: CommitOptions = {}): OperationResult
 
   const headId = headCommitId(staged)
   const head = getCommit(staged, headId)
+  // rebase --rebase-merges の merge の行で止まっている場合は、マージコミットを作る
+  const sequence = op && op.type !== 'merge' ? op : null
+  const merging = sequence?.current?.action === 'merge' ? sequence.current : null
   const parents =
     options.amend ? head.parents
     : op?.type === 'merge' ? [headId, op.theirs]
+    : merging && sequence ? [headId, mergeTarget(staged, sequence, merging.label)]
     : [headId]
   const parentTree = options.amend
     ? (staged.commits[head.parents[0] ?? '']?.tree ?? {})
     : head.tree
 
-  const picked = op && op.type !== 'merge' && op.current ? getCommit(repo, op.current.id) : null
-  if (op?.type !== 'merge' && !options.allowEmpty && treesEqual(staged.index, parentTree)) {
+  const pickedId = op && op.type !== 'merge' && op.current ? op.current.id : null
+  const picked = pickedId === null ? null : getCommit(repo, pickedId)
+  if (op?.type !== 'merge' && !merging && !options.allowEmpty && treesEqual(staged.index, parentTree)) {
     if (options.amend) {
       throw new GitError('コミットの内容が親と同じになります。--allow-empty を付けてください')
     }
@@ -876,15 +911,17 @@ export function commit(repo: Repo, options: CommitOptions = {}): OperationResult
     tree: staged.index,
     ...(picked && op?.type !== 'revert' ? { source: picked.source ?? picked.id } : {}),
     ...(picked && op?.type === 'revert' ? { reverts: picked.id } : {}),
+    ...(merging && merging.id !== null ? { source: getCommit(repo, merging.id).source ?? merging.id } : {}),
     reflogAction:
       options.amend ? 'commit (amend)'
       : op?.type === 'merge' ? 'commit (merge)'
-      : picked && op ? (op.type === 'rebase' ? 'rebase (continue)' : op.type)
+      : (picked || merging) && op ? (op.type === 'rebase' ? 'rebase (continue)' : op.type)
       : 'commit',
   }
   const defaultMessage =
     options.amend ? head.message
     : op?.type === 'merge' ? op.message
+    : merging ? mergeItemMessage(repo, merging)
     : picked && op?.type === 'revert' ? revertMessage(picked, op.mainline)
     : picked ? picked.message
     : ''
@@ -1290,7 +1327,7 @@ function statusLines(repo: Repo): string[] {
         : 'すべてのコンフリクトが解消されました。"git commit" でマージを完了してください',
     )
   } else if (op && op.current !== null) {
-    lines.push(`${op.type} の途中です (${op.current.id} を適用中)`)
+    lines.push(`${op.type} の途中です (${op.current.action === 'merge' ? `merge ${op.current.label}` : op.current.id} を適用中)`)
   } else if (op?.type === 'rebase') {
     lines.push('コミットを修正できます。終わったら "git rebase --continue" を実行してください')
   }

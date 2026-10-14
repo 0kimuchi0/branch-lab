@@ -19,6 +19,8 @@ import {
   isAncestor,
   logRefs,
   mergeBase,
+  mergeItemMessage,
+  mergeTarget,
   messageTemplate,
   openEditor,
   requireNoConflicts,
@@ -29,6 +31,7 @@ import {
   type Commit,
   type CommitId,
   type Editor,
+  type MergeItem,
   type Operation,
   type OperationResult,
   type PendingCommit,
@@ -327,11 +330,26 @@ function applyItem(repo: Repo, op: SequenceOperation, todoItem: TodoItem): Step 
       lines: [`${head.id} (${subject(head.message)}) で停止しました (break)`, '続けるには git rebase --continue を実行してください。'],
     }
   }
+  const rest: SequenceOperation = { ...op, todo: op.todo.slice(1), current: null }
+  if (todoItem.action === 'label') {
+    const labels = { ...op.labels, [todoItem.name]: headCommitId(repo) }
+    return { status: 'continue', repo, op: { ...rest, labels }, lines: [] }
+  }
+  if (todoItem.action === 'reset') {
+    const target = mergeTarget(repo, op, todoItem.target)
+    const moved: Repo = logRefs(
+      repo,
+      { ...repo, head: { type: 'detached', id: target }, ...carryChanges(repo, getCommit(repo, target).tree, 'rebase') },
+      `rebase (reset): '${todoItem.target}'`,
+      { forceHead: true },
+    )
+    return { status: 'continue', repo: moved, op: rest, lines: [] }
+  }
+  if (todoItem.action === 'merge') return applyMerge(repo, rest, todoItem)
   const item = todoItem
   const picked = getCommit(repo, item.id)
   checkMainline(picked, op.mainline)
   const headId = headCommitId(repo)
-  const rest: SequenceOperation = { ...op, todo: op.todo.slice(1), current: null }
 
   // rebase で親が変わらないコミットは、作り直さずにそのまま使う (Git と同じ fast-forward)
   if (
@@ -399,6 +417,63 @@ function applyItem(repo: Repo, op: SequenceOperation, todoItem: TodoItem): Step 
     }
   }
   return completeItem({ ...repo, ...carried }, rest, item, result.tree, false)
+}
+
+/** マージコミットを作る前の情報 (親・tree・由来)。 */
+function mergePending(repo: Repo, op: SequenceOperation, item: MergeItem, tree: Tree, action: string): PendingCommit {
+  const original = item.id === null ? null : getCommit(repo, item.id)
+  return {
+    parents: [headCommitId(repo), mergeTarget(repo, op, item.label)],
+    tree,
+    ...(original ? { source: original.source ?? original.id } : {}),
+    reflogAction: action,
+  }
+}
+
+/** rebase --rebase-merges の merge の行: label の位置のコミットを HEAD にマージする。 */
+function applyMerge(repo: Repo, rest: SequenceOperation, item: MergeItem): Step {
+  const ours = headCommitId(repo)
+  const theirs = mergeTarget(repo, rest, item.label)
+  const original = item.id === null ? null : getCommit(repo, item.id)
+  const message = mergeItemMessage(repo, item)
+
+  // 親が変わっていないマージコミットは、作り直さずにそのまま使う
+  if (original && !item.edit && original.parents.length === 2 && original.parents[0] === ours && original.parents[1] === theirs) {
+    const moved: Repo = logRefs(
+      repo,
+      { ...repo, head: { type: 'detached', id: original.id }, ...carryChanges(repo, original.tree, 'rebase') },
+      `rebase (merge): ${subject(message)}`,
+    )
+    return { status: 'continue', repo: moved, op: rest, lines: [] }
+  }
+
+  const baseId = mergeBase(repo, ours, theirs)
+  const baseTree = baseId === null ? {} : getCommit(repo, baseId).tree
+  const result = mergeTrees(baseTree, headTree(repo), getCommit(repo, theirs).tree, { ours: 'HEAD', theirs: item.label })
+  const carried = carryChanges(repo, result.tree, 'rebase')
+  const stoppedOp: SequenceOperation = { ...rest, current: item }
+  if (result.conflicts.length > 0) {
+    return {
+      status: 'stop',
+      repo: { ...applyConflicted(repo, carried, result.conflicts), operation: stoppedOp },
+      lines: [
+        ...conflictLines(result.conflicts),
+        `error: ${item.label} をマージできませんでした${original ? ` (${original.id} ${subject(original.message)})` : ''}`,
+        STOP_HINTS.rebase,
+      ],
+    }
+  }
+  const merged: Repo = { ...repo, ...carried }
+  const pending = mergePending(merged, rest, item, result.tree, 'rebase (merge)')
+  if (item.edit || original === null) {
+    return waitForEditor(merged, stoppedOp, {
+      file: 'MERGE_MSG',
+      text: messageTemplate(merged, message),
+      after: { kind: 'sequence', commit: pending, operation: rest },
+    })
+  }
+  const created = createCommit(merged, pending, message)
+  return { status: 'continue', repo: created.repo, op: rest, lines: [created.output] }
 }
 
 /** todo の項目を順に適用する。コンフリクト・エディタ・edit で止まる。 */
@@ -509,6 +584,90 @@ function commitsToReplay(repo: Repo, head: CommitId, upstream: CommitId): Commit
   return order.filter((id) => getCommit(repo, id).parents.length <= 1)
 }
 
+/** label に使える名前にする (Git と同じく、使えない文字は - に置き換える)。 */
+function labelName(text: string): string {
+  return text.replace(/[^\w./-]+/g, '-').replace(/^[-.]+|[-.]+$/g, '') || 'branch'
+}
+
+/**
+ * git rebase --rebase-merges の todo。マージコミットも含めて、ブランチの形のまま作り直す。
+ * 横のブランチを先に作って label を付け、最後に本流を作りながら merge する (Git の並べ方に合わせる)。
+ */
+function rebaseMergesTodo(repo: Repo, head: CommitId, upstream: CommitId): string[] {
+  const exclude = ancestors(repo.commits, upstream)
+  const order: CommitId[] = []
+  const visited = new Set<CommitId>()
+  const visit = (id: CommitId) => {
+    if (visited.has(id) || exclude.has(id)) return
+    visited.add(id)
+    const [first, ...others] = getCommit(repo, id).parents
+    for (const parent of others) visit(parent)
+    if (first !== undefined) visit(first)
+    order.push(id)
+  }
+  visit(head)
+
+  // どこに label が要るか (横のブランチの先端と、reset で戻る先) を先に調べる
+  const inSet = new Set(order)
+  const baseOf = (id: CommitId): CommitId | 'onto' => {
+    const first = getCommit(repo, id).parents[0]
+    return first !== undefined && inSet.has(first) ? first : 'onto'
+  }
+  const needsLabel = new Map<CommitId, string>()
+  const used = new Set(['onto'])
+  const unique = (name: string) => {
+    let candidate = name
+    for (let n = 2; used.has(candidate); n++) candidate = `${name}-${n}`
+    used.add(candidate)
+    return candidate
+  }
+  let current: CommitId | 'onto' = 'onto'
+  const resets = new Set<CommitId>()
+  order.forEach((id, index) => {
+    const base = baseOf(id)
+    if (index === 0 || base !== current) resets.add(id)
+    const commit = getCommit(repo, id)
+    for (const parent of commit.parents.slice(1)) {
+      if (inSet.has(parent) && !needsLabel.has(parent)) {
+        const named = /^Merge (?:remote-tracking )?branch '([^']+)'/.exec(commit.message)?.[1]
+        const branch = Object.keys(repo.branches).find((name) => repo.branches[name] === parent)
+        needsLabel.set(parent, unique(labelName(named ?? branch ?? 'branch')))
+      }
+    }
+    current = id
+  })
+  for (const id of resets) {
+    const base = baseOf(id)
+    if (base !== 'onto' && !needsLabel.has(base)) needsLabel.set(base, unique('branch-point'))
+  }
+
+  const lines = ['label onto']
+  order.forEach((id) => {
+    const commit = getCommit(repo, id)
+    if (resets.has(id)) {
+      // このブロックの最後が横のブランチの先端なら、その名前を見出しにする
+      let last = order.indexOf(id)
+      while (last + 1 < order.length && !resets.has(order[last + 1] as CommitId)) last++
+      const end = order[last] as CommitId
+      const tip = needsLabel.get(end)
+      lines.push('', ...(tip !== undefined && end !== head ? [`# Branch: ${tip}`] : []))
+      const base = baseOf(id)
+      lines.push(
+        base === 'onto' ? 'reset onto' : `reset ${needsLabel.get(base)} # ${subject(getCommit(repo, base).message)}`,
+      )
+    }
+    if (commit.parents.length > 1) {
+      const others = commit.parents.slice(1).map((parent) => needsLabel.get(parent) ?? parent)
+      lines.push(`merge -C ${id} ${others.join(' ')} # ${subject(commit.message)}`)
+    } else {
+      lines.push(`pick ${id} ${subject(commit.message)}`)
+    }
+    const label = needsLabel.get(id)
+    if (label !== undefined) lines.push(`label ${label}`)
+  })
+  return lines
+}
+
 function requireCleanForRebase(repo: Repo): void {
   if (hasTrackedChanges(repo)) {
     throw new GitError(
@@ -551,15 +710,24 @@ function startRebase(
   )
 }
 
-/** 各コミットの後ろに exec の行を入れる (git rebase -x)。 */
-function withExec(items: readonly TodoItem[], command: string | undefined): TodoItem[] {
-  if (command === undefined) return [...items]
-  return items.flatMap((item): TodoItem[] => [item, { action: 'exec', command }])
-}
-
 export interface RebaseOptions {
   /** -x / --exec: 各コミットを適用したあとに実行するコマンド。 */
   readonly exec?: string
+  /** -r / --rebase-merges: マージコミットも作り直して、ブランチの形を保つ。 */
+  readonly rebaseMerges?: boolean
+}
+
+/** rebase で実行する todo の行 (-i ではエディタに出す内容)。 */
+function rebaseTodoLines(repo: Repo, head: CommitId, onto: CommitId, options: RebaseOptions): string[] {
+  if (options.rebaseMerges) {
+    const lines = rebaseMergesTodo(repo, head, onto)
+    if (options.exec === undefined) return lines
+    return lines.flatMap((line) => (/^(pick|merge) /.test(line) ? [line, `exec ${options.exec}`] : [line]))
+  }
+  return commitsToReplay(repo, head, onto).flatMap((id) => [
+    `pick ${id} ${subject(getCommit(repo, id).message)}`,
+    ...(options.exec === undefined ? [] : [`exec ${options.exec}`]),
+  ])
 }
 
 /** git rebase <upstream>: 現在のブランチのコミットを upstream の先に付け替える。 */
@@ -585,8 +753,8 @@ export function rebase(repo: Repo, upstreamRef: string, options: RebaseOptions =
       output: `Fast-forwarded ${branch ?? 'HEAD'} to ${upstreamRef}.`,
     }
   }
-  const items = commitsToReplay(repo, head, upstream).map((id): TodoItem => ({ action: 'pick', id }))
-  return startRebase(repo, upstream, head, branch, withExec(items, options.exec))
+  const items = parseTodo(repo, rebaseTodoLines(repo, head, upstream, options).join('\n'))
+  return startRebase(repo, upstream, head, branch, items)
 }
 
 const TODO_HELP = [
@@ -599,6 +767,11 @@ const TODO_HELP = [
   '# d, drop <コミット> = コミットを取り除く',
   '# x, exec <コマンド> = コマンドを実行する (失敗したらそこで止まる)',
   '# b, break = ここで止まる (git rebase --continue で続ける)',
+  '# l, label <名前> = 今の HEAD に名前を付ける',
+  '# t, reset <名前> = HEAD を名前の位置に戻す',
+  '# m, merge [-C <コミット> | -c <コミット>] <名前> [# <件名>]',
+  '#         名前の位置をマージする。-C なら元のコミットのメッセージを使い、',
+  '#         -c なら、それをエディタで編集する。どちらもなければエディタを開く',
   '#',
   '# 行は並べ替えられます。上から順に実行されます。',
   '# 行を消すと、そのコミットは失われます。',
@@ -616,19 +789,15 @@ export function rebaseInteractive(
   const onto = resolveRef(repo, upstreamRef)
   const head = headCommitId(repo)
   const commits = commitsToReplay(repo, head, onto)
-  const lines =
-    commits.length === 0
-      ? ['noop']
-      : commits.flatMap((id) => [
-          `pick ${id} ${subject(getCommit(repo, id).message)}`,
-          ...(options.exec === undefined ? [] : [`exec ${options.exec}`]),
-        ])
+  const todo = rebaseTodoLines(repo, head, onto, options)
+  const lines = todo.length === 0 ? ['noop'] : todo
+  const count = todo.filter((line) => line !== '' && !line.startsWith('#')).length
   const editor: Editor = {
     file: 'git-rebase-todo',
     text: [
       ...lines,
       '',
-      `# ${onto}..${head} を ${onto} の上にリベースします (${commits.length} 個のコマンド)`,
+      `# ${onto}..${head} を ${onto} の上にリベースします (${count} 個のコマンド)`,
       '#',
       ...TODO_HELP,
       '',
@@ -638,7 +807,15 @@ export function rebaseInteractive(
   return { repo: openEditor(repo, editor), output: EDITOR_WAITING }
 }
 
-const TODO_ACTIONS: Readonly<Record<string, TodoAction | 'drop' | 'exec' | 'break'>> = {
+const TODO_ACTIONS: Readonly<
+  Record<string, TodoAction | 'drop' | 'exec' | 'break' | 'label' | 'reset' | 'merge'>
+> = {
+  l: 'label',
+  label: 'label',
+  t: 'reset',
+  reset: 'reset',
+  m: 'merge',
+  merge: 'merge',
   x: 'exec',
   exec: 'exec',
   b: 'break',
@@ -660,6 +837,7 @@ const TODO_ACTIONS: Readonly<Record<string, TodoAction | 'drop' | 'exec' | 'brea
 /** 編集した todo を読む。書き方が正しくなければ GitError。 */
 export function parseTodo(repo: Repo, text: string): TodoItem[] {
   const items: TodoItem[] = []
+  const labels = new Set<string>()
   text.split('\n').forEach((raw, index) => {
     const line = raw.trim()
     if (line === '' || line.startsWith('#') || line === 'noop') return
@@ -670,6 +848,47 @@ export function parseTodo(repo: Repo, text: string): TodoItem[] {
     }
     if (action === 'break') {
       items.push({ action })
+      return
+    }
+    // label・reset・merge の名前は、それより前の label で付けたものか、コミットを指す名前
+    const target = (name: string | undefined): string => {
+      if (name === undefined || name.startsWith('#')) {
+        throw new GitError(`error: ${index + 1} 行目に名前がありません: ${line}`)
+      }
+      if (!labels.has(name)) {
+        try {
+          resolveRef(repo, name)
+        } catch {
+          throw new GitError(`error: ${index + 1} 行目の '${name}' が見つかりません (先に label で名前を付けてください)`)
+        }
+      }
+      return name
+    }
+    if (action === 'label') {
+      if (ref === undefined) throw new GitError(`error: ${index + 1} 行目に名前がありません: ${line}`)
+      labels.add(ref)
+      items.push({ action, name: ref })
+      return
+    }
+    if (action === 'reset') {
+      items.push({ action, target: target(ref) })
+      return
+    }
+    if (action === 'merge') {
+      const words = line.replace(/\s#.*$/, '').split(/\s+/).slice(1)
+      const option = words[0] === '-C' || words[0] === '-c' ? words[0] : null
+      const original = option === null ? null : words[1]
+      const names = words.slice(option === null ? 0 : 2)
+      if (original === undefined) throw new GitError(`error: ${index + 1} 行目に ${option} のコミットがありません`)
+      if (names.length > 1) {
+        throw new GitError(`error: ${index + 1} 行目: 3 つ以上の親を持つマージ (octopus) はこのアプリでは未対応です`)
+      }
+      items.push({
+        action,
+        id: original === null ? null : resolveRef(repo, original),
+        label: target(names[0]),
+        edit: option !== '-C',
+      })
       return
     }
     if (action === 'exec') {
@@ -763,6 +982,15 @@ export function continueOperation(repo: Repo, type: Operation['type']): Operatio
 
   const item = op.current
   const rest: SequenceOperation = { ...op, current: null }
+  if (item.action === 'merge') {
+    const pending = mergePending(repo, op, item, repo.index, 'rebase (continue)')
+    const editor: Editor = {
+      file: 'MERGE_MSG',
+      text: messageTemplate(repo, mergeItemMessage(repo, item)),
+      after: { kind: 'sequence', commit: pending, operation: rest },
+    }
+    return { repo: openEditor(repo, editor), output: EDITOR_WAITING }
+  }
   const squashing = item.action === 'squash' || item.action === 'fixup'
   if (treesEqual(repo.index, headTree(repo)) && !squashing) {
     if (op.type !== 'rebase') {
@@ -785,7 +1013,7 @@ export function skipOperation(repo: Repo, type: SequenceType): OperationResult {
   return runSequence(
     cleaned,
     { ...op, current: null, squash: null },
-    op.current === null ? [] : [`${op.current.id} を飛ばしました`],
+    op.current === null ? [] : [`${op.current.action === 'merge' ? `merge ${op.current.label}` : op.current.id} を飛ばしました`],
   )
 }
 

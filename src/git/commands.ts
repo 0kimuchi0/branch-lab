@@ -88,7 +88,7 @@ export const HELP_TEXT = [
   '  branch [<名前> [<起点>]] / branch -d <名前> / branch -m <新しい名前>',
   '  switch <名前> / switch - / switch -c <名前> / switch --detach <コミット>',
   '  checkout <名前|コミット> / checkout -b <名前>',
-  '  merge <ブランチ> [--no-ff] [--no-edit] / rebase [-i] [-x <コマンド>] <ブランチ>',
+  '  merge <ブランチ> [--no-ff] [--no-edit] / rebase [-i] [-r] [-x <コマンド>] <ブランチ>',
   '  cherry-pick [-e] [-m <親>] [--allow-empty] <コミット>... / revert [--no-edit] [-m <親>] <コミット>...',
   '  reset [--soft | --mixed | --hard] [<コミット>]',
   '  tag [-a] [-m "…"] [-f] <タグ> [<コミット>] / tag -l [<パターン>] / tag -d <タグ>',
@@ -727,16 +727,16 @@ function runGit(repo: Repo, name: string, args: readonly string[], raw: string):
     }
     case 'rebase': {
       const parsed = parseArgs(args, {
-        flags: [...CONTROL_FLAGS, '-i'],
+        flags: [...CONTROL_FLAGS, '-i', '-r'],
         values: ['-x'],
-        aliases: { '--interactive': '-i', '--exec': '-x' },
+        aliases: { '--interactive': '-i', '--exec': '-x', '--rebase-merges': '-r' },
       })
       const control = sequencerControl(repo, 'rebase', parsed)
       if (control) return control
-      if (parsed.positional.length !== 1) usage('git rebase [-i] [-x <コマンド>] <ブランチ>')
+      if (parsed.positional.length !== 1) usage('git rebase [-i] [-r] [-x <コマンド>] <ブランチ>')
       const upstream = parsed.positional[0] as string
       const exec = parsed.values.get('-x')
-      const options = exec === undefined ? {} : { exec }
+      const options = { ...(exec === undefined ? {} : { exec }), rebaseMerges: parsed.flags.has('-r') }
       return parsed.flags.has('-i')
         ? rebaseInteractive(repo, upstream, options)
         : rebase(repo, upstream, options)
