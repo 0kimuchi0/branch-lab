@@ -157,6 +157,19 @@ export interface Tag {
   readonly message?: string
 }
 
+/** git bisect の状態。 */
+export interface BisectState {
+  /** bisect を始めたときの HEAD (ブランチ名か、detached ならコミット ID)。bisect reset で戻る。 */
+  readonly start: string
+  readonly bad: CommitId | null
+  readonly good: readonly CommitId[]
+  readonly skipped: readonly CommitId[]
+  /** 見つかった最初の悪いコミット。 */
+  readonly found: CommitId | null
+  /** git bisect log の内容。 */
+  readonly log: readonly string[]
+}
+
 export interface Remote {
   readonly name: string
   readonly commits: Readonly<Record<CommitId, Commit>>
@@ -178,6 +191,7 @@ export interface Repo {
   /** git stash のスタック。先頭が stash@{0} (最新)。 */
   readonly stash: readonly StashEntry[]
   readonly tags: Readonly<Record<string, Tag>>
+  readonly bisect: BisectState | null
   /** HEAD とブランチの reflog。キーは "HEAD" かブランチ名で、先頭が最新 (HEAD@{0})。 */
   readonly reflogs: Readonly<Record<string, readonly ReflogEntry[]>>
   readonly remote: Remote
@@ -223,6 +237,7 @@ export function createRepo(): Repo {
     editor: null,
     stash: [],
     tags: {},
+    bisect: null,
     reflogs: {
       HEAD: [{ id: root.id, message: `clone: from ${REMOTE_NAME}` }],
       [DEFAULT_BRANCH]: [{ id: root.id, message: `clone: from ${REMOTE_NAME}` }],
@@ -304,6 +319,7 @@ export function reachableCommits(repo: Repo): Set<CommitId> {
   ]
   tips.push(headCommitId(repo))
   if (repo.operation?.type === 'merge') tips.push(repo.operation.theirs)
+  if (repo.bisect) tips.push(...(repo.bisect.bad === null ? [] : [repo.bisect.bad]), ...repo.bisect.good)
   const reachable = new Set<CommitId>()
   for (const tip of tips) {
     for (const id of ancestors(repo.commits, tip)) reachable.add(id)
@@ -996,11 +1012,11 @@ function leavingBehindWarning(before: Repo, after: Repo): string | null {
 }
 
 /** HEAD の今の位置の名前 (ブランチ名、detached ならコミット ID)。reflog に書く。 */
-function headLabel(repo: Repo): string {
+export function headLabel(repo: Repo): string {
   return repo.head.type === 'branch' ? repo.head.name : repo.head.id
 }
 
-function moveHead(repo: Repo, head: Head, targetId: CommitId, action: string, to: string): Repo {
+export function moveHead(repo: Repo, head: Head, targetId: CommitId, action: string, to: string): Repo {
   const { index, workdir } = carryChanges(repo, getCommit(repo, targetId).tree, action)
   return logRefs(repo, { ...repo, head, index, workdir }, `checkout: moving from ${headLabel(repo)} to ${to}`, {
     forceHead: true,
@@ -1224,6 +1240,9 @@ function statusLines(repo: Repo): string[] {
     lines.push(`ブランチ ${branch}`)
     const tracking = trackingLine(repo, branch)
     if (tracking) lines.push(tracking)
+  }
+  if (repo.bisect) {
+    lines.push(`bisect 中です ('${repo.bisect.start}' から始めました)。git bisect good / bad で判定してください`)
   }
   if (op?.type === 'merge') {
     lines.push(

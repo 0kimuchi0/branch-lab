@@ -40,6 +40,7 @@ import {
   type Repo,
   type ResetMode,
 } from './model'
+import { bisectLog, bisectMark, bisectReset, bisectRunning, bisectStart } from './bisect'
 import { blame, gitDiff, show } from './inspect'
 import { createTag, deleteTags, listTags } from './tag'
 import { fetch, pull, push, pushDelete, pushTags, teammateCommit } from './remote'
@@ -79,6 +80,7 @@ export const HELP_TEXT = [
   '  cherry-pick [-e] [-m <親>] [--allow-empty] <コミット>... / revert [--no-edit] [-m <親>] <コミット>...',
   '  reset [--soft | --mixed | --hard] [<コミット>]',
   '  tag [-a] [-m "…"] [-f] <タグ> [<コミット>] / tag -l [<パターン>] / tag -d <タグ>',
+  '  bisect start [<悪い> [<良い>]] / bisect good / bad / skip / reset / log / run [!] <コマンド>',
   '  stash [push [-m "…"] [-u] [-k]] / stash list / show [-p] / apply / pop [--index] / drop / clear / branch',
   '  push [-u] [-f] [--tags] [origin <ブランチ|タグ>] / push origin --delete <名前>',
   '  fetch / pull [--rebase | --no-rebase]',
@@ -367,6 +369,63 @@ function runRestore(repo: Repo, args: readonly string[]): OperationResult {
   return restore(repo, paths, { staged, ...(source === undefined ? {} : { source }) })
 }
 
+/** bisect run で、1 回の判定に使う上限 (コマンドが判定を進めない場合に止めるため)。 */
+const BISECT_RUN_LIMIT = 64
+
+/**
+ * git bisect run <コマンド>: コマンドを実行して、成功なら good、失敗なら bad と判定することを繰り返す。
+ * 先頭に ! を付けると判定を逆にする (例: bisect run ! cat bug.txt)。
+ */
+function bisectRun(repo: Repo, command: string): OperationResult {
+  if (!bisectRunning(repo)) {
+    throw new GitError('bisect run を使うには、先に良いコミットと悪いコミットを 1 つずつ指定してください')
+  }
+  const inverted = command.startsWith('!')
+  const body = inverted ? command.slice(1).trim() : command
+  if (body === '') usage('git bisect run [!] <コマンド>')
+  let current = repo
+  const lines: string[] = []
+  for (let i = 0; i < BISECT_RUN_LIMIT && bisectRunning(current); i++) {
+    lines.push(`running ${command}`)
+    const ran = executeOnce(current, body)
+    if (ran.output) lines.push(ran.output)
+    const good = ran.ok !== inverted
+    const step = bisectMark(ran.ok ? ran.repo : current, good ? 'good' : 'bad')
+    lines.push(step.output)
+    current = step.repo
+  }
+  if (current.bisect?.found) lines.push('bisect found first bad commit')
+  return { repo: current, output: lines.join('\n') }
+}
+
+function runBisect(repo: Repo, args: readonly string[], raw: string): OperationResult {
+  const [sub, ...rest] = args
+  switch (sub) {
+    case 'start':
+      return bisectStart(repo, rest[0], rest.slice(1))
+    case 'bad':
+    case 'new':
+      return bisectMark(repo, 'bad', rest)
+    case 'good':
+    case 'old':
+      return bisectMark(repo, 'good', rest)
+    case 'skip':
+      return bisectMark(repo, 'skip', rest)
+    case 'reset':
+      if (rest.length > 1) usage('git bisect reset [<コミット>]')
+      return bisectReset(repo, rest[0])
+    case 'log':
+      return bisectLog(repo)
+    case 'run': {
+      // コマンドは書いたまま (引用符や > を含めて) 実行する
+      const command = raw.replace(/^\s*(git\s+)?bisect\s+run\s*/, '')
+      return bisectRun(repo, command)
+    }
+    default:
+      throw new GitError('使い方: git bisect start / good / bad / skip / reset / log / run')
+  }
+}
+
 function runTag(repo: Repo, args: readonly string[]): OperationResult {
   const parsed = parseArgs(args, {
     flags: ['-a', '-d', '-f', '-l'],
@@ -497,7 +556,7 @@ function runPull(repo: Repo, args: readonly string[]): OperationResult {
   })
 }
 
-function runGit(repo: Repo, name: string, args: readonly string[]): OperationResult {
+function runGit(repo: Repo, name: string, args: readonly string[], raw: string): OperationResult {
   switch (name) {
     case 'status':
       parseArgs(args, { flags: [] })
@@ -643,6 +702,8 @@ function runGit(repo: Repo, name: string, args: readonly string[]): OperationRes
       return runStash(repo, args)
     case 'tag':
       return runTag(repo, args)
+    case 'bisect':
+      return runBisect(repo, args, raw)
     case 'reflog': {
       const parsed = parseArgs(args, { flags: [] })
       const [first, second, ...rest] = parsed.positional
@@ -836,7 +897,7 @@ function executeOnce(repo: Repo, input: string): CommandResult {
       if (args.length > 1) usage('teammate [<ブランチ>]')
       result = teammateCommit(repo, args[0])
     } else if (name === 'help') result = { repo, output: HELP_TEXT }
-    else result = runGit(repo, name, args)
+    else result = runGit(repo, name, args, input)
     return { ...result, ok: true }
   } catch (error) {
     if (error instanceof GitError) {

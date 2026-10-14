@@ -658,6 +658,16 @@
   fill: var(--lane-3);
 }
 
+.label-bisect rect {
+  fill: color-mix(in srgb, var(--lane-1) 14%, var(--surface));
+  stroke: var(--lane-1);
+  stroke-dasharray: 3 2;
+}
+
+.label-bisect text {
+  fill: var(--lane-1);
+}
+
 .label-remote rect {
   fill: var(--graph-bg);
   stroke-dasharray: 4 3;

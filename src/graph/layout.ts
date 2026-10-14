@@ -43,7 +43,7 @@ export interface LayoutEdge {
   readonly reachable: boolean
 }
 
-export type LabelKind = 'branch' | 'current' | 'head' | 'tag' | 'remote'
+export type LabelKind = 'branch' | 'current' | 'head' | 'tag' | 'bisect' | 'remote'
 
 export interface LayoutLabel {
   readonly key: string
@@ -133,7 +133,8 @@ const LABEL_ORDER: Readonly<Record<LabelKind, number>> = {
   head: 0,
   branch: 1,
   tag: 2,
-  remote: 3,
+  bisect: 3,
+  remote: 4,
 }
 
 /** コミットと参照からグラフの座標を計算する。 */
@@ -243,6 +244,13 @@ export function computeLayout(repo: Repo): GraphLayout {
     refs.push({ key: 'merge-head', text: 'MERGE_HEAD', kind: 'head', target: repo.operation.theirs })
   }
   refs.push(...tagRefs(repo.tags))
+  if (repo.bisect) {
+    const { bad, good } = repo.bisect
+    if (bad !== null) refs.push({ key: 'bisect:bad', text: 'bisect/bad', kind: 'bisect', target: bad })
+    good.forEach((target, index) => {
+      refs.push({ key: `bisect:good:${index}`, text: 'bisect/good', kind: 'bisect', target })
+    })
+  }
   for (const name of branchOrder(Object.keys(repo.remoteBranches))) {
     refs.push({
       key: `remote:${name}`,
