@@ -14,7 +14,10 @@ import {
 } from './history'
 import {
   GitError,
+  chmod,
+  cleanupMessage,
   configBool,
+  headCommitIdOrNull,
   isSubmodulePath,
   getCommit,
   getRemote,
@@ -23,6 +26,7 @@ import {
   add,
   commit,
   createBranch,
+  currentBranch,
   deleteBranch,
   orphanBranch,
   detachHead,
@@ -169,13 +173,28 @@ function lex(input: string): Token[] {
   }
   for (let i = 0; i < input.length; i++) {
     const char = input[i] as string
-    if (char === '"' || char === "'") {
+    if (char === "'") {
       const end = input.indexOf(char, i + 1)
       const stop = end === -1 ? input.length : end
       value += input.slice(i + 1, stop)
       quoted = true
       inWord = true
       i = stop
+    } else if (char === '"') {
+      // ダブルクォートの中では、\" \\ \$ \` だけがエスケープになる (シェルと同じ)
+      let j = i + 1
+      while (j < input.length && input[j] !== '"') {
+        if (input[j] === '\\' && j + 1 < input.length && '"\\$`'.includes(input[j + 1] as string)) j++
+        value += input[j]
+        j++
+      }
+      quoted = true
+      inWord = true
+      i = j
+    } else if (char === '\\' && i + 1 < input.length) {
+      value += input[i + 1]
+      inWord = true
+      i++
     } else if (char === '>') {
       flush()
       const operator = input[i + 1] === '>' ? '>>' : '>'
@@ -190,6 +209,41 @@ function lex(input: string): Token[] {
   }
   flush()
   return tokens
+}
+
+export interface ChainPart {
+  /** 直前のコマンドとのつなぎ方 (最初のコマンドは null)。 */
+  readonly op: '&&' | '||' | ';' | null
+  readonly text: string
+}
+
+/** シェルと同じく、引用符の外の &&・||・; でコマンドを分ける。 */
+export function splitChain(input: string): ChainPart[] {
+  const parts: ChainPart[] = []
+  let op: ChainPart['op'] = null
+  let start = 0
+  let quote: string | null = null
+  for (let i = 0; i < input.length; i++) {
+    const char = input[i] as string
+    if (quote !== null) {
+      if (char === '\\' && quote === '"') i++
+      else if (char === quote) quote = null
+      continue
+    }
+    if (char === '"' || char === "'") quote = char
+    else if (char === '\\') i++
+    else {
+      const two = input.slice(i, i + 2)
+      const found = two === '&&' || two === '||' ? two : char === ';' ? ';' : null
+      if (found === null) continue
+      parts.push({ op, text: input.slice(start, i).trim() })
+      op = found
+      start = i + found.length
+      i += found.length - 1
+    }
+  }
+  parts.push({ op, text: input.slice(start).trim() })
+  return parts
 }
 
 /** 引用符で囲まれた文字列を 1 つのトークンとして扱う分割。 */
@@ -311,9 +365,9 @@ function runCommit(repo: Repo, args: readonly string[]): OperationResult {
   // -am "msg" は -a -m "msg" と同じ
   const expanded = args.flatMap((arg) => (/^-[a-z]{2,}$/.test(arg) ? [...arg.slice(1)].map((c) => `-${c}`) : [arg]))
   const parsed = parseArgs(expanded, {
-    flags: ['-a', '--allow-empty', '--amend', '--no-edit'],
+    flags: ['-a', '--allow-empty', '--amend', '--no-edit', '--no-verify'],
     values: ['-m', '--fixup', '--squash'],
-    aliases: { '--all': '-a', '--message': '-m' },
+    aliases: { '--all': '-a', '--message': '-m', '-n': '--no-verify' },
   })
   atMost(parsed, 0, 'git commit [-a] [-m "メッセージ"] [--allow-empty] [--amend] [--no-edit] [--fixup=<コミット>] [--squash=<コミット>]')
   // -m を複数書くと、それぞれが段落になる
@@ -338,7 +392,23 @@ function runCommit(repo: Repo, args: readonly string[]): OperationResult {
     else if (message !== undefined) message = `${title}\n\n${message}`
     else template = title
   }
-  return commit(repo, {
+  // フック: pre-commit (コミットする前)、commit-msg (メッセージを確かめる)、post-commit (コミットしたあと)
+  const verify = !parsed.flags.has('--no-verify')
+  let current = repo
+  const lines: string[] = []
+  if (verify) {
+    const pre = runHook(current, 'pre-commit')
+    lines.push(...pre.lines)
+    if (!pre.ok) throw new GitError([...lines, '(pre-commit フックが失敗したため、コミットしませんでした)'].join('\n'))
+    current = pre.repo
+    if (message !== undefined) {
+      const checked = runCommitMsgHook(current, message)
+      lines.push(...checked.lines)
+      current = checked.repo
+      message = checked.message
+    }
+  }
+  const result = commit(current, {
     ...(message === undefined ? {} : { message }),
     ...(template === undefined ? {} : { template }),
     all: parsed.flags.has('-a'),
@@ -346,6 +416,14 @@ function runCommit(repo: Repo, args: readonly string[]): OperationResult {
     amend: parsed.flags.has('--amend'),
     noEdit: parsed.flags.has('--no-edit'),
   })
+  const editor = result.repo.editor
+  if (editor !== null) {
+    // エディタを保存したときに commit-msg と post-commit を実行する
+    const after = editor.after.kind === 'commit' && verify ? { ...editor.after, verify: true } : editor.after
+    return { repo: { ...result.repo, editor: { ...editor, after } }, output: [...lines, result.output].join('\n') }
+  }
+  const post = verify ? runHook(result.repo, 'post-commit') : { repo: result.repo, lines: [] }
+  return { repo: post.repo, output: [...lines, result.output, ...post.lines].filter(Boolean).join('\n') }
 }
 
 function runBranch(repo: Repo, args: readonly string[]): OperationResult {
@@ -935,7 +1013,64 @@ const RECURSE_COMMANDS = new Set(['switch', 'checkout', 'pull', 'reset'])
  * --recurse-submodules (または submodule.recurse の設定) が付いた switch / checkout / pull / reset は、
  * 終わったあとでサブモジュールを記録したコミットにする (git submodule update と同じ)。
  */
+const PRE_HOOKS: Readonly<Record<string, string>> = { push: 'pre-push', rebase: 'pre-rebase' }
+const POST_HOOKS: Readonly<Record<string, string>> = {
+  switch: 'post-checkout',
+  checkout: 'post-checkout',
+  merge: 'post-merge',
+  pull: 'post-merge',
+}
+
+/**
+ * フックを実行しながらコマンドを実行する。push / rebase は前に pre-push / pre-rebase を実行し、
+ * 失敗したら中止する (--no-verify で飛ばせる)。switch / checkout / merge / pull は、HEAD が動いたら
+ * あとで post-checkout / post-merge を実行する (結果は変えない)。
+ */
 function runGit(repo: Repo, name: string, args: readonly string[], raw: string): OperationResult {
+  const pre = PRE_HOOKS[name]
+  const post = POST_HOOKS[name]
+  if (pre === undefined && post === undefined) return runGitWithSubmodules(repo, name, args, raw)
+  const verify = !args.includes('--no-verify')
+  const rest = args.filter((arg) => arg !== '--no-verify')
+  let current = repo
+  const lines: string[] = []
+  const control = rest.some((arg) => CONTROL_FLAGS.includes(arg))
+  if (pre !== undefined && verify && !control && current.gitFiles[`hooks/${pre}`] !== undefined) {
+    const positional = rest.filter((arg) => !arg.startsWith('-'))
+    let hookArgs: string[]
+    if (name === 'push') {
+      const branch = currentBranch(current)
+      const upstream = branch === null ? undefined : current.upstreams[branch]
+      const remoteName =
+        positional[0] !== undefined && positional[0] in current.remotes
+          ? positional[0]
+          : (upstream?.split('/')[0] ?? 'origin')
+      hookArgs = [remoteName, current.remotes[remoteName]?.url ?? remoteName]
+    } else {
+      hookArgs = positional
+    }
+    const hook = runHook(current, pre, hookArgs)
+    lines.push(...hook.lines)
+    if (!hook.ok) {
+      const reason =
+        name === 'push'
+          ? `error: failed to push some refs to '${hookArgs[1]}'`
+          : 'The pre-rebase hook refused to rebase.'
+      throw new GitError([...lines, reason].join('\n'))
+    }
+    current = hook.repo
+  }
+  const before = headCommitIdOrNull(current)
+  const result = runGitWithSubmodules(current, name, rest, raw)
+  lines.push(result.output)
+  const after = headCommitIdOrNull(result.repo)
+  const moved = after !== before && result.repo.operation === null && result.repo.editor === null
+  if (post === undefined || !verify || !moved) return { repo: result.repo, output: lines.filter(Boolean).join('\n') }
+  const hook = runHook(result.repo, post, post === 'post-checkout' ? [before ?? '0', after ?? '0', '1'] : ['0'])
+  return { repo: hook.repo, output: [...lines, ...hook.lines].filter(Boolean).join('\n') }
+}
+
+function runGitWithSubmodules(repo: Repo, name: string, args: readonly string[], raw: string): OperationResult {
   if (!RECURSE_COMMANDS.has(name)) return runGitCommand(repo, name, args, raw)
   const flag = args.includes('--recurse-submodules') ? true : args.includes('--no-recurse-submodules') ? false : undefined
   const rest = args.filter((arg) => arg !== '--recurse-submodules' && arg !== '--no-recurse-submodules')
@@ -1240,7 +1375,10 @@ function runEcho(repo: Repo, tokens: readonly Token[]): OperationResult {
   if (redirect === -1) return { repo, output: text.replace(/\n$/, '') }
   const rest = tokens.slice(redirect + 1)
   if (rest.length !== 1) usage('echo "内容" > ファイル')
-  return writeFile(repo, (rest[0] as Token).value, text, tokens[redirect]?.value === '>>')
+  const target = (rest[0] as Token).value
+  // >&2 / >&1 は画面に出す (フックからのメッセージ)
+  if (target === '&2' || target === '&1') return { repo, output: text.replace(/\n$/, '') }
+  return writeFile(repo, target, text, tokens[redirect]?.value === '>>')
 }
 
 function requireOne(args: readonly string[], text: string): string {
@@ -1248,7 +1386,135 @@ function requireOne(args: readonly string[], text: string): string {
   return args[0] as string
 }
 
-const SHELL_COMMANDS = new Set(['echo', 'touch', 'cat', 'ls', 'rm', 'pwd'])
+const SHELL_COMMANDS = new Set(['echo', 'touch', 'cat', 'ls', 'rm', 'pwd', 'chmod', 'grep', 'exit'])
+
+/** フックの中から実行するフック (git commit を実行する pre-commit など) が、際限なく続かないようにする。 */
+let hookDepth = 0
+
+interface HookResult {
+  readonly repo: Repo
+  readonly lines: readonly string[]
+  readonly ok: boolean
+}
+
+/**
+ * .git/hooks/<名前> のフックを実行する。フックはこのアプリのコマンドを 1 行に 1 つずつ書いたもので、
+ * $1・$2 … に引数が入る。失敗したコマンドか exit 0 以外で止まり、失敗とする (シェルの set -e と同じ)。
+ * 実行できるようにしていない (chmod +x していない) フックは、Git と同じく警告を出して無視する。
+ */
+export function runHook(repo: Repo, name: string, args: readonly string[] = []): HookResult {
+  const file = repo.gitFiles[`hooks/${name}`]
+  if (file === undefined || hookDepth > 3) return { repo, lines: [], ok: true }
+  if (!file.executable) {
+    const quiet = repo.config['advice.ignoredhook'] === 'false'
+    return {
+      repo,
+      lines: quiet
+        ? []
+        : [
+            `hint: The '.git/hooks/${name}' hook was ignored because it's not set as executable.`,
+            'hint: You can disable this warning with `git config advice.ignoredHook false`.',
+          ],
+      ok: true,
+    }
+  }
+  let current = repo
+  const lines: string[] = []
+  // sh と同じく、終了ステータスは最後に実行したコマンドのもの。set -e なら失敗したところで止まる
+  let status = true
+  let errexit = false
+  hookDepth++
+  try {
+    for (const raw of file.content.split('\n')) {
+      const line = raw.trim().replace(/\$(\d)/g, (_, n: string) => args[Number(n) - 1] ?? '')
+      if (line === '' || line.startsWith('#')) continue
+      if (/^set\s+-e\b/.test(line)) {
+        errexit = true
+        continue
+      }
+      const parts = splitChain(line)
+      for (const [index, part] of parts.entries()) {
+        if ((part.op === '&&' && !status) || (part.op === '||' && status)) continue
+        const exit = /^exit(?:\s+(\d+))?$/.exec(part.text)
+        if (exit) return { repo: current, lines, ok: (exit[1] ?? (status ? '0' : '1')) === '0' }
+        if (part.text === '') continue
+        const ran = executeLocal(current, part.text)
+        if (ran.output) lines.push(ran.output)
+        status = ran.ok
+        if (ran.ok) current = ran.repo
+        // && や || の左側の失敗では止まらない (set -e と同じ)
+        const nextOp = parts[index + 1]?.op
+        if (!status && errexit && nextOp !== '&&' && nextOp !== '||') return { repo: current, lines, ok: false }
+      }
+    }
+  } finally {
+    hookDepth--
+  }
+  return { repo: current, lines, ok: status }
+}
+
+/** commit-msg フック: .git/COMMIT_EDITMSG にメッセージを書いて渡し、フックが書き換えた内容を返す。 */
+/**
+ * -m のメッセージは、Git と同じく空白だけを整える (# で始まる行は残す)。
+ * エディタで書いたメッセージは cleanupMessage で # の行も取り除く。
+ */
+function cleanupWhitespace(text: string): string {
+  return text
+    .split('\n')
+    .map((line) => line.replace(/\s+$/, ''))
+    .join('\n')
+    .replace(/^\n+|\n+$/g, '')
+    .replace(/\n{3,}/g, '\n\n')
+}
+
+function runCommitMsgHook(
+  repo: Repo,
+  message: string,
+  mode: 'whitespace' | 'strip' = 'whitespace',
+): { repo: Repo; message: string; lines: readonly string[] } {
+  if (repo.gitFiles['hooks/commit-msg'] === undefined) return { repo, message, lines: [] }
+  const written = writeFile(repo, '.git/COMMIT_EDITMSG', `${message}\n`, false).repo
+  const hook = runHook(written, 'commit-msg', ['.git/COMMIT_EDITMSG'])
+  if (!hook.ok) throw new GitError([...hook.lines, '(commit-msg フックが失敗したため、コミットしませんでした)'].join('\n'))
+  const content = hook.repo.gitFiles['COMMIT_EDITMSG']?.content ?? message
+  const edited = mode === 'strip' ? cleanupMessage(content) : cleanupWhitespace(content)
+  if (edited === '') throw new GitError([...hook.lines, 'Aborting commit due to empty commit message.'].join('\n'))
+  return { repo: hook.repo, message: edited, lines: hook.lines }
+}
+
+/** grep [-q] [-v] [-i] [-c] [-E | -F] <パターン> <ファイル>...: 一致する行がなければ失敗する。 */
+function runGrep(repo: Repo, args: readonly string[]): OperationResult {
+  // -qE は -q -E と同じ
+  const expanded = args.flatMap((arg) => (/^-[a-zA-Z]{2,}$/.test(arg) ? [...arg.slice(1)].map((c) => `-${c}`) : [arg]))
+  const parsed = parseArgs(expanded, { flags: ['-q', '-v', '-i', '-c', '-E', '-F', '-n'] })
+  const [pattern, ...files] = parsed.positional
+  if (pattern === undefined || files.length === 0) usage('grep [-q] [-v] [-i] [-c] [-E] <パターン> <ファイル>...')
+  let regex: RegExp
+  try {
+    regex = new RegExp(parsed.flags.has('-F') ? pattern.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') : pattern, parsed.flags.has('-i') ? 'i' : '')
+  } catch {
+    throw new GitError(`grep: 正規表現として読めません: ${pattern}`)
+  }
+  const out: string[] = []
+  let found = 0
+  for (const file of files) {
+    const content = readFile(repo, file).output
+    const matched = content
+      .split('\n')
+      .map((text, index) => ({ text, index }))
+      .filter(({ text }) => regex.test(text) !== parsed.flags.has('-v'))
+    found += matched.length
+    if (parsed.flags.has('-c')) out.push(files.length > 1 ? `${file}:${matched.length}` : String(matched.length))
+    else {
+      for (const { text, index } of matched) {
+        const where = `${files.length > 1 ? `${file}:` : ''}${parsed.flags.has('-n') ? `${index + 1}:` : ''}`
+        out.push(`${where}${text}`)
+      }
+    }
+  }
+  if (found === 0 && !parsed.flags.has('-c')) throw new GitError(parsed.flags.has('-q') ? '' : out.join('\n'))
+  return { repo, output: parsed.flags.has('-q') ? '' : out.join('\n') }
+}
 
 function runShell(repo: Repo, name: string, tokens: readonly Token[]): OperationResult {
   const args = tokens.map((token) => token.value)
@@ -1261,8 +1527,20 @@ function runShell(repo: Repo, name: string, tokens: readonly Token[]): Operation
     }
     case 'cat':
       return readFile(repo, requireOne(args, 'cat <ファイル>'))
-    case 'ls':
-      return listFiles(repo)
+    case 'ls': {
+      const dirs = args.filter((arg) => !arg.startsWith('-'))
+      if (dirs.length > 1) usage('ls [<ディレクトリ>]')
+      return listFiles(repo, dirs[0])
+    }
+    case 'chmod': {
+      const [mode, ...paths] = args
+      if (mode === undefined || paths.length === 0) usage('chmod +x <ファイル>...')
+      return paths.reduce<OperationResult>((result, path) => chmod(result.repo, mode, path), { repo, output: '' })
+    }
+    case 'grep':
+      return runGrep(repo, args)
+    case 'exit':
+      throw new GitError('exit は .git/hooks のフックの中でだけ使えます')
     case 'pwd':
       return { repo, output: repo.worktree }
     default: {
@@ -1306,7 +1584,25 @@ function runEditorSave(repo: Repo, input: string): CommandResult {
   const parsed = parseEditorSave(input.trim())
   if (!parsed) return { repo, output: `使い方: ${EDITOR_SAVE} "保存する内容"`, ok: false }
   try {
-    return { ...saveEditor(repo, parsed.text ?? undefined), ok: true }
+    const after = repo.editor?.after
+    if (after?.kind !== 'commit' || !after.verify) return { ...saveEditor(repo, parsed.text ?? undefined), ok: true }
+    // git commit で開いたエディタ: 保存したメッセージで commit-msg フックを実行してからコミットし、post-commit を実行する
+    const text = parsed.text ?? repo.editor?.text ?? ''
+    const cleaned = cleanupMessage(text)
+    // フックの中のコマンドは、エディタを閉じた状態で実行する
+    const closed: Repo = { ...repo, editor: null }
+    let checked: { repo: Repo; message: string; lines: readonly string[] }
+    try {
+      checked = cleaned === '' ? { repo: closed, message: text, lines: [] } : runCommitMsgHook(closed, cleaned, 'strip')
+    } catch (error) {
+      // フックが失敗したら、Git と同じくエディタを閉じてコミットをやめる
+      if (error instanceof GitError) return { repo: closed, output: error.message, ok: false }
+      throw error
+    }
+    const saved = saveEditor({ ...checked.repo, editor: repo.editor }, checked.message)
+    const committed = headCommitIdOrNull(saved.repo) !== headCommitIdOrNull(repo)
+    const post = committed ? runHook(saved.repo, 'post-commit') : { repo: saved.repo, lines: [], ok: true }
+    return { repo: post.repo, output: [...checked.lines, saved.output, ...post.lines].filter(Boolean).join('\n'), ok: true }
   } catch (error) {
     if (error instanceof GitError) return { repo, output: error.message, ok: false }
     throw error
@@ -1323,6 +1619,21 @@ function runEditorSave(repo: Repo, input: string): CommandResult {
  * cd でサブモジュールの中にいるなら、コマンドはそのサブモジュールで実行し、結果を親に戻す。
  */
 export function executeCommand(repo: Repo, input: string): CommandResult {
+  // a && b / a || b / a; b は、シェルと同じく順に実行する (エディタの保存の :wq は分けない)
+  const parts = input.startsWith(EDITOR_SAVE) ? [] : splitChain(input)
+  if (parts.length > 1) {
+    let current = repo
+    let ok = true
+    const outputs: string[] = []
+    for (const part of parts) {
+      if ((part.op === '&&' && !ok) || (part.op === '||' && ok) || part.text === '') continue
+      const ran = executeCommand(current, part.text)
+      if (ran.output) outputs.push(ran.output)
+      ok = ran.ok
+      current = ran.repo
+    }
+    return { repo: current, output: outputs.join('\n'), ok }
+  }
   const tokens = lex(input)
   if (tokens[0]?.value === 'cd' && !tokens[0].quoted) return runCd(repo, tokens.slice(1))
   // git clone は今いる場所に新しいリポジトリを作るので、一番外側のリポジトリで扱う

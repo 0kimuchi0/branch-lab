@@ -187,7 +187,13 @@ export interface ReflogEntry {
 /** エディタを保存して閉じたあとに続ける処理。 */
 export type AfterEdit =
   /** コミットを作り、operation をこの値にする。 */
-  | { readonly kind: 'commit'; readonly commit: PendingCommit; readonly operation: Operation | null }
+  | {
+      readonly kind: 'commit'
+      readonly commit: PendingCommit
+      readonly operation: Operation | null
+      /** git commit で開いたエディタなら true (保存したときに commit-msg / post-commit のフックを実行する)。 */
+      readonly verify?: boolean
+    }
   /**
    * コミットを作り、cherry-pick / revert / rebase の続きを実行する。
    * stop なら続きは実行せずに止まる (rebase -i の edit)。
@@ -327,6 +333,11 @@ export interface Repo {
    * 外のファイルも作業ディレクトリ (workdir) にはステージと同じ内容で持ち、ls・cat・画面では見えないようにする。
    */
   readonly sparse: readonly string[] | null
+  /**
+   * .git ディレクトリの中のファイルのうち、このアプリで扱うもの (hooks/pre-commit など)。
+   * キーは .git からのパス。作業ディレクトリには含めず、git add の対象にもならない。
+   */
+  readonly gitFiles: Readonly<Record<string, GitFile>>
   /** git notes: コミット → そのコミットに付けたメモ。 */
   readonly notes: Readonly<Record<CommitId, string>>
 }
@@ -339,6 +350,44 @@ export interface Library {
   readonly remote: Remote
   readonly prefix: string
   readonly nextId: number
+}
+
+/** .git の中のファイル。executable は chmod +x で実行できるようにしたか。 */
+export interface GitFile {
+  readonly content: string
+  readonly executable: boolean
+}
+
+/** .git/ から始まるパスなら、.git からのパス。 */
+export function gitDirPath(path: string): string | null {
+  return path === '.git' || path.startsWith('.git/') ? path.slice('.git/'.length) : null
+}
+
+/** .git の中に書く。このアプリで書けるのは hooks/ と COMMIT_EDITMSG だけ。 */
+function writeGitFile(repo: Repo, inner: string, text: string, append: boolean): OperationResult {
+  if (!/^hooks\/[A-Za-z0-9._-]+$/.test(inner) && inner !== 'COMMIT_EDITMSG') {
+    throw new GitError(`.git/${inner}: このアプリで .git の中に書けるのは hooks/ のファイルだけです`)
+  }
+  const existing = repo.gitFiles[inner]
+  const content = append ? (existing?.content ?? '') + text : text
+  return {
+    repo: { ...repo, gitFiles: { ...repo.gitFiles, [inner]: { content, executable: existing?.executable ?? false } } },
+    output: '',
+  }
+}
+
+/** chmod +x / -x <ファイル>: .git/hooks のファイルを実行できるようにする (ほかのファイルには何もしない)。 */
+export function chmod(repo: Repo, mode: string, path: string): OperationResult {
+  if (mode !== '+x' && mode !== '-x' && !/^[0-7]{3,4}$/.test(mode)) throw new GitError(`chmod: 未対応のモードです: ${mode}`)
+  const inner = gitDirPath(path)
+  const executable = mode === '+x' || (/^[0-7]+$/.test(mode) && (Number.parseInt(mode.slice(-3, -2), 8) & 1) === 1)
+  if (inner === null) {
+    if (!(path in repo.workdir)) throw new GitError(`chmod: cannot access '${path}': No such file or directory`)
+    return { repo, output: '' }
+  }
+  const file = repo.gitFiles[inner]
+  if (file === undefined) throw new GitError(`chmod: cannot access '${path}': No such file or directory`)
+  return { repo: { ...repo, gitFiles: { ...repo.gitFiles, [inner]: { ...file, executable } } }, output: '' }
 }
 
 /** worktree ごとに持つ状態 (それ以外のブランチ・コミット・stash・設定などは共有する)。 */
@@ -483,6 +532,7 @@ export function createRepo(): Repo {
     sparse: null,
     clones: {},
     clone: null,
+    gitFiles: {},
     reflogs: {
       HEAD: [{ id: root.id, message: `clone: from ${REMOTE_NAME}` }],
       [DEFAULT_BRANCH]: [{ id: root.id, message: `clone: from ${REMOTE_NAME}` }],
@@ -827,6 +877,8 @@ export function writeFile(
   text: string,
   append: boolean,
 ): OperationResult {
+  const inner = gitDirPath(path)
+  if (inner !== null) return writeGitFile(repo, inner, text, append)
   validatePath(path)
   if (Object.keys(repo.workdir).some((other) => other.startsWith(`${path}/`)) || isSubmodulePath(repo, path)) {
     throw new GitError(`${path} はディレクトリです`)
@@ -842,20 +894,47 @@ export function writeFile(
 }
 
 export function touchFile(repo: Repo, path: string): OperationResult {
+  const inner = gitDirPath(path)
+  if (inner !== null) return inner in repo.gitFiles ? { repo, output: '' } : writeGitFile(repo, inner, '', false)
   if (path in repo.workdir && !isSubmodulePath(repo, path) && !isSparseHidden(repo, path)) return { repo, output: '' }
   return writeFile(repo, path, '', false)
 }
 
 export function readFile(repo: Repo, path: string): OperationResult {
   if (isSubmodulePath(repo, path)) throw new GitError(`cat: ${path}: ディレクトリです`)
-  const content = isSparseHidden(repo, path) ? undefined : repo.workdir[path]
+  const inner = gitDirPath(path)
+  const content = inner !== null ? repo.gitFiles[inner]?.content : isSparseHidden(repo, path) ? undefined : repo.workdir[path]
   if (content === undefined) {
     throw new GitError(`cat: ${path}: そのようなファイルはありません`)
   }
   return { repo, output: content.replace(/\n$/, '') }
 }
 
-export function listFiles(repo: Repo): OperationResult {
+export function listFiles(repo: Repo, directory?: string): OperationResult {
+  // ls .git/hooks のように .git の中も見られる (-l なら実行できるかも出す)
+  const inner = directory === undefined ? null : gitDirPath(directory.replace(/\/+$/, ''))
+  if (inner !== null) {
+    const prefix = inner === '' ? '' : `${inner}/`
+    return {
+      repo,
+      output: Object.keys(repo.gitFiles)
+        .filter((path) => path.startsWith(prefix))
+        .map((path) => path.slice(prefix.length))
+        .sort()
+        .join('\n'),
+    }
+  }
+  if (directory !== undefined) {
+    const prefix = `${directory.replace(/\/+$/, '')}/`
+    return {
+      repo,
+      output: Object.keys(repo.workdir)
+        .filter((path) => path.startsWith(prefix) && !isSparseHidden(repo, path))
+        .map((path) => path.slice(prefix.length))
+        .sort()
+        .join('\n'),
+    }
+  }
   return {
     repo,
     output: Object.keys(repo.workdir)
@@ -899,6 +978,13 @@ export function submoduleContaining(repo: Repo, path: string): string | null {
 
 /** シェルの rm。作業ディレクトリからだけ削除する。 */
 export function removeFile(repo: Repo, path: string): OperationResult {
+  const inner = gitDirPath(path)
+  if (inner !== null) {
+    if (!(inner in repo.gitFiles)) throw new GitError(`rm: ${path}: そのようなファイルはありません`)
+    const gitFiles = { ...repo.gitFiles }
+    delete gitFiles[inner]
+    return { repo: { ...repo, gitFiles }, output: '' }
+  }
   if (isSubmodulePath(repo, path)) throw new GitError(`rm: ${path} を削除できません: ディレクトリです`)
   if (!(path in repo.workdir) || isSparseHidden(repo, path)) {
     throw new GitError(`rm: ${path}: そのようなファイルはありません`)

@@ -88,3 +88,16 @@ export function worktreeRows(repo: Repo): WorktreeRow[] {
     }
   })
 }
+
+export interface HookRow {
+  readonly name: string
+  readonly executable: boolean
+}
+
+/** .git/hooks に置いたフック。 */
+export function hookRows(repo: Repo): HookRow[] {
+  return Object.entries(repo.gitFiles)
+    .filter(([path]) => path.startsWith('hooks/'))
+    .map(([path, file]) => ({ name: path.slice('hooks/'.length), executable: file.executable }))
+    .sort((a, b) => a.name.localeCompare(b.name))
+}
