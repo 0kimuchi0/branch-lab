@@ -160,6 +160,8 @@ export type AfterEdit =
       readonly target: CommitId
       readonly force: boolean
     }
+  /** git notes add / edit でメッセージを書いた場合。 */
+  | { readonly kind: 'note'; readonly target: CommitId }
   /** rebase -i の todo を読んで rebase を始める。 */
   | {
       readonly kind: 'todo'
@@ -173,7 +175,7 @@ export type AfterEdit =
 /** 開いているエディタ。Git がエディタを開いて、閉じられるのを待っている状態。 */
 export interface Editor {
   /** 編集しているファイルの名前 (表示用)。 */
-  readonly file: 'COMMIT_EDITMSG' | 'MERGE_MSG' | 'TAG_EDITMSG' | 'git-rebase-todo'
+  readonly file: 'COMMIT_EDITMSG' | 'MERGE_MSG' | 'TAG_EDITMSG' | 'NOTES_EDITMSG' | 'git-rebase-todo'
   /** エディタを開いたときの内容。 */
   readonly text: string
   readonly after: AfterEdit
@@ -266,6 +268,8 @@ export interface Repo {
   readonly libraries: Readonly<Record<string, Library>>
   /** コミット ID の頭文字 (既定は C)。 */
   readonly idPrefix?: string
+  /** git notes: コミット → そのコミットに付けたメモ。 */
+  readonly notes: Readonly<Record<CommitId, string>>
 }
 
 /**
@@ -413,6 +417,7 @@ export function createRepo(): Repo {
     submodules: {},
     submodule: null,
     libraries: {},
+    notes: {},
     reflogs: {
       HEAD: [{ id: root.id, message: `clone: from ${REMOTE_NAME}` }],
       [DEFAULT_BRANCH]: [{ id: root.id, message: `clone: from ${REMOTE_NAME}` }],
@@ -1595,35 +1600,3 @@ export function status(repo: Repo): OperationResult {
   return { repo, output: statusLines(repo).join('\n') }
 }
 
-/** git log。新しいものから順に、start から (all ならすべての参照から) たどれるコミットを表示する。 */
-export function log(
-  repo: Repo,
-  options: { readonly oneline?: boolean; readonly all?: boolean; readonly start?: string } = {},
-): OperationResult {
-  const tips = options.all
-    ? [
-        ...Object.values(repo.branches),
-        ...Object.values(repo.tags).map((tag) => tag.target),
-        ...Object.values(repo.remoteBranches),
-        headCommitId(repo),
-      ]
-    : [resolveRef(repo, options.start ?? 'HEAD')]
-  const ids = new Set<CommitId>()
-  for (const tip of tips) for (const id of ancestors(repo.commits, tip)) ids.add(id)
-  const sorted = [...ids].sort((a, b) => Number(b.slice(1)) - Number(a.slice(1)))
-  const lines: string[] = []
-  for (const id of sorted) {
-    const commit = getCommit(repo, id)
-    const names = refNames(repo, id)
-    const decoration = names.length > 0 ? ` (${names.join(', ')})` : ''
-    if (options.oneline) {
-      lines.push(`${id}${decoration} ${subject(commit.message)}`)
-    } else {
-      if (lines.length > 0) lines.push('')
-      lines.push(`commit ${id}${decoration}`)
-      if (commit.parents.length > 1) lines.push(`Merge: ${commit.parents.join(' ')}`)
-      lines.push('', ...commit.message.split('\n').map((line) => (line === '' ? '' : `    ${line}`)))
-    }
-  }
-  return { repo, output: lines.join('\n') }
-}

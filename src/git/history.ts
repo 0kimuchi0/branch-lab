@@ -44,6 +44,7 @@ import {
   type TodoItem,
 } from './model'
 import { rerereClear, rerereOnConflict } from './rerere'
+import { finishNote } from './notes'
 import { finishTag } from './tag'
 import { mergeTrees, treesEqual, withFile, type Conflict, type Tree } from './tree'
 
@@ -1126,6 +1127,7 @@ export function saveEditor(repo: Repo, text?: string): OperationResult {
   if (after.kind === 'tag') {
     return finishTag({ ...repo, editor: null }, after.name, after.target, content)
   }
+  if (after.kind === 'note') return finishNote({ ...repo, editor: null }, after.target, content)
 
   if (after.kind === 'todo') {
     const items = parseTodo(repo, content)

@@ -27,7 +27,6 @@ import {
   headTree,
   listBranches,
   listFiles,
-  log,
   previousBranch,
   readFile,
   reflog,
@@ -47,6 +46,8 @@ import {
   type ResetMode,
 } from './model'
 import { getConfig, listConfig, setConfig, unsetConfig } from './config'
+import { log } from './log'
+import { notesAdd, notesAppend, notesCopy, notesEdit, notesList, notesRemove, notesShow } from './notes'
 import { rerereCommand } from './rerere'
 import {
   activeRepo,
@@ -101,7 +102,9 @@ export const HELP_TEXT = [
   '  cd <パス> / pwd            worktree やサブモジュールの中に移動する・今いる場所を表示する',
   '',
   'Git のコマンド (先頭の git は省略できます。rm だけは git rm と区別します):',
-  '  status / log [--oneline] [--all] / reflog [<ブランチ>]',
+  '  status / reflog [<ブランチ>]',
+  '  log [--oneline] [--graph] [--all] [-n <数>] [--format=<書式>] [--first-parent] [--merges] [--grep=<語>]',
+  '      [--reverse] [-p] [--stat] [<範囲 A..B / A...B>] [-- <パス>]',
   '  blame [-L <開始>,<終了>] <ファイル> [<コミット>]',
   '  diff [--staged] [<コミット> [<コミット>]] [--stat] [-- <ファイル>] / show [<コミット>]',
   '  add <ファイル>... / add .        restore [--staged] <ファイル>...',
@@ -121,6 +124,7 @@ export const HELP_TEXT = [
   '  fetch [<リモート> | --all] / pull [--rebase | --no-rebase] [<リモート> [<ブランチ>]]',
   '  config <キー> [<値>] / config --unset <キー> / config --list   (rerere.enabled・pull.rebase・merge.ff など)',
   '  rerere [status | diff | remaining | forget <パス> | clear]   (git config rerere.enabled true で有効)',
+  '  notes add [-m "…"] [<コミット>] / append / edit / show / list / remove / copy',
   '  submodule add <URL> [<パス>] / submodule [status] / init / update [--init] [--remote] / deinit / foreach <コマンド>',
   '  worktree add [-b <ブランチ>] [--detach] <パス> [<コミット>] / worktree list / worktree remove [-f] <パス>',
   '  remote [-v] / remote add <名前> <URL> / remove / rename / set-url / get-url',
@@ -139,16 +143,39 @@ interface Token {
 }
 
 function lex(input: string): Token[] {
+  // シェルと同じく、引用符の部分と引用符のない部分が続いていれば 1 つの単語にする (--format="%h %s" など)
   const tokens: Token[] = []
-  const pattern = /"([^"]*)"|'([^']*)'|(>>|>)|([^\s"'>]+)/g
-  for (const match of input.matchAll(pattern)) {
-    const quoted = match[1] ?? match[2]
-    tokens.push(
-      quoted === undefined
-        ? { value: match[3] ?? match[4] ?? '', quoted: false }
-        : { value: quoted, quoted: true },
-    )
+  let value = ''
+  let quoted = false
+  let inWord = false
+  const flush = () => {
+    if (inWord) tokens.push({ value, quoted })
+    value = ''
+    quoted = false
+    inWord = false
   }
+  for (let i = 0; i < input.length; i++) {
+    const char = input[i] as string
+    if (char === '"' || char === "'") {
+      const end = input.indexOf(char, i + 1)
+      const stop = end === -1 ? input.length : end
+      value += input.slice(i + 1, stop)
+      quoted = true
+      inWord = true
+      i = stop
+    } else if (char === '>') {
+      flush()
+      const operator = input[i + 1] === '>' ? '>>' : '>'
+      tokens.push({ value: operator, quoted: false })
+      i += operator.length - 1
+    } else if (/\s/.test(char)) {
+      flush()
+    } else {
+      value += char
+      inWord = true
+    }
+  }
+  flush()
   return tokens
 }
 
@@ -687,6 +714,85 @@ function submoduleForeach(repo: Repo, raw: string): OperationResult {
   return { repo: current, output: lines.join('\n') }
 }
 
+function runNotes(repo: Repo, args: readonly string[]): OperationResult {
+  const [sub = 'list', ...rest] = args[0]?.startsWith('-') ? ['list', ...args] : args
+  const parsed = parseArgs(rest, {
+    flags: ['-f', '--ignore-missing'],
+    values: ['-m'],
+    aliases: { '--force': '-f', '--message': '-m' },
+  })
+  const messages = parsed.allValues.get('-m') ?? []
+  const [first, second, ...extra] = parsed.positional
+  const one = (text: string) => {
+    if (second !== undefined) usage(text)
+    return first
+  }
+  switch (sub) {
+    case 'add':
+      return notesAdd(repo, one('git notes add [-f] [-m <メッセージ>] [<コミット>]'), messages, parsed.flags.has('-f'))
+    case 'append':
+      return notesAppend(repo, one('git notes append [-m <メッセージ>] [<コミット>]'), messages)
+    case 'edit':
+      return notesEdit(repo, one('git notes edit [<コミット>]'))
+    case 'show':
+      return notesShow(repo, one('git notes show [<コミット>]'))
+    case 'list':
+      return notesList(repo, one('git notes list [<コミット>]'))
+    case 'remove':
+      return notesRemove(repo, parsed.positional, parsed.flags.has('--ignore-missing'))
+    case 'copy':
+      if (first === undefined || second === undefined || extra.length > 0) usage('git notes copy [-f] <元> <先>')
+      return notesCopy(repo, first, second, parsed.flags.has('-f'))
+    default:
+      throw new GitError(`error: 未対応の notes のサブコマンドです: ${sub}`)
+  }
+}
+
+function runLog(repo: Repo, args: readonly string[]): OperationResult {
+  // -3 は -n 3 と同じ。--pretty だけなら medium
+  const expanded = args.flatMap((arg) => (/^-\d+$/.test(arg) ? ['-n', arg.slice(1)] : arg === '--pretty' ? ['--pretty=medium'] : [arg]))
+  const parsed = parseArgs(expanded, {
+    flags: [
+      '--oneline', '--all', '--branches', '--tags', '--remotes', '--graph', '--reverse', '--first-parent',
+      '--merges', '--no-merges', '--decorate', '--no-decorate', '-p', '--stat', '--name-only', '--invert-grep',
+      '--topo-order', '--date-order', '--abbrev-commit', '--no-notes', '--notes',
+    ],
+    values: ['-n', '--format', '--pretty', '--grep'],
+    aliases: { '--max-count': '-n', '--patch': '-p', '-u': '-p' },
+  })
+  const count = parsed.values.get('-n')
+  if (count !== undefined && !/^\d+$/.test(count)) throw new GitError(`fatal: '${count}' は数ではありません`)
+  // コミットとして読めず、ファイルとしてあるものはパスとして扱う
+  const split = parsed.positional.findIndex(
+    (arg) => !arg.includes('..') && !arg.startsWith('^') && !tryResolveRef(repo, arg) && isKnownPath(repo, arg),
+  )
+  const revisions = split === -1 ? parsed.positional : parsed.positional.slice(0, split)
+  const paths = [...(split === -1 ? [] : parsed.positional.slice(split)), ...(parsed.paths ?? [])]
+  const format = parsed.flags.has('--oneline') ? 'oneline' : (parsed.values.get('--format') ?? parsed.values.get('--pretty'))
+  const grep = parsed.values.get('--grep')
+  return log(repo, {
+    revisions,
+    all: parsed.flags.has('--all'),
+    branches: parsed.flags.has('--branches'),
+    tags: parsed.flags.has('--tags'),
+    remotes: parsed.flags.has('--remotes'),
+    ...(count === undefined ? {} : { maxCount: Number(count) }),
+    ...(format === undefined ? {} : { format }),
+    graph: parsed.flags.has('--graph'),
+    reverse: parsed.flags.has('--reverse'),
+    firstParent: parsed.flags.has('--first-parent'),
+    ...(parsed.flags.has('--merges') ? { merges: true } : parsed.flags.has('--no-merges') ? { merges: false } : {}),
+    ...(grep === undefined ? {} : { grep }),
+    invertGrep: parsed.flags.has('--invert-grep'),
+    paths,
+    patch: parsed.flags.has('-p'),
+    stat: parsed.flags.has('--stat'),
+    nameOnly: parsed.flags.has('--name-only'),
+    decorate: !parsed.flags.has('--no-decorate'),
+    notes: !parsed.flags.has('--no-notes'),
+  })
+}
+
 function runWorktree(repo: Repo, args: readonly string[]): OperationResult {
   if (repo.idPrefix !== undefined) throw new GitError('サブモジュールの中での git worktree は、このアプリでは未対応です')
   const [sub, ...rest] = args
@@ -787,16 +893,10 @@ function runGit(repo: Repo, name: string, args: readonly string[], raw: string):
     case 'status':
       parseArgs(args, { flags: [] })
       return status(repo)
-    case 'log': {
-      const parsed = parseArgs(args, { flags: ['--oneline', '--all', '--graph'] })
-      atMost(parsed, 1, 'git log [--oneline] [--all] [<コミット>]')
-      const start = parsed.positional[0]
-      return log(repo, {
-        oneline: parsed.flags.has('--oneline'),
-        all: parsed.flags.has('--all'),
-        ...(start === undefined ? {} : { start }),
-      })
-    }
+    case 'log':
+      return runLog(repo, args)
+    case 'notes':
+      return runNotes(repo, args)
     case 'diff': {
       const parsed = parseArgs(args, {
         flags: ['--staged', '--name-only', '--stat'],
