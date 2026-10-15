@@ -112,6 +112,50 @@ export function joinNames(names: readonly string[]): string {
   return `${names.slice(0, -1).join(', ')} and ${names.at(-1)}`
 }
 
+/** パッチの 1 つのハンク (@@ から始まる部分)。newline が false の行は、末尾に改行がない。 */
+export interface Hunk {
+  readonly oldStart: number
+  readonly oldCount: number
+  readonly newStart: number
+  readonly newCount: number
+  readonly lines: ReadonlyArray<{ readonly type: ' ' | '-' | '+'; readonly text: string; readonly newline: boolean }>
+}
+
+/** パッチの 1 つのファイルの変更。 */
+export interface FilePatch {
+  readonly path: string
+  readonly newFile: boolean
+  readonly deleted: boolean
+  readonly hunks: readonly Hunk[]
+}
+
+/** git am で取り込む 1 通のパッチ。 */
+export interface AmPatch {
+  /** 読んだファイルの名前。 */
+  readonly name: string
+  /** format-patch の From 行にある、元のコミット。 */
+  readonly source?: CommitId
+  readonly message: string
+  /** パッチの全文 (--show-current-patch で表示する)。 */
+  readonly raw: string
+  readonly files: readonly FilePatch[]
+}
+
+/** git am の途中の状態。 */
+export interface AmOperation {
+  readonly type: 'am'
+  /** 当てられずに止まっているパッチ。 */
+  readonly current: AmPatch | null
+  /** これから当てるパッチ。 */
+  readonly todo: readonly AmPatch[]
+  readonly origHead: CommitId
+  readonly branch: string | null
+  /** 当て終わったパッチの数。 */
+  readonly done: number
+  /** -3: 当てられなければ 3-way マージにする。 */
+  readonly threeWay: boolean
+}
+
 /** 途中で止まっている操作 (コンフリクトの解消待ちなど)。 */
 export type Operation =
   | {
@@ -120,6 +164,7 @@ export type Operation =
       readonly message: string
     }
   | SequenceOperation
+  | AmOperation
 
 /** エディタで書いたメッセージを付けて作るコミット。 */
 export interface PendingCommit {
@@ -532,6 +577,7 @@ export function reachableCommits(repo: Repo): Set<CommitId> {
     tips.push(state.head.type === 'branch' ? (repo.branches[state.head.name] as CommitId) : state.head.id)
     const op = state.operation
     if (op?.type === 'merge') tips.push(op.theirs)
+    else if (op?.type === 'am') tips.push(op.origHead)
     else if (op) tips.push(op.origHead, ...Object.values(op.labels ?? {}))
     if (state.bisect) tips.push(...(state.bisect.bad === null ? [] : [state.bisect.bad]), ...state.bisect.good)
   }
@@ -1122,7 +1168,7 @@ export function commit(repo: Repo, options: CommitOptions = {}): OperationResult
   const headId = headCommitId(staged)
   const head = getCommit(staged, headId)
   // rebase --rebase-merges の merge の行で止まっている場合は、マージコミットを作る
-  const sequence = op && op.type !== 'merge' ? op : null
+  const sequence = op && op.type !== 'merge' && op.type !== 'am' ? op : null
   const merging = sequence?.current?.action === 'merge' ? sequence.current : null
   const parents =
     options.amend ? head.parents
@@ -1133,7 +1179,7 @@ export function commit(repo: Repo, options: CommitOptions = {}): OperationResult
     ? (staged.commits[head.parents[0] ?? '']?.tree ?? {})
     : head.tree
 
-  const pickedId = op && op.type !== 'merge' && op.current ? op.current.id : null
+  const pickedId = sequence?.current && sequence.current.action !== 'merge' ? sequence.current.id : null
   const picked = pickedId === null ? null : getCommit(repo, pickedId)
   if (op?.type !== 'merge' && !merging && !options.allowEmpty && treesEqual(staged.index, parentTree)) {
     if (options.amend) {
@@ -1593,6 +1639,11 @@ function statusLines(repo: Repo): string[] {
         ? 'マージしていないパスがあります。(コンフリクトを解消して "git commit" を実行してください)'
         : 'すべてのコンフリクトが解消されました。"git commit" でマージを完了してください',
     )
+  } else if (op?.type === 'am') {
+    lines.push('メールボックス (パッチ) を取り込んでいる途中です (git am)。')
+    if (op.current !== null) {
+      lines.push('直してステージしたら "git am --continue"、飛ばすには "git am --skip" を実行してください')
+    }
   } else if (op && op.current !== null) {
     lines.push(`${op.type} の途中です (${op.current.action === 'merge' ? `merge ${op.current.labels.join(' ')}` : op.current.id} を適用中)`)
   } else if (op?.type === 'rebase') {

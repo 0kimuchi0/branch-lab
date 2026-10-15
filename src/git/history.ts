@@ -30,6 +30,7 @@ import {
   subject,
   type Commit,
   type CommitId,
+  type AmOperation,
   type Editor,
   type MergeItem,
   type Operation,
@@ -1212,15 +1213,18 @@ export function saveEditor(repo: Repo, text?: string): OperationResult {
 
 // ---- --continue / --abort / --skip ----
 
-function requireOperation(repo: Repo, type: Operation['type']): Operation {
+/** merge・cherry-pick・revert・rebase (am は patch.ts で扱う)。 */
+type HistoryOperationType = 'merge' | SequenceType
+
+function requireOperation(repo: Repo, type: HistoryOperationType): Exclude<Operation, AmOperation> {
   const op = repo.operation
   if (op?.type !== type) {
     throw new GitError(`error: 進行中の ${type} はありません`)
   }
-  return op
+  return op as Exclude<Operation, AmOperation>
 }
 
-export function continueOperation(repo: Repo, type: Operation['type']): OperationResult {
+export function continueOperation(repo: Repo, type: HistoryOperationType): OperationResult {
   const op = requireOperation(repo, type)
   requireNoConflicts(repo)
   if (op.type === 'merge') return commit(repo)
@@ -1270,7 +1274,7 @@ export function skipOperation(repo: Repo, type: SequenceType): OperationResult {
   )
 }
 
-export function abortOperation(repo: Repo, type: Operation['type']): OperationResult {
+export function abortOperation(repo: Repo, type: HistoryOperationType): OperationResult {
   const op = requireOperation(repo, type)
   if (op.type === 'merge') {
     const tree = headTree(repo)

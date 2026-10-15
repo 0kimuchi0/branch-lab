@@ -51,6 +51,7 @@ import {
 import { getConfig, listConfig, setConfig, unsetConfig } from './config'
 import { gitClone } from './clone'
 import { log } from './log'
+import { amAbort, amContinue, amShowCurrentPatch, amSkip, gitAm, gitApply, gitFormatPatch } from './patch'
 import { sparseAdd, sparseDisable, sparseInit, sparseList, sparseSet } from './sparse'
 import { notesAdd, notesAppend, notesCopy, notesEdit, notesList, notesRemove, notesShow } from './notes'
 import { rerereCommand } from './rerere'
@@ -132,6 +133,8 @@ export const HELP_TEXT = [
   '  notes add [-m "…"] [<コミット>] / append / edit / show / list / remove / copy',
   '  sparse-checkout init / set <ディレクトリ>... / add / list / disable   (作業ディレクトリに出すファイルを絞る)',
   '  clone [-b <ブランチ>] [--recurse-submodules] [--sparse] <URL> [<ディレクトリ>]   (リモートの URL から別のリポジトリを作る)',
+  '  format-patch [-<数>] [-o <ディレクトリ>] [--stdout] [<起点> | <A>..<B>]   (コミットをパッチファイルにする)',
+  '  apply [--check] [--index | --cached] [-R] <パッチ> / am [-3] <パッチ>... / am --continue / --skip / --abort',
   '  submodule add <URL> [<パス>] / submodule [status] / init / update [--init] [--remote] / deinit / foreach <コマンド>',
   '  worktree add [-b <ブランチ>] [--detach] <パス> [<コミット>] / worktree list / worktree remove [-f] <パス>',
   '  remote [-v] / remote add <名前> <URL> / remove / rename / set-url / get-url',
@@ -939,6 +942,49 @@ function runGitCommand(repo: Repo, name: string, args: readonly string[], raw: s
       return runLog(repo, args)
     case 'notes':
       return runNotes(repo, args)
+    case 'format-patch': {
+      const expanded = args.flatMap((arg) => (/^-\d+$/.test(arg) ? ['--count', arg.slice(1)] : [arg]))
+      const parsed = parseArgs(expanded, {
+        flags: ['--stdout', '-n', '-N'],
+        values: ['-o', '--count', '--start-number'],
+        aliases: { '--output-directory': '-o', '--numbered': '-n', '--no-numbered': '-N' },
+      })
+      atMost(parsed, 1, 'git format-patch [-<数>] [-o <ディレクトリ>] [--stdout] [<起点> | <A>..<B>]')
+      const count = parsed.values.get('--count')
+      const outputDirectory = parsed.values.get('-o')
+      const start = parsed.values.get('--start-number')
+      return gitFormatPatch(repo, parsed.positional[0], {
+        ...(count === undefined ? {} : { count: Number(count) }),
+        ...(outputDirectory === undefined ? {} : { outputDirectory }),
+        ...(start === undefined ? {} : { startNumber: Number(start) }),
+        ...(parsed.flags.has('-n') ? { numbered: true } : parsed.flags.has('-N') ? { numbered: false } : {}),
+        stdout: parsed.flags.has('--stdout'),
+      })
+    }
+    case 'apply': {
+      const parsed = parseArgs(args, { flags: ['--check', '--index', '--cached', '-R'], aliases: { '--reverse': '-R' } })
+      return gitApply(repo, [...parsed.positional, ...(parsed.paths ?? [])], {
+        check: parsed.flags.has('--check'),
+        index: parsed.flags.has('--index'),
+        cached: parsed.flags.has('--cached'),
+        reverse: parsed.flags.has('-R'),
+      })
+    }
+    case 'am': {
+      const parsed = parseArgs(args, {
+        flags: ['-3', '--continue', '--skip', '--abort', '--quit', '--show-current-patch'],
+        aliases: { '--3way': '-3', '--resolved': '--continue', '-r': '--continue' },
+      })
+      if (parsed.flags.has('--continue')) return amContinue(repo)
+      if (parsed.flags.has('--skip')) return amSkip(repo)
+      if (parsed.flags.has('--abort')) return amAbort(repo)
+      if (parsed.flags.has('--show-current-patch')) return amShowCurrentPatch(repo)
+      if (parsed.flags.has('--quit')) {
+        if (repo.operation?.type !== 'am') throw new GitError('fatal: Resolve operation not in progress, we are not resuming.')
+        return { repo: { ...repo, operation: null }, output: '' }
+      }
+      return gitAm(repo, [...parsed.positional, ...(parsed.paths ?? [])], { threeWay: parsed.flags.has('-3') })
+    }
     case 'sparse-checkout': {
       const [sub, ...rest] = args
       const parsed = parseArgs(rest, { flags: ['--cone', '--no-cone'] })
@@ -1370,6 +1416,22 @@ function runPendingExec(result: CommandResult): CommandResult {
   return { repo, output: lines.join('\n'), ok: true }
 }
 
+function runRedirected(repo: Repo, input: string, tokens: readonly Token[], redirect: number): CommandResult {
+  const target = tokens.slice(redirect + 1)
+  if (target.length !== 1) return { repo, output: '使い方: <コマンド> > <ファイル>', ok: false }
+  const command = input.slice(0, input.lastIndexOf(tokens[redirect]?.value === '>>' ? '>>' : '>')).trim()
+  const ran = executeOnce(repo, command)
+  if (!ran.ok) return ran
+  try {
+    const text = ran.output === '' ? '' : `${ran.output}\n`
+    const written = writeFile(ran.repo, (target[0] as Token).value, text, tokens[redirect]?.value === '>>')
+    return { repo: written.repo, output: '', ok: true }
+  } catch (error) {
+    if (error instanceof GitError) return { repo, output: error.message, ok: false }
+    throw error
+  }
+}
+
 function executeOnce(repo: Repo, input: string): CommandResult {
   if (input.startsWith(EDITOR_SAVE)) return runEditorSave(repo, input)
   if (repo.editor && input.trim() !== '') {
@@ -1380,6 +1442,9 @@ function executeOnce(repo: Repo, input: string): CommandResult {
     }
   }
   const tokens = lex(input)
+  // echo 以外のコマンドの > / >> は、出力をファイルに書く (git log > log.txt など)
+  const redirect = tokens.findIndex((token) => !token.quoted && (token.value === '>' || token.value === '>>'))
+  if (redirect > 0 && tokens[0]?.value !== 'echo') return runRedirected(repo, input, tokens, redirect)
   const isGit = tokens[0]?.value === 'git' && !tokens[0].quoted
   if (isGit) tokens.shift()
 
