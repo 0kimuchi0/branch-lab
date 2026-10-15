@@ -64,6 +64,7 @@ import { amAbort, amContinue, amShowCurrentPatch, amSkip, gitAm, gitApply, gitFo
 import { sparseAdd, sparseDisable, sparseInit, sparseList, sparseSet } from './sparse'
 import { notesAdd, notesAppend, notesCopy, notesEdit, notesList, notesRemove, notesShow } from './notes'
 import { rerereCommand } from './rerere'
+import { findHelp, formatHelp, formatHelpIndex } from '../help/commands'
 import { filterBranch, type FilterBranchOptions, type FilterRunner } from './filterBranch'
 import { fsck, gc, notesPrune, prune, reflogDelete, reflogExpire } from './gc'
 import { forEachRef, showRef, updateRef } from './refs'
@@ -116,60 +117,18 @@ export interface CommandResult {
   readonly ok: boolean
 }
 
-export const HELP_TEXT = [
-  'ファイルの操作 (シェルのコマンド):',
-  '  echo "内容" > ファイル     ファイルを上書きする (>> なら追記)',
-  '  touch / cat / ls / rm [-r] / mv    作成・表示・一覧・削除・移動',
-  '  grep / sed \'s/前/後/g\' [-i] / chmod +x   検索・置換・フックを実行できるようにする',
-  '  cd <パス> / pwd            worktree・サブモジュール・clone したリポジトリの中に移動する・今いる場所を表示する',
-  '',
-  'Git のコマンド (先頭の git は省略できます。rm だけは git rm と区別します):',
-  '  status / reflog [<ブランチ>]',
-  '  log [--oneline] [--graph] [--all] [-n <数>] [--format=<書式>] [--first-parent] [--merges] [--grep=<語>]',
-  '      [--reverse] [-p] [--stat] [<範囲 A..B / A...B>] [-- <パス>]',
-  '  blame [-L <開始>,<終了>] <ファイル> [<コミット>]',
-  '  diff [--staged] [<コミット> [<コミット>]] [--stat] [-- <ファイル>] / show [<コミット>]',
-  '  add <ファイル>... / add .        restore [--staged] <ファイル>...',
-  '  commit [-m "メッセージ"] [-a] [--allow-empty] [--amend] [--no-edit]',
-  '  (-m を付けないとエディタが開きます。merge・revert・--continue なども同じです)',
-  '  branch [<名前> [<起点>]] / branch -d <名前> / branch -m <新しい名前>',
-  '  switch <名前> / switch - / switch -c <名前> / switch --detach <コミット>',
-  '  checkout <名前|コミット> / checkout -b <名前>',
-  '  merge [--no-ff] [--no-edit] [-s ours|octopus] [-X ours|theirs] <ブランチ>... (2 つ以上なら octopus)',
-  '  rebase [-i] [-r] [-x <コマンド>] [-X ours|theirs] <ブランチ>',
-  '  cherry-pick [-e] [-m <親>] [-X …] [--allow-empty] <コミット>... / revert [--no-edit] [-m <親>] [-X …] <コミット>...',
-  '  reset [--soft | --mixed | --hard] [<コミット>]',
-  '  tag [-a] [-m "…"] [-f] <タグ> [<コミット>] / tag -l [<パターン>] / tag -d <タグ>',
-  '  bisect start [<悪い> [<良い>]] / bisect good / bad / skip / reset / log / run [!] <コマンド>',
-  '  stash [push [-m "…"] [-u] [-k]] / stash list / show [-p] / apply / pop [--index] / drop / clear / branch',
-  '  push [-u] [-f] [--tags] [<リモート> [<ブランチ|タグ>]] / push <リモート> --delete <名前>',
-  '  fetch [<リモート> | --all] / pull [--rebase | --no-rebase] [<リモート> [<ブランチ>]]',
-  '  config <キー> [<値>] / config --unset <キー> / config --list   (rerere.enabled・pull.rebase・merge.ff など)',
-  '  rerere [status | diff | remaining | forget <パス> | clear]   (git config rerere.enabled true で有効)',
-  '  notes add [-m "…"] [<コミット>] / append / edit / show / list / remove / copy',
-  '  sparse-checkout init / set <ディレクトリ>... / add / list / disable   (作業ディレクトリに出すファイルを絞る)',
-  '  clone [-b <ブランチ>] [--recurse-submodules] [--sparse] <URL> [<ディレクトリ>]   (リモートの URL から別のリポジトリを作る)',
-  '  format-patch [-<数>] [-o <ディレクトリ>] [--stdout] [<起点> | <A>..<B>]   (コミットをパッチファイルにする)',
-  '  apply [--check] [--index | --cached] [-R] <パッチ> / am [-3] <パッチ>... / am --continue / --skip / --abort',
-  '  cherry [-v] [<上流> [<先端>]] / range-diff <A>...<B> | <基点> <A> <B> | <範囲1> <範囲2>   (パッチを比べる)',
-  '  bundle create <ファイル> <リビジョン>... / bundle verify / list-heads / unbundle <ファイル>   (clone・fetch・pull の元にもできる)',
-  '  submodule add <URL> [<パス>] / submodule [status] / init / update [--init] [--remote] / deinit / foreach <コマンド>',
-  '      (status・update・foreach は --recursive で、サブモジュールの中のサブモジュールにも行う)',
-  '  worktree add [-b <ブランチ>] [--detach] <パス> [<コミット>] / worktree list / worktree remove [-f] <パス>',
-  '  remote [-v] / remote add <名前> <URL> / remove / rename / set-url / get-url',
-  '  gc [--prune=now] / prune [-n] / fsck [--unreachable] [--no-reflogs]   (たどれないコミットを調べる・消す)',
-  '  reflog expire --expire=now --all / reflog delete <参照>@{<n>}   (reflog のエントリを消す)',
-  '  replace <コミット> <置き換え先> / replace --graft <コミット> [<親>...] / replace -d <コミット> / replace -l',
-  '  filter-branch [--tree-filter | --index-filter | --msg-filter | --parent-filter <コマンド>]',
-  '      [--subdirectory-filter <ディレクトリ>] [--prune-empty] [--tag-name-filter cat] [-f] [-- --all | <範囲>]',
-  '  update-ref [-d] <参照> [<コミット>] / for-each-ref [<パターン>] / show-ref   (refs/original/ なども扱う)',
-  '  (merge / rebase / cherry-pick / revert は --continue・--abort が使えます)',
-  '',
-  '<コミット> の例: C1, main, v1.0, origin/main, HEAD~1, HEAD^2, HEAD@{1}, main@{2}',
-  '',
-  'このアプリ独自のコマンド:',
-  '  teammate [<リモート>] [<ブランチ>]   他の人がリモートに push したことにする',
-].join('\n')
+/** help (引数なし) で表示する、コマンドの一覧。 */
+export const HELP_TEXT = formatHelpIndex()
+
+/** help [<コマンド>] / git help [<コマンド>] */
+function runHelp(repo: Repo, args: readonly string[]): OperationResult {
+  if (args.length === 0) return { repo, output: HELP_TEXT }
+  const entry = findHelp(args.join(' '))
+  if (entry === undefined) {
+    throw new GitError(`help: '${args.join(' ')}' のヘルプはありません (help でコマンドの一覧を表示します)`)
+  }
+  return { repo, output: formatHelp(entry) }
+}
 
 interface Token {
   readonly value: string
@@ -2351,9 +2310,13 @@ function executeOnce(repo: Repo, input: string): CommandResult {
 
   try {
     let result: OperationResult
-    if (!isGit && SHELL_COMMANDS.has(name)) result = runShell(repo, name, rest)
+    // <コマンド> -h / --help は、そのコマンドのヘルプを表示する
+    const asksHelp = args.length === 1 && (args[0] === '-h' || args[0] === '--help')
+    const helpEntry = asksHelp ? findHelp(isGit ? `git ${name}` : name) : undefined
+    if (helpEntry !== undefined) result = { repo, output: formatHelp(helpEntry) }
+    else if (!isGit && SHELL_COMMANDS.has(name)) result = runShell(repo, name, rest)
     else if (!isGit && name === 'teammate') result = runTeammate(repo, args)
-    else if (name === 'help') result = { repo, output: HELP_TEXT }
+    else if (name === 'help') result = runHelp(repo, args)
     else result = runGit(repo, name, args, input)
     return { ...result, ok: true }
   } catch (error) {

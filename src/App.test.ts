@@ -2,7 +2,10 @@ import { createElement } from 'react'
 import { renderToStaticMarkup } from 'react-dom/server'
 import { describe, expect, it } from 'vitest'
 import App from './App'
+import { HelpDialog } from './components/HelpDialog'
 import { PuzzlePanel } from './components/PuzzlePanel'
+import { TutorialPanel } from './components/TutorialPanel'
+import { LESSONS } from './tutorial/lessons'
 import { PUZZLES, buildPuzzle } from './puzzles/puzzles'
 import { GraphView } from './components/GraphView'
 import { computeLayout } from './graph/layout'
@@ -62,5 +65,33 @@ describe('描画のスモークテスト', () => {
     expect(html).toContain('1 / 33 問クリア')
     expect(html).toContain('正解です！')
     expect(html).toContain('目標のローカルリポジトリのコミットグラフ')
+  })
+
+  it('チュートリアルのパネルにステップと課題が描画される', () => {
+    const html = renderToStaticMarkup(
+      createElement(TutorialPanel, {
+        lessons: LESSONS,
+        lessonIndex: 0,
+        step: 1,
+        done: true,
+        completedIds: new Set<string>(),
+        onSelectLesson: () => {},
+        onStep: () => {},
+        onInsert: () => {},
+        onFinish: () => {},
+      }),
+    )
+    expect(html).toContain('レッスン 1: はじめてのコミット')
+    expect(html).toContain('今の状態を見る')
+    expect(html).toContain('<code>git status</code>')
+    expect(html).toContain('できました！')
+    expect(html).toContain(`0 / ${LESSONS.length} レッスン完了`)
+  })
+
+  it('ヘルプにコマンドの一覧が描画される', () => {
+    const html = renderToStaticMarkup(createElement(HelpDialog, { onClose: () => {}, onInsert: () => {}, onStartTutorial: () => {} }))
+    expect(html).toContain('コマンドのヘルプ')
+    expect(html).toContain('はじめての方へ')
+    expect(html).toContain('<code>git commit</code>')
   })
 })
