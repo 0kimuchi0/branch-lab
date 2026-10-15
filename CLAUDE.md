@@ -28,6 +28,10 @@ React + TypeScript + Vite、テストは Vitest。UI の文言は日本語。
   `src/git/sparse.ts`: sparse-checkout (`Repo.sparse`)。cone の外のファイルも workdir に持ち、`isSparseHidden` で見えなくする。
 - `src/git/patch.ts`: format-patch / apply / am。パッチは作業ディレクトリのファイルとして読み書きし、
   am の途中の状態は `Operation` の `AmOperation`。`src/git/compare.ts`: cherry / range-diff (行番号を除いた差分で比べる)。
+- フック: `.git` の中のファイルは `Repo.gitFiles` (作業ディレクトリには入れない)。`commands.ts` の `runHook` が
+  フックの各行をコマンドとして実行し、`runCommit`・`runGit` (push / rebase / switch / merge など) から呼ぶ。
+- `src/git/bundle.ts`: bundle。バンドルは作業ディレクトリのファイルで、clone・fetch・pull の元にできる。
+  `git switch --orphan` のあとの「まだコミットのないブランチ」は、HEAD がまだないブランチを指す状態で表す (`headCommitIdOrNull`)。
 - `src/git/inspect.ts`: diff / show / blame。`src/git/bisect.ts`: bisect (状態は `Repo.bisect`)。`src/git/stash.ts`: stash (コミットにはせず `Repo.stash` に持つ)。
   `src/git/tag.ts`: tag。
 - reflog: HEAD やブランチを動かす処理は `logRefs(before, after, メッセージ)` で `Repo.reflogs` に記録する
@@ -78,6 +82,6 @@ main に push すると https://branch-lab-dun.vercel.app にデプロイされ�
 
 ## 今後の予定
 
-- フック (`pre-commit`・`commit-msg` など) の模擬
-- `bundle`
-- `switch --orphan`
+- worktree と submodule の入れ子
+- `gc` / `fsck` / `prune`
+- `replace` と `filter-branch`

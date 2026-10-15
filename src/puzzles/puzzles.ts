@@ -455,6 +455,56 @@ export const PUZZLES: readonly Puzzle[] = [
     ],
     solutions: [['git am mail/0001-挨拶を追加.patch']],
     check: (repo) => repo.commits[repo.branches['main'] ?? '']?.message === '挨拶を追加',
+  },  {
+    id: 'hooks',
+    title: 'コミットのルールをフックで守る',
+    description:
+      'チームでは、コミットメッセージに課題の番号 (#12 など) を書く決まりです。番号のないメッセージを拒む commit-msg フックを作って有効にし、そのうえで「#12 ログインを追加」というコミットを作りましょう (login.html を追加します)。',
+    hint: 'echo \'grep -qE "#[0-9]+" "$1" || exit 1\' > .git/hooks/commit-msg でフックを書き、chmod +x .git/hooks/commit-msg で有効にします。$1 にはメッセージを書いたファイルの名前が入ります。',
+    setup: [],
+    solutions: [
+      [
+        `echo 'grep -qE "#[0-9]+" "$1" || exit 1' > .git/hooks/commit-msg`,
+        'chmod +x .git/hooks/commit-msg',
+        'echo "<form></form>" > login.html',
+        'git add login.html',
+        'git commit -m "#12 ログインを追加"',
+      ],
+    ],
+    check: (repo) => {
+      const hook = repo.gitFiles['hooks/commit-msg']
+      if (!hook?.executable) return false
+      // 番号のないメッセージでのコミットが、本当に拒まれるか試す
+      return !executeCommand(repo, 'git commit --allow-empty -m "番号なし"').ok
+    },
+  },
+  {
+    id: 'orphan',
+    title: '履歴のないブランチを作る',
+    description:
+      'プロジェクトのサイトを gh-pages ブランチで公開します。main の履歴とは関係ないので、--orphan で履歴のない gh-pages ブランチを作り、index.html だけを「サイトを公開」としてコミットしましょう。',
+    hint: 'git switch --orphan gh-pages で、ステージも空の新しいブランチに移ります。ファイルを作って git add し、コミットすると、親のないコミット (root-commit) ができます。',
+    setup: [...change('app.txt', '機能 A', '機能 A')],
+    solutions: [
+      ['git switch --orphan gh-pages', 'echo "<h1>BranchLab</h1>" > index.html', 'git add index.html', 'git commit -m "サイトを公開"'],
+    ],
+    check: (repo) => {
+      const pages = repo.commits[repo.branches['gh-pages'] ?? '']
+      return pages !== undefined && pages.parents.length === 0 && Object.keys(pages.tree).join() === 'index.html'
+    },
+  },
+  {
+    id: 'bundle',
+    title: 'ファイルでリポジトリを渡す',
+    description:
+      'ネットワークにつながらない環境の人に、main の履歴をファイルで渡します。git bundle で main を repo.bundle にまとめ、そのファイルから ../offline に clone できることを確かめましょう。',
+    hint: 'git bundle create repo.bundle main でファイルにまとめ、git bundle verify repo.bundle で確かめます。git clone repo.bundle ../offline で、そのファイルから clone できます。',
+    setup: [...change('app.txt', '機能 A', '機能 A'), ...change('app.txt', '機能 B', '機能 B')],
+    solutions: [['git bundle create repo.bundle main', 'git clone repo.bundle ../offline']],
+    check: (repo) => {
+      const offline = repo.clones['~/offline']
+      return (repo.workdir['repo.bundle'] ?? '').startsWith('# v2 git bundle') && offline?.branches['main'] === repo.branches['main']
+    },
   },
 ]
 
