@@ -2,7 +2,7 @@ import { useMemo, type ReactNode } from 'react'
 import { getCommit, type Repo } from '../git/model'
 import { changedPaths } from '../git/tree'
 import { computeLayout, computeRemoteLayout } from '../graph/layout'
-import { remoteNames, stagedFiles, workdirFiles, worktreeRows } from '../view/workspace'
+import { hookRows, remoteNames, stagedFiles, workdirFiles, worktreeRows } from '../view/workspace'
 import { FileArea } from './FileArea'
 import { GraphView } from './GraphView'
 
@@ -64,9 +64,10 @@ export function Workspace({ repo }: { readonly repo: Repo }) {
   const workdir = useMemo(() => workdirFiles(repo), [repo])
   const staged = useMemo(() => stagedFiles(repo), [repo])
   const worktrees = useMemo(() => worktreeRows(repo), [repo])
+  const hooks = useMemo(() => hookRows(repo), [repo])
   const many = worktrees.length > 1
   // worktree が複数あるときと、サブモジュールの中にいるときは、作業ディレクトリの場所を出す
-  const showPath = many || repo.idPrefix !== undefined
+  const showPath = many || repo.home !== undefined
 
   return (
     <div className="workspace">
@@ -108,6 +109,17 @@ export function Workspace({ repo }: { readonly repo: Repo }) {
               <li key={row.path}>
                 <code>{row.path}</code> {row.checkedOut}
                 {row.current && <span className="stash-files">← 今いる場所</span>}
+              </li>
+            ))}
+          </ul>
+        </Area>
+      )}
+      {hooks.length > 0 && (
+        <Area title="フック" hint=".git/hooks (chmod +x で有効)" className="area-stash">
+          <ul className="stash-list">
+            {hooks.map((hook) => (
+              <li key={hook.name}>
+                <code>{hook.name}</code> {hook.executable ? '有効' : '実行できない (chmod +x していない)'}
               </li>
             ))}
           </ul>

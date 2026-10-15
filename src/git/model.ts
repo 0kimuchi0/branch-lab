@@ -112,6 +112,50 @@ export function joinNames(names: readonly string[]): string {
   return `${names.slice(0, -1).join(', ')} and ${names.at(-1)}`
 }
 
+/** パッチの 1 つのハンク (@@ から始まる部分)。newline が false の行は、末尾に改行がない。 */
+export interface Hunk {
+  readonly oldStart: number
+  readonly oldCount: number
+  readonly newStart: number
+  readonly newCount: number
+  readonly lines: ReadonlyArray<{ readonly type: ' ' | '-' | '+'; readonly text: string; readonly newline: boolean }>
+}
+
+/** パッチの 1 つのファイルの変更。 */
+export interface FilePatch {
+  readonly path: string
+  readonly newFile: boolean
+  readonly deleted: boolean
+  readonly hunks: readonly Hunk[]
+}
+
+/** git am で取り込む 1 通のパッチ。 */
+export interface AmPatch {
+  /** 読んだファイルの名前。 */
+  readonly name: string
+  /** format-patch の From 行にある、元のコミット。 */
+  readonly source?: CommitId
+  readonly message: string
+  /** パッチの全文 (--show-current-patch で表示する)。 */
+  readonly raw: string
+  readonly files: readonly FilePatch[]
+}
+
+/** git am の途中の状態。 */
+export interface AmOperation {
+  readonly type: 'am'
+  /** 当てられずに止まっているパッチ。 */
+  readonly current: AmPatch | null
+  /** これから当てるパッチ。 */
+  readonly todo: readonly AmPatch[]
+  readonly origHead: CommitId
+  readonly branch: string | null
+  /** 当て終わったパッチの数。 */
+  readonly done: number
+  /** -3: 当てられなければ 3-way マージにする。 */
+  readonly threeWay: boolean
+}
+
 /** 途中で止まっている操作 (コンフリクトの解消待ちなど)。 */
 export type Operation =
   | {
@@ -120,6 +164,7 @@ export type Operation =
       readonly message: string
     }
   | SequenceOperation
+  | AmOperation
 
 /** エディタで書いたメッセージを付けて作るコミット。 */
 export interface PendingCommit {
@@ -142,7 +187,13 @@ export interface ReflogEntry {
 /** エディタを保存して閉じたあとに続ける処理。 */
 export type AfterEdit =
   /** コミットを作り、operation をこの値にする。 */
-  | { readonly kind: 'commit'; readonly commit: PendingCommit; readonly operation: Operation | null }
+  | {
+      readonly kind: 'commit'
+      readonly commit: PendingCommit
+      readonly operation: Operation | null
+      /** git commit で開いたエディタなら true (保存したときに commit-msg / post-commit のフックを実行する)。 */
+      readonly verify?: boolean
+    }
   /**
    * コミットを作り、cherry-pick / revert / rebase の続きを実行する。
    * stop なら続きは実行せずに止まる (rebase -i の edit)。
@@ -160,6 +211,8 @@ export type AfterEdit =
       readonly target: CommitId
       readonly force: boolean
     }
+  /** git notes add / edit でメッセージを書いた場合。 */
+  | { readonly kind: 'note'; readonly target: CommitId }
   /** rebase -i の todo を読んで rebase を始める。 */
   | {
       readonly kind: 'todo'
@@ -173,7 +226,7 @@ export type AfterEdit =
 /** 開いているエディタ。Git がエディタを開いて、閉じられるのを待っている状態。 */
 export interface Editor {
   /** 編集しているファイルの名前 (表示用)。 */
-  readonly file: 'COMMIT_EDITMSG' | 'MERGE_MSG' | 'TAG_EDITMSG' | 'git-rebase-todo'
+  readonly file: 'COMMIT_EDITMSG' | 'MERGE_MSG' | 'TAG_EDITMSG' | 'NOTES_EDITMSG' | 'git-rebase-todo'
   /** エディタを開いたときの内容。 */
   readonly text: string
   readonly after: AfterEdit
@@ -266,6 +319,29 @@ export interface Repo {
   readonly libraries: Readonly<Record<string, Library>>
   /** コミット ID の頭文字 (既定は C)。 */
   readonly idPrefix?: string
+  /**
+   * clone やサブモジュールとして入れ子に持つリポジトリなら、その場所 (~/teammate など)。
+   * 一番外側のリポジトリ (~/branch-lab) では undefined。
+   */
+  readonly home?: string
+  /** git clone で作ったリポジトリ (場所 → そのリポジトリ)。一番外側のリポジトリだけが持つ。 */
+  readonly clones: Readonly<Record<string, Repo>>
+  /** cd で clone したリポジトリの中にいるなら、その場所。 */
+  readonly clone: string | null
+  /**
+   * git sparse-checkout (cone モード) で作業ディレクトリに出すディレクトリ。null なら無効 (すべて出す)。
+   * 外のファイルも作業ディレクトリ (workdir) にはステージと同じ内容で持ち、ls・cat・画面では見えないようにする。
+   */
+  readonly sparse: readonly string[] | null
+  /**
+   * .git ディレクトリの中のファイルのうち、このアプリで扱うもの (hooks/pre-commit など)。
+   * キーは .git からのパス。作業ディレクトリには含めず、git add の対象にもならない。
+   */
+  readonly gitFiles: Readonly<Record<string, GitFile>>
+  /** FETCH_HEAD: 最後に fetch したもの (git merge FETCH_HEAD で使う)。description はマージメッセージに使う。 */
+  readonly fetchHead: { readonly id: CommitId; readonly description: string } | null
+  /** git notes: コミット → そのコミットに付けたメモ。 */
+  readonly notes: Readonly<Record<CommitId, string>>
 }
 
 /**
@@ -276,6 +352,44 @@ export interface Library {
   readonly remote: Remote
   readonly prefix: string
   readonly nextId: number
+}
+
+/** .git の中のファイル。executable は chmod +x で実行できるようにしたか。 */
+export interface GitFile {
+  readonly content: string
+  readonly executable: boolean
+}
+
+/** .git/ から始まるパスなら、.git からのパス。 */
+export function gitDirPath(path: string): string | null {
+  return path === '.git' || path.startsWith('.git/') ? path.slice('.git/'.length) : null
+}
+
+/** .git の中に書く。このアプリで書けるのは hooks/ と COMMIT_EDITMSG だけ。 */
+function writeGitFile(repo: Repo, inner: string, text: string, append: boolean): OperationResult {
+  if (!/^hooks\/[A-Za-z0-9._-]+$/.test(inner) && inner !== 'COMMIT_EDITMSG') {
+    throw new GitError(`.git/${inner}: このアプリで .git の中に書けるのは hooks/ のファイルだけです`)
+  }
+  const existing = repo.gitFiles[inner]
+  const content = append ? (existing?.content ?? '') + text : text
+  return {
+    repo: { ...repo, gitFiles: { ...repo.gitFiles, [inner]: { content, executable: existing?.executable ?? false } } },
+    output: '',
+  }
+}
+
+/** chmod +x / -x <ファイル>: .git/hooks のファイルを実行できるようにする (ほかのファイルには何もしない)。 */
+export function chmod(repo: Repo, mode: string, path: string): OperationResult {
+  if (mode !== '+x' && mode !== '-x' && !/^[0-7]{3,4}$/.test(mode)) throw new GitError(`chmod: 未対応のモードです: ${mode}`)
+  const inner = gitDirPath(path)
+  const executable = mode === '+x' || (/^[0-7]+$/.test(mode) && (Number.parseInt(mode.slice(-3, -2), 8) & 1) === 1)
+  if (inner === null) {
+    if (!(path in repo.workdir)) throw new GitError(`chmod: cannot access '${path}': No such file or directory`)
+    return { repo, output: '' }
+  }
+  const file = repo.gitFiles[inner]
+  if (file === undefined) throw new GitError(`chmod: cannot access '${path}': No such file or directory`)
+  return { repo: { ...repo, gitFiles: { ...repo.gitFiles, [inner]: { ...file, executable } } }, output: '' }
 }
 
 /** worktree ごとに持つ状態 (それ以外のブランチ・コミット・stash・設定などは共有する)。 */
@@ -291,6 +405,7 @@ export interface WorktreeState {
   readonly headReflog: readonly ReflogEntry[]
   readonly rererePending: RerereState['pending']
   readonly submodules: Readonly<Record<string, Repo>>
+  readonly sparse: readonly string[] | null
 }
 
 /** メインの worktree (clone したディレクトリ) のパス。 */
@@ -309,6 +424,7 @@ export function currentWorktreeState(repo: Repo): WorktreeState {
     headReflog: repo.reflogs['HEAD'] ?? [],
     rererePending: repo.rerere.pending,
     submodules: repo.submodules,
+    sparse: repo.sparse,
   }
 }
 
@@ -334,6 +450,7 @@ export function enterWorktree(repo: Repo, path: string): Repo {
     worktrees,
     submodules: target.submodules,
     submodule: null,
+    sparse: target.sparse,
   }
 }
 
@@ -413,6 +530,12 @@ export function createRepo(): Repo {
     submodules: {},
     submodule: null,
     libraries: {},
+    notes: {},
+    sparse: null,
+    clones: {},
+    clone: null,
+    gitFiles: {},
+    fetchHead: null,
     reflogs: {
       HEAD: [{ id: root.id, message: `clone: from ${REMOTE_NAME}` }],
       [DEFAULT_BRANCH]: [{ id: root.id, message: `clone: from ${REMOTE_NAME}` }],
@@ -435,12 +558,23 @@ export function createRepo(): Repo {
 // ---- 参照 ----
 
 export function headCommitId(repo: Repo): CommitId {
-  if (repo.head.type === 'detached') return repo.head.id
-  const id = repo.branches[repo.head.name]
-  if (id === undefined) {
-    throw new GitError(`ブランチ ${repo.head.name} が見つかりません`)
+  const id = headCommitIdOrNull(repo)
+  if (id === null) {
+    // switch --orphan のあと、まだ 1 つもコミットしていないブランチ (Git と同じメッセージ)
+    throw new GitError(`fatal: your current branch '${currentBranch(repo)}' does not have any commits yet`)
   }
   return id
+}
+
+/** HEAD のコミット。まだコミットのないブランチ (--orphan で作った直後) にいれば null。 */
+export function headCommitIdOrNull(repo: Repo): CommitId | null {
+  if (repo.head.type === 'detached') return repo.head.id
+  return repo.branches[repo.head.name] ?? null
+}
+
+/** まだコミットのないブランチにいるか。 */
+export function isUnborn(repo: Repo): boolean {
+  return headCommitIdOrNull(repo) === null
 }
 
 export function currentBranch(repo: Repo): string | null {
@@ -454,7 +588,8 @@ export function getCommit(repo: Repo, id: CommitId): Commit {
 }
 
 export function headTree(repo: Repo): Tree {
-  return getCommit(repo, headCommitId(repo)).tree
+  const id = headCommitIdOrNull(repo)
+  return id === null ? {} : getCommit(repo, id).tree
 }
 
 /** id とその祖先すべて。 */
@@ -500,13 +635,17 @@ export function reachableCommits(repo: Repo): Set<CommitId> {
     ...Object.values(repo.tags).map((tag) => tag.target),
     ...Object.values(repo.remoteBranches),
   ]
-  tips.push(headCommitId(repo))
+  const headId = headCommitIdOrNull(repo)
+  if (headId !== null) tips.push(headId)
+  if (repo.fetchHead !== null) tips.push(repo.fetchHead.id)
   if (repo.operation?.type === 'merge') tips.push(repo.operation.theirs)
   if (repo.bisect) tips.push(...(repo.bisect.bad === null ? [] : [repo.bisect.bad]), ...repo.bisect.good)
   for (const state of [currentWorktreeState(repo), ...Object.values(repo.worktrees)]) {
-    tips.push(state.head.type === 'branch' ? (repo.branches[state.head.name] as CommitId) : state.head.id)
+    const stateHead = state.head.type === 'branch' ? repo.branches[state.head.name] : state.head.id
+    if (stateHead !== undefined) tips.push(stateHead)
     const op = state.operation
     if (op?.type === 'merge') tips.push(op.theirs)
+    else if (op?.type === 'am') tips.push(op.origHead)
     else if (op) tips.push(op.origHead, ...Object.values(op.labels ?? {}))
     if (state.bisect) tips.push(...(state.bisect.bad === null ? [] : [state.bisect.bad]), ...state.bisect.good)
   }
@@ -560,6 +699,10 @@ export function resolveRef(repo: Repo, ref: string): CommitId {
   let id: CommitId
   if (reflogRef) id = resolveReflogRef(repo, reflogRef[1] ?? '', Number(reflogRef[2]))
   else if (base === 'HEAD' || base === '@') id = headCommitId(repo)
+  else if (base === 'FETCH_HEAD') {
+    if (repo.fetchHead === null) throw new GitError("fatal: ambiguous argument 'FETCH_HEAD': unknown revision")
+    id = repo.fetchHead.id
+  }
   else if (base in repo.tags) id = (repo.tags[base] as Tag).target
   else if (base in repo.branches) id = repo.branches[base] as CommitId
   else if (base in repo.remoteBranches) id = repo.remoteBranches[base] as CommitId
@@ -684,7 +827,11 @@ export function carryChanges(
   const tracked = dirty.filter((path) => path in head || path in repo.index)
   const untracked = dirty.filter((path) => !tracked.includes(path))
 
-  const overwritten = tracked.filter((path) => nextTree[path] !== head[path])
+  // 変更が切り替え先と同じ内容なら、上書きにはならない (Git と同じ)
+  const overwritten = tracked.filter(
+    (path) =>
+      nextTree[path] !== head[path] && !(repo.index[path] === nextTree[path] && repo.workdir[path] === nextTree[path]),
+  )
   if (overwritten.length > 0) {
     throw new GitError(
       [
@@ -738,6 +885,8 @@ export function writeFile(
   text: string,
   append: boolean,
 ): OperationResult {
+  const inner = gitDirPath(path)
+  if (inner !== null) return writeGitFile(repo, inner, text, append)
   validatePath(path)
   if (Object.keys(repo.workdir).some((other) => other.startsWith(`${path}/`)) || isSubmodulePath(repo, path)) {
     throw new GitError(`${path} はディレクトリです`)
@@ -746,32 +895,82 @@ export function writeFile(
   if (inSubmodule !== null) {
     throw new GitError(`${path} はサブモジュール '${inSubmodule}' の中です (cd ${inSubmodule} で中に移動してください)`)
   }
-  const content = append ? (repo.workdir[path] ?? '') + text : text
+  // sparse-checkout で出していないファイルは、作業ディレクトリにないものとして書く
+  const base = isSparseHidden(repo, path) ? '' : (repo.workdir[path] ?? '')
+  const content = append ? base + text : text
   return { repo: { ...repo, workdir: withFile(repo.workdir, path, content) }, output: '' }
 }
 
 export function touchFile(repo: Repo, path: string): OperationResult {
-  if (path in repo.workdir && !isSubmodulePath(repo, path)) return { repo, output: '' }
+  const inner = gitDirPath(path)
+  if (inner !== null) return inner in repo.gitFiles ? { repo, output: '' } : writeGitFile(repo, inner, '', false)
+  if (path in repo.workdir && !isSubmodulePath(repo, path) && !isSparseHidden(repo, path)) return { repo, output: '' }
   return writeFile(repo, path, '', false)
 }
 
 export function readFile(repo: Repo, path: string): OperationResult {
   if (isSubmodulePath(repo, path)) throw new GitError(`cat: ${path}: ディレクトリです`)
-  const content = repo.workdir[path]
+  const inner = gitDirPath(path)
+  const content = inner !== null ? repo.gitFiles[inner]?.content : isSparseHidden(repo, path) ? undefined : repo.workdir[path]
   if (content === undefined) {
     throw new GitError(`cat: ${path}: そのようなファイルはありません`)
   }
   return { repo, output: content.replace(/\n$/, '') }
 }
 
-export function listFiles(repo: Repo): OperationResult {
+export function listFiles(repo: Repo, directory?: string): OperationResult {
+  // ls .git/hooks のように .git の中も見られる (-l なら実行できるかも出す)
+  const inner = directory === undefined ? null : gitDirPath(directory.replace(/\/+$/, ''))
+  if (inner !== null) {
+    const prefix = inner === '' ? '' : `${inner}/`
+    return {
+      repo,
+      output: Object.keys(repo.gitFiles)
+        .filter((path) => path.startsWith(prefix))
+        .map((path) => path.slice(prefix.length))
+        .sort()
+        .join('\n'),
+    }
+  }
+  if (directory !== undefined) {
+    const prefix = `${directory.replace(/\/+$/, '')}/`
+    return {
+      repo,
+      output: Object.keys(repo.workdir)
+        .filter((path) => path.startsWith(prefix) && !isSparseHidden(repo, path))
+        .map((path) => path.slice(prefix.length))
+        .sort()
+        .join('\n'),
+    }
+  }
   return {
     repo,
     output: Object.keys(repo.workdir)
+      .filter((path) => !isSparseHidden(repo, path))
       .sort()
       .map((path) => (isSubmodulePath(repo, path) ? `${path}/` : path))
       .join('\n'),
   }
+}
+
+/**
+ * sparse-checkout の cone に入るパスか。ルートのファイルと、指定したディレクトリの中、
+ * 指定したディレクトリの親ディレクトリの直下のファイルが入る (Git の cone モードと同じ)。
+ */
+export function inSparseCone(dirs: readonly string[], path: string): boolean {
+  const parent = path.includes('/') ? path.slice(0, path.lastIndexOf('/')) : ''
+  if (parent === '') return true
+  return dirs.some((dir) => path.startsWith(`${dir}/`) || dir === parent || dir.startsWith(`${parent}/`))
+}
+
+/** sparse-checkout で作業ディレクトリに出していないファイルか (変更したファイルは出す)。 */
+export function isSparseHidden(repo: Repo, path: string): boolean {
+  return (
+    repo.sparse !== null &&
+    !inSparseCone(repo.sparse, path) &&
+    path in repo.index &&
+    repo.workdir[path] === repo.index[path]
+  )
 }
 
 /** path がサブモジュール (gitlink) の位置か。 */
@@ -787,8 +986,15 @@ export function submoduleContaining(repo: Repo, path: string): string | null {
 
 /** シェルの rm。作業ディレクトリからだけ削除する。 */
 export function removeFile(repo: Repo, path: string): OperationResult {
+  const inner = gitDirPath(path)
+  if (inner !== null) {
+    if (!(inner in repo.gitFiles)) throw new GitError(`rm: ${path}: そのようなファイルはありません`)
+    const gitFiles = { ...repo.gitFiles }
+    delete gitFiles[inner]
+    return { repo: { ...repo, gitFiles }, output: '' }
+  }
   if (isSubmodulePath(repo, path)) throw new GitError(`rm: ${path} を削除できません: ディレクトリです`)
-  if (!(path in repo.workdir)) {
+  if (!(path in repo.workdir) || isSparseHidden(repo, path)) {
     throw new GitError(`rm: ${path}: そのようなファイルはありません`)
   }
   return { repo: { ...repo, workdir: withFile(repo.workdir, path, undefined) }, output: '' }
@@ -917,8 +1123,8 @@ export function logRefs(
   const add = (name: string, id: CommitId) => {
     reflogs[name] = [{ id, message }, ...(reflogs[name] ?? [])]
   }
-  const headId = headCommitId(after)
-  if (options.forceHead || headId !== headCommitId(before)) add('HEAD', headId)
+  const headId = headCommitIdOrNull(after)
+  if (headId !== null && (options.forceHead || headId !== headCommitIdOrNull(before))) add('HEAD', headId)
   const current = currentBranch(after)
   for (const [name, id] of Object.entries(after.branches)) {
     if (before.branches[name] !== id || (options.forceBranch && name === current)) add(name, id)
@@ -971,7 +1177,8 @@ export function subject(message: string): string {
 
 export function commitSummary(commit: Commit, branch: string | null): string {
   const where = branch ?? 'detached HEAD'
-  return `[${where} ${commit.id}] ${subject(commit.message)}`
+  // 親のない最初のコミットには (root-commit) を付ける (Git と同じ)
+  return `[${where}${commit.parents.length === 0 ? ' (root-commit)' : ''} ${commit.id}] ${subject(commit.message)}`
 }
 
 /**
@@ -1024,6 +1231,8 @@ export interface CommitOptions {
   readonly amend?: boolean
   /** --no-edit: エディタを開かず、既定のメッセージ (amend なら元のメッセージ) を使う。 */
   readonly noEdit?: boolean
+  /** エディタに最初から入れておくメッセージ (git commit --squash の "squash! 件名")。 */
+  readonly template?: string
 }
 
 /** コミットを作る。output は git commit の 1 行目と同じ形。 */
@@ -1069,21 +1278,25 @@ export function commit(repo: Repo, options: CommitOptions = {}): OperationResult
   }
   requireNoConflicts(staged)
 
-  const headId = headCommitId(staged)
-  const head = getCommit(staged, headId)
+  // switch --orphan で作ったばかりのブランチなら、親のない最初のコミット (root commit) になる
+  const unbornHead = headCommitIdOrNull(staged)
+  if (unbornHead === null && options.amend) throw new GitError('fatal: You have nothing to amend.')
+  const headId = unbornHead ?? ''
+  const head: Commit = unbornHead === null ? { id: '', parents: [], message: '', tree: {} } : getCommit(staged, unbornHead)
   // rebase --rebase-merges の merge の行で止まっている場合は、マージコミットを作る
-  const sequence = op && op.type !== 'merge' ? op : null
+  const sequence = op && op.type !== 'merge' && op.type !== 'am' ? op : null
   const merging = sequence?.current?.action === 'merge' ? sequence.current : null
   const parents =
     options.amend ? head.parents
     : op?.type === 'merge' ? [headId, op.theirs]
     : merging && sequence ? [headId, ...merging.labels.map((label) => mergeTarget(staged, sequence, label))]
+    : unbornHead === null ? []
     : [headId]
   const parentTree = options.amend
     ? (staged.commits[head.parents[0] ?? '']?.tree ?? {})
     : head.tree
 
-  const pickedId = op && op.type !== 'merge' && op.current ? op.current.id : null
+  const pickedId = sequence?.current && sequence.current.action !== 'merge' ? sequence.current.id : null
   const picked = pickedId === null ? null : getCommit(repo, pickedId)
   if (op?.type !== 'merge' && !merging && !options.allowEmpty && treesEqual(staged.index, parentTree)) {
     if (options.amend) {
@@ -1112,10 +1325,12 @@ export function commit(repo: Repo, options: CommitOptions = {}): OperationResult
       options.amend ? 'commit (amend)'
       : op?.type === 'merge' ? 'commit (merge)'
       : (picked || merging) && op ? (op.type === 'rebase' ? 'rebase (continue)' : op.type)
+      : unbornHead === null ? 'commit (initial)'
       : 'commit',
   }
   const defaultMessage =
-    options.amend ? head.message
+    options.template !== undefined ? options.template
+    : options.amend ? head.message
     : op?.type === 'merge' ? op.message
     : merging ? mergeItemMessage(repo, merging)
     : picked && op?.type === 'revert' ? revertMessage(picked, op.mainline)
@@ -1211,7 +1426,7 @@ export function deleteBranch(repo: Repo, name: string, force = false): Operation
   const upstream = repo.upstreams[name]
   const upstreamId = upstream === undefined ? undefined : repo.remoteBranches[upstream]
   const merged =
-    isAncestor(repo, target, headCommitId(repo)) ||
+    (headCommitIdOrNull(repo) !== null && isAncestor(repo, target, headCommitId(repo))) ||
     (upstreamId !== undefined && isAncestor(repo, target, upstreamId))
   if (!force && !merged) {
     throw new GitError(
@@ -1360,6 +1575,24 @@ export function switchBranch(
 }
 
 /** HEAD をブランチから切り離して、コミットを直接指す (detached HEAD)。 */
+/**
+ * git switch --orphan <名前> / git checkout --orphan <名前> [<起点>]: 履歴のない新しいブランチに移る。
+ * ブランチは最初のコミットをしたときにできる。switch はステージと追跡しているファイルを空にし、
+ * checkout は起点 (既定は HEAD) の内容をステージと作業ディレクトリに残す。
+ */
+export function orphanBranch(repo: Repo, name: string, options: { readonly keep?: boolean; readonly startPoint?: string } = {}): OperationResult {
+  requireNoOperation(repo)
+  validateRefName(name)
+  if (name in repo.branches) throw new GitError(`fatal: ブランチ '${name}' はすでに存在します`)
+  requireBranchFree(repo, name)
+  const tree = options.keep ? getCommit(repo, resolveRef(repo, options.startPoint ?? 'HEAD')).tree : {}
+  const { index, workdir } = carryChanges(repo, tree, 'switch')
+  return {
+    repo: { ...repo, head: { type: 'branch', name }, index, workdir },
+    output: `新しいブランチ '${name}' に切り替えました (まだコミットはありません)`,
+  }
+}
+
 export function detachHead(repo: Repo, ref: string): OperationResult {
   requireNoOperation(repo)
   const id = resolveRef(repo, ref)
@@ -1524,8 +1757,15 @@ function statusLines(repo: Repo): string[] {
     lines.push(`HEAD は ${headCommitId(repo)} で切り離されています (detached HEAD)`)
   } else {
     lines.push(`ブランチ ${branch}`)
-    const tracking = trackingLine(repo, branch)
+    const tracking = isUnborn(repo) ? null : trackingLine(repo, branch)
     if (tracking) lines.push(tracking)
+    if (isUnborn(repo)) lines.push('', 'まだコミットはありません')
+  }
+  if (repo.sparse !== null) {
+    const tracked = Object.keys(repo.index)
+    const present = tracked.filter((path) => !isSparseHidden(repo, path)).length
+    const percent = tracked.length === 0 ? 100 : Math.round((present / tracked.length) * 100)
+    lines.push(`スパースチェックアウト中です (追跡しているファイルの ${percent}% が作業ディレクトリにあります)`)
   }
   if (repo.bisect) {
     lines.push(`bisect 中です ('${repo.bisect.start}' から始めました)。git bisect good / bad で判定してください`)
@@ -1536,6 +1776,11 @@ function statusLines(repo: Repo): string[] {
         ? 'マージしていないパスがあります。(コンフリクトを解消して "git commit" を実行してください)'
         : 'すべてのコンフリクトが解消されました。"git commit" でマージを完了してください',
     )
+  } else if (op?.type === 'am') {
+    lines.push('メールボックス (パッチ) を取り込んでいる途中です (git am)。')
+    if (op.current !== null) {
+      lines.push('直してステージしたら "git am --continue"、飛ばすには "git am --skip" を実行してください')
+    }
   } else if (op && op.current !== null) {
     lines.push(`${op.type} の途中です (${op.current.action === 'merge' ? `merge ${op.current.labels.join(' ')}` : op.current.id} を適用中)`)
   } else if (op?.type === 'rebase') {
@@ -1595,35 +1840,3 @@ export function status(repo: Repo): OperationResult {
   return { repo, output: statusLines(repo).join('\n') }
 }
 
-/** git log。新しいものから順に、start から (all ならすべての参照から) たどれるコミットを表示する。 */
-export function log(
-  repo: Repo,
-  options: { readonly oneline?: boolean; readonly all?: boolean; readonly start?: string } = {},
-): OperationResult {
-  const tips = options.all
-    ? [
-        ...Object.values(repo.branches),
-        ...Object.values(repo.tags).map((tag) => tag.target),
-        ...Object.values(repo.remoteBranches),
-        headCommitId(repo),
-      ]
-    : [resolveRef(repo, options.start ?? 'HEAD')]
-  const ids = new Set<CommitId>()
-  for (const tip of tips) for (const id of ancestors(repo.commits, tip)) ids.add(id)
-  const sorted = [...ids].sort((a, b) => Number(b.slice(1)) - Number(a.slice(1)))
-  const lines: string[] = []
-  for (const id of sorted) {
-    const commit = getCommit(repo, id)
-    const names = refNames(repo, id)
-    const decoration = names.length > 0 ? ` (${names.join(', ')})` : ''
-    if (options.oneline) {
-      lines.push(`${id}${decoration} ${subject(commit.message)}`)
-    } else {
-      if (lines.length > 0) lines.push('')
-      lines.push(`commit ${id}${decoration}`)
-      if (commit.parents.length > 1) lines.push(`Merge: ${commit.parents.join(' ')}`)
-      lines.push('', ...commit.message.split('\n').map((line) => (line === '' ? '' : `    ${line}`)))
-    }
-  }
-  return { repo, output: lines.join('\n') }
-}

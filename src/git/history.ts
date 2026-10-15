@@ -30,6 +30,7 @@ import {
   subject,
   type Commit,
   type CommitId,
+  type AmOperation,
   type Editor,
   type MergeItem,
   type Operation,
@@ -44,6 +45,7 @@ import {
   type TodoItem,
 } from './model'
 import { rerereClear, rerereOnConflict } from './rerere'
+import { finishNote } from './notes'
 import { finishTag } from './tag'
 import { mergeTrees, treesEqual, withFile, type Conflict, type Tree } from './tree'
 
@@ -80,6 +82,11 @@ function conflictLines(conflicts: readonly Conflict[]): string[] {
  */
 export function mergeMessage(repo: Repo, refs: string | readonly string[]): string {
   const list = typeof refs === 'string' ? [refs] : refs
+  // FETCH_HEAD は、fetch したときの説明 (branch 'main' of <URL>) を使う (Git と同じ)
+  if (list.length === 1 && list[0] === 'FETCH_HEAD' && repo.fetchHead !== null) {
+    const current = currentBranch(repo)
+    return `Merge ${repo.fetchHead.description}${current === null || current === 'main' ? '' : ` into ${current}`}`
+  }
   const groups: Array<[string, string, string[]]> = [
     ['branch', 'branches', []],
     ['tag', 'tags', []],
@@ -137,6 +144,8 @@ export interface MergeOptions {
   readonly strategy?: MergeStrategy
   /** -X ours / -X theirs */
   readonly favor?: 'ours' | 'theirs'
+  /** --allow-unrelated-histories: 共通の祖先のない履歴どうしのマージを許す。 */
+  readonly allowUnrelated?: boolean
 }
 
 /** id と、すでにマージしたコミットたちとの共通の祖先のうち、いちばん新しいもの。 */
@@ -226,6 +235,7 @@ export function merge(repo: Repo, ref: string, options: MergeOptions = {}): Oper
   // -s ours は相手の変更を一切取り込まず、履歴だけをマージする
   const strategy = options.strategy === 'ours' ? 'ours' : 'ort'
   const baseId = mergeBase(repo, ours, theirs)
+  if (baseId === null && !options.allowUnrelated) throw new GitError('fatal: refusing to merge unrelated histories')
   const baseTree = baseId === null ? {} : getCommit(repo, baseId).tree
   const result =
     strategy === 'ours'
@@ -910,6 +920,50 @@ export interface RebaseOptions {
   readonly rebaseMerges?: boolean
   /** -X ours / -X theirs (rebase では ours が付け替え先、theirs が付け替えるコミット)。 */
   readonly favor?: 'ours' | 'theirs'
+  /** --autosquash: fixup! / squash! で始まるコミットを、対象のコミットの直後に fixup / squash として並べる。 */
+  readonly autosquash?: boolean
+}
+
+const AUTOSQUASH_PREFIX = /^(fixup|squash|amend)! /
+
+/**
+ * --autosquash の並べ替え。件名が "fixup! <件名>" のコミットを、その件名 (または ID) のコミットの直後に
+ * fixup として移し、"squash! " なら squash にする。対象は todo でそれより前にあるコミットだけ。
+ */
+export function autosquashLines(repo: Repo, lines: readonly string[]): string[] {
+  const picks = lines.map((line) => /^pick (\S+) /.exec(line)?.[1] ?? null)
+  const subjects = picks.map((id) => (id === null ? '' : subject(getCommit(repo, id).message)))
+  const followers = new Map<number, number[]>()
+  const moved = new Set<number>()
+  picks.forEach((id, index) => {
+    const own = subjects[index] ?? ''
+    if (id === null || !AUTOSQUASH_PREFIX.test(own)) return
+    let target = own
+    while (AUTOSQUASH_PREFIX.test(target)) target = target.replace(AUTOSQUASH_PREFIX, '')
+    const candidates = picks.slice(0, index).map((other, i) => ({ other, i })).filter(({ other, i }) => other !== null && !moved.has(i))
+    const found =
+      candidates.find(({ i }) => subjects[i] === target) ??
+      candidates.find(({ other }) => other === target) ??
+      candidates.find(({ i }) => (subjects[i] ?? '').startsWith(target))
+    if (!found) return
+    moved.add(index)
+    followers.set(found.i, [...(followers.get(found.i) ?? []), index])
+  })
+  const out: string[] = []
+  // fixup! fixup! のように、移したコミットにさらに付くものも続けて並べる
+  const emitFollowers = (index: number) => {
+    for (const follower of followers.get(index) ?? []) {
+      const action = (subjects[follower] ?? '').startsWith('squash! ') ? 'squash' : 'fixup'
+      out.push((lines[follower] as string).replace(/^pick /, `${action} `))
+      emitFollowers(follower)
+    }
+  }
+  lines.forEach((line, index) => {
+    if (moved.has(index)) return
+    out.push(line)
+    emitFollowers(index)
+  })
+  return out
 }
 
 /** rebase で実行する todo の行 (-i ではエディタに出す内容)。 */
@@ -919,10 +973,14 @@ function rebaseTodoLines(repo: Repo, head: CommitId, onto: CommitId, options: Re
     if (options.exec === undefined) return lines
     return lines.flatMap((line) => (/^(pick|merge) /.test(line) ? [line, `exec ${options.exec}`] : [line]))
   }
-  return commitsToReplay(repo, head, onto).flatMap((id) => [
-    `pick ${id} ${subject(getCommit(repo, id).message)}`,
-    ...(options.exec === undefined ? [] : [`exec ${options.exec}`]),
-  ])
+  const picks = commitsToReplay(repo, head, onto).map((id) => `pick ${id} ${subject(getCommit(repo, id).message)}`)
+  const ordered = options.autosquash ? autosquashLines(repo, picks) : picks
+  // exec は、fixup / squash でまとめるコミットの最後のあとに入れる
+  return ordered.flatMap((line, index) => {
+    const next = ordered[index + 1]
+    const grouped = next !== undefined && /^(fixup|squash) /.test(next)
+    return [line, ...(options.exec === undefined || grouped ? [] : [`exec ${options.exec}`])]
+  })
 }
 
 /** git rebase <upstream>: 現在のブランチのコミットを upstream の先に付け替える。 */
@@ -933,7 +991,10 @@ export function rebase(repo: Repo, upstreamRef: string, options: RebaseOptions =
   const head = headCommitId(repo)
   const branch = currentBranch(repo)
 
-  if (isAncestor(repo, upstream, head) && options.exec === undefined) {
+  const reorders =
+    options.autosquash === true &&
+    commitsToReplay(repo, head, upstream).some((id) => AUTOSQUASH_PREFIX.test(subject(getCommit(repo, id).message)))
+  if (isAncestor(repo, upstream, head) && options.exec === undefined && !reorders) {
     return { repo, output: `Current branch ${branch ?? 'HEAD'} is up to date.` }
   }
   if (isAncestor(repo, head, upstream) && head !== upstream) {
@@ -1126,6 +1187,7 @@ export function saveEditor(repo: Repo, text?: string): OperationResult {
   if (after.kind === 'tag') {
     return finishTag({ ...repo, editor: null }, after.name, after.target, content)
   }
+  if (after.kind === 'note') return finishNote({ ...repo, editor: null }, after.target, content)
 
   if (after.kind === 'todo') {
     const items = parseTodo(repo, content)
@@ -1159,15 +1221,18 @@ export function saveEditor(repo: Repo, text?: string): OperationResult {
 
 // ---- --continue / --abort / --skip ----
 
-function requireOperation(repo: Repo, type: Operation['type']): Operation {
+/** merge・cherry-pick・revert・rebase (am は patch.ts で扱う)。 */
+type HistoryOperationType = 'merge' | SequenceType
+
+function requireOperation(repo: Repo, type: HistoryOperationType): Exclude<Operation, AmOperation> {
   const op = repo.operation
   if (op?.type !== type) {
     throw new GitError(`error: 進行中の ${type} はありません`)
   }
-  return op
+  return op as Exclude<Operation, AmOperation>
 }
 
-export function continueOperation(repo: Repo, type: Operation['type']): OperationResult {
+export function continueOperation(repo: Repo, type: HistoryOperationType): OperationResult {
   const op = requireOperation(repo, type)
   requireNoConflicts(repo)
   if (op.type === 'merge') return commit(repo)
@@ -1217,7 +1282,7 @@ export function skipOperation(repo: Repo, type: SequenceType): OperationResult {
   )
 }
 
-export function abortOperation(repo: Repo, type: Operation['type']): OperationResult {
+export function abortOperation(repo: Repo, type: HistoryOperationType): OperationResult {
   const op = requireOperation(repo, type)
   if (op.type === 'merge') {
     const tree = headTree(repo)

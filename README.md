@@ -18,7 +18,7 @@ npm run build    # 型チェックと本番ビルド
 画面上部のタブで 2 つのモードを切り替えられます。
 
 - **自由に試す**: clone 直後のリポジトリで、好きなコマンドを試せます。
-- **お題**: 「マージする」「コンフリクトを解消する」「コミットをまとめる」「作業を退避して急ぎの修正」「バグを入れたコミットを探す」「サブモジュールを最新にする」など 21 問。
+- **お題**: 「マージする」「コンフリクトを解消する」「コミットをまとめる」「作業を退避して急ぎの修正」「バグを入れたコミットを探す」「サブモジュールを最新にする」「チームメイトの立場で push する」「メールで届いたパッチを取り込む」「コミットのルールをフックで守る」など 29 問。
   目標のグラフと同じ履歴を作れたら正解です。コミット ID やメッセージが違っても、
   履歴の形と各コミットの由来 (コピーや revert を含む) が同じなら正解になります。
   クリアした記録はブラウザに保存されます。
@@ -43,13 +43,17 @@ URL のハッシュ (`#s=...`) には状態そのものではなく、モード�
 | --- | --- |
 | `echo "内容" > ファイル` / `>>` | ファイルを上書き / 追記する |
 | `touch` / `cat` / `ls` / `rm` | ファイルの作成・表示・一覧・削除 (`rm` は作業ディレクトリからだけ消す) |
-| `cd <パス>` / `pwd` | worktree やサブモジュールの中に移動する・今いる場所を表示する |
+| `grep [-q] [-v] [-i] [-c] [-E] <パターン> <ファイル>...` | 一致する行を表示する (なければ失敗する。フックで使う) |
+| `chmod +x <ファイル>` | `.git/hooks` のフックを実行できるようにする |
+| `cd <パス>` / `pwd` | worktree・clone したリポジトリ・サブモジュールの中に移動する・今いる場所を表示する |
 
 ### Git のコマンド
 
 | コマンド | 内容 |
 | --- | --- |
-| `status` / `log [--oneline] [--all]` | 状態と履歴を表示する |
+| `status` | 状態を表示する |
+| `log [--oneline] [--graph] [--all] [-n <数>] [--format=<書式>] [<範囲>] [-- <パス>]` | 履歴を表示する (下の「log の表示」も参照) |
+| `notes add [-f] [-m "…"] [<コミット>]` / `append` / `edit` / `show` / `list` / `remove` / `copy` | コミットを変えずにメモを付ける (`log` と `show` に表示される) |
 | `reflog [show] [<ブランチ>]` | HEAD (やブランチ) が動いた履歴を表示する |
 | `diff [--staged] [<コミット> [<コミット>]] [--stat] [--name-only] [-- <ファイル>]` | 差分を表示する (`A..B` も可) |
 | `show [<コミット>]` | コミットの内容と差分を表示する |
@@ -58,11 +62,13 @@ URL のハッシュ (`#s=...`) には状態そのものではなく、モード�
 | `restore [--staged] [--source=<コミット>] <ファイル>` | 作業ディレクトリ (または ステージ) を戻す |
 | `rm [--cached] [-f] <ファイル>` | ステージと作業ディレクトリから消す |
 | `commit [-m "…"] [-a] [--allow-empty] [--amend] [--no-edit]` | ステージの内容でコミットする (`-m` がなければエディタが開く) |
+| `commit --fixup=<コミット>` / `--squash=<コミット>` | `rebase --autosquash` でまとめるための `fixup!` / `squash!` のコミットを作る |
 | `branch [<名前> [<起点>]]` / `-d` / `-D` / `-m` / `-u` | ブランチの一覧・作成・削除・名前の変更・upstream の設定 |
+| `switch --orphan <名前>` / `checkout --orphan <名前>` | 履歴のない新しいブランチに移る (最初のコミットが root commit になる) |
 | `switch <名前>` / `-c <名前> [<起点>]` / `--detach <コミット>` / `switch -` | ブランチを切り替える (リモートにだけあるブランチは追跡ブランチを作る、`-` は直前のブランチ) |
 | `checkout <名前\|コミット>` / `-b <名前>` / `-- <ファイル>` | switch と restore を兼ねる昔からのコマンド |
 | `merge [--no-ff] [--ff-only] [--no-edit] [-s <ストラテジー>] [-X ours\|theirs] <ブランチ>...` | fast-forward またはマージコミットでマージする (2 つ以上なら octopus、`-s ours` は履歴だけをマージ) |
-| `rebase [-i] [-r] [-x <コマンド>] [-X ours\|theirs] <ブランチ>` | 現在のブランチのコミットを付け替える (`-i` は todo をエディタで編集する、`-r` / `--rebase-merges` はマージの形を保つ) |
+| `rebase [-i] [-r] [-x <コマンド>] [-X ours\|theirs] [--autosquash] <ブランチ>` | 現在のブランチのコミットを付け替える (`-i` は todo をエディタで編集する、`-r` / `--rebase-merges` はマージの形を保つ、`--autosquash` は `fixup!` / `squash!` のコミットをまとめる) |
 | `cherry-pick [-e] [-m <親>] [-X …] [--allow-empty] <コミット>...` | コミットの変更を複製する (`-m` でマージコミットも) |
 | `revert [--no-edit] [-m <親>] [-X …] <コミット>...` | コミットの変更を打ち消すコミットを作る |
 | `tag [-a] [-m "…"] [-f] <タグ> [<コミット>]` / `tag -l [<パターン>]` / `tag -d <タグ>` | タグを付ける・一覧を見る・消す |
@@ -72,6 +78,14 @@ URL のハッシュ (`#s=...`) には状態そのものではなく、モード�
 | `bisect start [<bad> [<good>...]]` / `good` / `bad` / `skip` / `reset` / `log` / `run <コマンド>` | 二分探索でバグを入れたコミットを探す (`new` / `old` も可) |
 | `config <キー> [<値>]` / `config --unset <キー>` / `config --list` | 設定を読み書きする (`rerere.enabled`・`rerere.autoUpdate`・`pull.rebase`・`pull.ff`・`merge.ff` が働く) |
 | `rerere` / `rerere status` / `diff` / `remaining` / `forget <パス>` / `clear` | コンフリクトの解決を記録し、同じコンフリクトで再利用する (`rerere.enabled` のとき) |
+| `bundle create <ファイル> <リビジョン>...` / `bundle verify` / `list-heads` / `unbundle <ファイル>` | コミットと参照を 1 つのファイルにまとめる (そのファイルから clone・fetch・pull できる) |
+| `format-patch [-<数>] [-o <ディレクトリ>] [--stdout] [<起点> \| <A>..<B>]` | コミットをパッチファイル (`0001-件名.patch`) にする |
+| `apply [--check] [--index \| --cached] [-R] <パッチ>` | パッチを作業ディレクトリ (やステージ) に当てる |
+| `am [-3] <パッチ>...` / `am --continue` / `--skip` / `--abort` / `--show-current-patch` | パッチをコミットとして取り込む |
+| `cherry [-v] [<上流> [<先端>]]` | 上流に同じ変更が入ったコミットに `-`、まだのコミットに `+` を付ける |
+| `range-diff <A>...<B>` / `<基点> <A> <B>` / `<範囲1> <範囲2>` | 2 つのコミットの並び (rebase の前後など) を対応づけて違いを見る |
+| `clone [-b <ブランチ>] [--recurse-submodules] [--sparse] <URL> [<ディレクトリ>]` | リモートの URL から別のリポジトリを作る (`cd` で中に入る) |
+| `sparse-checkout init` / `set <ディレクトリ>...` / `add` / `list` / `disable` | 作業ディレクトリに出すディレクトリを絞る (cone モード) |
 | `worktree add [-b <ブランチ>] [--detach] <パス> [<コミット>]` / `worktree list` / `worktree remove [-f] <パス>` | 作業ディレクトリをもう 1 つ作る (`cd` で移る) |
 | `submodule add [-b <ブランチ>] <URL> [<パス>]` / `submodule [status]` / `init` / `update [--init] [--remote]` / `deinit` / `foreach <コマンド>` | サブモジュールを取り込む・記録したコミットにする (`cd` で中に入る) |
 | `remote [-v]` / `remote add <名前> <URL>` / `remove` / `rename` / `set-url` / `get-url` | リモートの一覧・追加・削除・名前の変更 |
@@ -102,7 +116,24 @@ URL のハッシュ (`#s=...`) には状態そのものではなく、モード�
 `HEAD@{n}` / `main@{n}` / `@{n}` は reflog の n 個前、`@{-1}` は直前にいたブランチです
 (例: `git reset --hard HEAD@{1}` で直前の reset を取り消せます)。
 
+シェルと同じく、`&&` (成功したら次を実行)・`||` (失敗したら次を実行)・`;` でコマンドを続けて書けます。
+ダブルクォートの中では `\"` などのエスケープが使えます。
+
+`echo` 以外のコマンドでも、`> ファイル` / `>> ファイル` で出力をファイルに書けます (例: `git format-patch -2 --stdout > all.patch`)。
+
 先頭の `git` は省略できます (ただし `rm` はシェルの `rm`、`git rm` は Git の `rm` として区別します)。
+
+`log` は次のオプションに対応しています。`--graph` は本物と同じく topo-order で並べ、`*`・`|\`・`|/`・octopus の `*-.` で線を描きます。
+
+- 範囲: `A..B`・`A...B`・`^A`、`--all`・`--branches`・`--tags`・`--remotes`
+- 絞り込み: `-n <数>` / `-<数>`、`--first-parent`、`--merges` / `--no-merges`、`--grep=<パターン>` (`--invert-grep`)、`-- <パス>`
+- 表示: `--oneline`、`--pretty=oneline|short|medium|full`、`--format=<書式>` (`%h` `%H` `%s` `%b` `%B` `%d` `%D` `%p` `%P` `%N` `%n`)、
+  `-p`・`--stat`・`--name-only`、`--reverse`、`--no-decorate`、`--no-notes`
+
+`git clone https://example.com/branch-lab.git ../teammate` は、origin を `~/teammate` に clone します。
+`cd ../teammate` で移ってコミットして push すると、元のリポジトリ (`cd ../branch-lab`) から fetch / pull できます。
+`--recurse-submodules` を付けるとサブモジュールも取得し、`switch` / `checkout` / `pull` / `reset` に付ける
+(または `git config submodule.recurse true`) と、終わったあとでサブモジュールを記録したコミットにします。
 
 マージのストラテジーは `ort` (既定。`recursive`・`resolve` も同じ扱い)・`ours`・`octopus` です。
 `-X ours` / `-X theirs` は、両方が変えた箇所をコンフリクトにせずにその側で解決します
@@ -116,6 +147,29 @@ octopus マージでコンフリクトが出た場合は、本物と同じく中
 `git submodule add https://example.com/lib.git` は、その URL の模擬のリポジトリを `lib` に clone します。
 `cd lib` で中に入るとサブモジュールのリポジトリでコマンドが動き (コミット ID は `L1` のように頭文字が変わります)、
 `cd ..` で戻ると親からは `lib (new commits)` と見えるので、`git add lib` してコミットします。
+
+### フック
+
+`.git/hooks/<名前>` にこのアプリのコマンドを 1 行ずつ書き、`chmod +x` で実行できるようにすると、Git と同じ場面で実行されます。
+実行できるようにしていないフックは、本物と同じく警告を出して無視します。
+
+```
+echo 'grep -qE "#[0-9]+" "$1" || exit 1' > .git/hooks/commit-msg
+chmod +x .git/hooks/commit-msg
+```
+
+| フック | 実行する場面 | 引数 |
+| --- | --- | --- |
+| `pre-commit` | `git commit` の前 (失敗したらコミットしない) | なし |
+| `commit-msg` | メッセージを決めたあと (失敗したらコミットしない。ファイルを書き換えるとメッセージが変わる) | `$1` = `.git/COMMIT_EDITMSG` |
+| `post-commit` | コミットしたあと | なし |
+| `pre-push` | `git push` の前 (失敗したら push しない) | `$1` = リモート名、`$2` = URL |
+| `pre-rebase` | `git rebase` の前 (失敗したら rebase しない) | `$1` = 上流 |
+| `post-checkout` | `switch` / `checkout` で HEAD が動いたあと | `$1` = 前の HEAD、`$2` = 新しい HEAD、`$3` = 1 |
+| `post-merge` | `merge` / `pull` で HEAD が動いたあと | `$1` = 0 |
+
+`commit` / `push` / `rebase` は `--no-verify` でフックを飛ばせます。フックは sh と同じく、最後のコマンドの結果で成否が決まり、
+`exit <数>` と `set -e` が使えます。
 
 ### このアプリ独自のコマンド
 
@@ -131,8 +185,21 @@ octopus マージでコンフリクトが出た場合は、本物と同じく中
 - リモートはブラウザの中で模擬しています。URL には接続せず、`remote add` で追加したリモートは空のリポジトリから始まります
   (`remote remove` するとそのリモートの中身も消えます)。
 - サブモジュールの取得元も模擬で、初めて使う URL なら README.md だけのリポジトリになります。
-  サブモジュールの中のサブモジュールと worktree、`--recurse-submodules` は未対応です。
-- ファイルシステムは模擬で、`cd` で移動できるのは worktree とサブモジュールだけです。パスは `~/branch-lab` のような形です。
+  サブモジュールの中のサブモジュール、サブモジュールや clone したリポジトリの中の worktree は未対応です。
+- `clone` できるのは、リモートとサブモジュールの URL だけです。clone 先は worktree の外 (`~/teammate` など) にします。
+- ファイルシステムは模擬で、`cd` で移動できるのは worktree・clone したリポジトリ・サブモジュールだけです。パスは `~/branch-lab` のような形です。
+- `log` に作者と日時はありません (`--format` の `%an` や `%ad` などは使えません)。`--graph` の線は、
+  よくある形では本物と同じですが、複雑に交差する場合は本物と少し違うことがあります。
+- `notes` は本物ではコミット (refs/notes/commits) として保存されますが、ここでは別に持ち、push もしません。
+  `notes list` はメモの付いたコミットの ID だけを表示します。
+- `sparse-checkout` は cone モードだけです。
+- フックはシェルスクリプトではなく、このアプリのコマンドを 1 行ずつ書いたものです (`&&`・`||`・`;`・`exit`・`set -e`・`$1` などは使えます)。
+  `.git` の中で書けるのは `hooks/` のファイルだけです。`prepare-commit-msg` など、上の表にないフックは実行しません。
+- `bundle` の中身は、本物の pack (バイナリ) ではなく、コミットの JSON です。
+- `format-patch` のパッチには作者 (`From:`) と日時 (`Date:`) の行がなく、ファイル名には日本語の件名もそのまま使います。
+  `am` はパッチの元のコミットがこのリポジトリにあれば、それを由来として記録し、`-3` ではそのコミットを使って 3-way マージします。
+- `commit --fixup=amend:` / `--fixup=reword:` は未対応です。`range-diff` のコミットの対応づけは、
+  同じパッチ・同じ由来・同じ件名の順で行います (本物は差分の大きさから対応を決めます)。
 - `config` は 1 つだけで、`--global` と `--local` を区別しません。
 - `rerere` は、本物はコンフリクトの箇所 (hunk) ごとに解決を覚えますが、ここではファイル全体の内容で覚えます。
 - `blame` には作者と日時がなく、コミット ID と件名を表示します。`bisect run` のコマンドはこのアプリのコマンドで、成功なら good、失敗なら bad です
@@ -161,7 +228,14 @@ src/
     config.ts      config
     rerere.ts      rerere
     worktree.ts    worktree と cd
-    submodule.ts   submodule と、サブモジュールの中でコマンドを実行するための同期
+    submodule.ts   submodule と、入れ子のリポジトリ (clone・サブモジュール) と模擬のサーバーの同期
+    clone.ts       clone
+    log.ts         log (範囲・絞り込み・書式・--graph)
+    notes.ts       notes
+    sparse.ts      sparse-checkout
+    patch.ts       format-patch / apply / am
+    compare.ts     cherry / range-diff
+    bundle.ts      bundle
     commands.ts    入力文字列の解析と実行。規則違反は例外にせず結果として返す
   graph/
     layout.ts      コミットグラフの座標を計算する純粋関数 (ローカル・リモートの両方)
@@ -189,6 +263,6 @@ Vite として自動で認識されるので、設定ファイルはありませ
 
 ## 今後の拡張案
 
-- `clone` (別の URL から新しく clone する) と `--recurse-submodules`
-- `notes`、`sparse-checkout`
-- `log --graph` などの表示オプション
+- `worktree` と `submodule` の入れ子 (サブモジュールの中のサブモジュールなど)
+- `git gc` / `fsck` / `prune` (どこからもたどれないコミットの掃除)
+- `git replace` と `filter-branch` (履歴の書き換え)

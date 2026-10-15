@@ -64,6 +64,8 @@ export function show(repo: Repo, ref = 'HEAD', options: Omit<DiffOptions, 'only'
   const lines = [...tagHeader(repo, ref), `commit ${id}${names.length > 0 ? ` (${names.join(', ')})` : ''}`]
   if (commit.parents.length > 1) lines.push(`Merge: ${commit.parents.join(' ')}`)
   lines.push('', ...commit.message.split('\n').map((line) => (line === '' ? '' : `    ${line}`)))
+  const note = repo.notes[id]
+  if (note !== undefined) lines.push('', 'Notes:', ...note.split('\n').map((line) => `    ${line}`))
   if (commit.parents.length <= 1) {
     const parentTree = commit.parents[0] === undefined ? {} : getCommit(repo, commit.parents[0]).tree
     const diff = diffTrees(parentTree, commit.tree, options)

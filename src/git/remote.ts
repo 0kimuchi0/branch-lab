@@ -290,8 +290,14 @@ function fetchOne(repo: Repo, remoteName: string): { repo: Repo; lines: string[]
     Object.entries(repo.remoteBranches).filter(([ref]) => !ref.startsWith(prefix)),
   )
   for (const [name, id] of Object.entries(remote.branches)) remoteBranches[`${prefix}${name}`] = id
+  // FETCH_HEAD: 今のブランチの upstream (このリモートのもの)、なければこのリモートの main
+  const branch = currentBranch(repo)
+  const upstream = branch === null ? undefined : splitRemoteRef(repo, repo.upstreams[branch] ?? '')
+  const headName = upstream?.remote === remoteName ? upstream.branch : 'main'
+  const headId = remote.branches[headName]
+  const fetchHead = headId === undefined ? repo.fetchHead : { id: headId, description: `branch '${headName}' of ${remote.url}` }
   return {
-    repo: { ...repo, commits, tags, remoteBranches },
+    repo: { ...repo, commits, tags, remoteBranches, fetchHead },
     lines: lines.length === 0 ? [] : [`From ${remote.url}`, ...lines],
   }
 }

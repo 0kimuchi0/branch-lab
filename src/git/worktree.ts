@@ -47,8 +47,10 @@ function stateOf(repo: Repo, path: string): WorktreeState {
   return path === repo.worktree ? currentWorktreeState(repo) : (repo.worktrees[path] as WorktreeState)
 }
 
-/** 今いる場所のパス (サブモジュールの中ならその中)。 */
+/** 今いる場所のパス (clone したリポジトリやサブモジュールの中なら、その中)。 */
 export function currentDirectory(root: Repo): string {
+  const clone = root.clone === null ? undefined : root.clones[root.clone]
+  if (clone) return currentDirectory(clone)
   return root.submodule === null ? root.worktree : `${root.worktree}/${root.submodule}`
 }
 
@@ -58,7 +60,13 @@ export function currentDirectory(root: Repo): string {
  */
 export function changeDirectory(root: Repo, path: string | undefined): OperationResult {
   const target = resolvePath(currentDirectory(root), path ?? MAIN_WORKTREE)
-  const outside: Repo = root.submodule === null ? root : { ...root, submodule: null }
+  const outside: Repo = { ...root, submodule: null, clone: null }
+  // clone したリポジトリ (とその中のサブモジュール) に入る
+  for (const [clonePath, cloned] of Object.entries(root.clones)) {
+    if (target !== clonePath && !target.startsWith(`${clonePath}/`)) continue
+    const inner = changeDirectory({ ...cloned, submodule: null }, target)
+    return { repo: { ...outside, clones: { ...root.clones, [clonePath]: inner.repo }, clone: clonePath }, output: '' }
+  }
   const paths = worktreePaths(outside)
   if (paths.includes(target)) return { repo: enterWorktree(outside, target), output: '' }
   const worktree = paths.filter((wt) => target.startsWith(`${wt}/`)).sort((a, b) => b.length - a.length)[0]
@@ -132,6 +140,7 @@ export function worktreeAdd(
     rererePending: {},
     // サブモジュールは、新しい worktree では git submodule update --init するまで空のまま
     submodules: {},
+    sparse: null,
   }
   return {
     repo: { ...current, worktrees: { ...current.worktrees, [path]: state } },

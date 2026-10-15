@@ -378,6 +378,133 @@ export const PUZZLES: readonly Puzzle[] = [
       const tip = repo.libraries['https://example.com/lib.git']?.remote.branches['main']
       return tip !== undefined && parseGitlink(headTree(repo)['lib']) === tip
     },
+  },  {
+    id: 'clone',
+    title: 'チームメイトの立場で push する',
+    description:
+      'origin を ../teammate に clone して、チームメイトとして作業します。teammate で team.txt を追加して push し、元のリポジトリ (~/branch-lab) に戻って、その変更を pull で取り込みましょう。',
+    hint: 'git clone https://example.com/branch-lab.git ../teammate で clone し、cd ../teammate で移ります。コミットして git push したら、cd ../branch-lab で戻って git pull します。',
+    setup: [...change('app.txt', '機能 A', '機能 A'), 'git push'],
+    solutions: [
+      [
+        'git clone https://example.com/branch-lab.git ../teammate',
+        'cd ../teammate',
+        'echo "チームメイトの変更" > team.txt',
+        'git add team.txt',
+        'git commit -m "チームメイトの変更"',
+        'git push',
+        'cd ../branch-lab',
+        'git pull',
+      ],
+    ],
+    checkRemote: true,
+    check: (repo) => Object.keys(repo.clones).length > 0 && 'team.txt' in headTree(repo),
+  },
+  {
+    id: 'notes',
+    title: 'コミットを変えずにメモを付ける',
+    description:
+      '「機能 B」のコミットがレビュー済みであることを記録したいのですが、公開済みなのでコミットは書き換えられません。git notes で、そのコミットに「レビュー済み」というメモを付けましょう。',
+    hint: 'git log --oneline でコミットの ID を確かめ、git notes add -m "レビュー済み" <コミット> でメモを付けます。git log に Notes: として表示されます。',
+    setup: [...change('app.txt', '機能 A', '機能 A'), ...change('app.txt', '機能 B', '機能 B'), ...change('app.txt', '機能 C', '機能 C'), 'git push'],
+    solutions: [['git notes add -m "レビュー済み" C2']],
+    check: (repo) => (repo.notes['C2'] ?? '').includes('レビュー済み'),
+  },
+  {
+    id: 'sparse-checkout',
+    title: '必要なディレクトリだけを出す',
+    description:
+      'このリポジトリには docs・server・web のディレクトリがありますが、あなたが触るのは web だけです。sparse-checkout で、作業ディレクトリに web だけを出しましょう (ルートのファイルは残ります)。',
+    hint: 'git sparse-checkout set web で、web ディレクトリだけを出します。ls で確かめられます。git sparse-checkout disable で元に戻せます。',
+    setup: [
+      'echo "使い方" > docs/guide.md',
+      'echo "サーバー" > server/main.go',
+      'echo "画面" > web/index.html',
+      'git add .',
+      'git commit -m "プロジェクトの構成"',
+    ],
+    solutions: [['git sparse-checkout set web']],
+    check: (repo) => repo.sparse !== null && repo.sparse.length === 1 && repo.sparse[0] === 'web',
+  },  {
+    id: 'autosquash',
+    title: 'あとから直しを混ぜ込む',
+    description:
+      '「ログイン画面を追加」のコミットで、login.html の見出しを書き忘れていました。その後に「README を更新」もコミットしています。直しを commit --fixup で作り、rebase --autosquash で元のコミットに混ぜ込んで、コミットを 2 つのままにしましょう。',
+    hint: 'echo "<h1>ログイン</h1>" >> login.html で直して git add し、git commit --fixup=C1 で "fixup! ログイン画面を追加" のコミットを作ります。git rebase --autosquash C0 で、C1 の直後に fixup として並べ替えてまとめます。',
+    setup: [...change('login.html', '<form></form>', 'ログイン画面を追加'), ...change('README.md', 'ログインの説明', 'README を更新')],
+    solutions: [['echo "<h1>ログイン</h1>" >> login.html', 'git add login.html', 'git commit --fixup=C1', 'git rebase --autosquash C0']],
+    check: (repo) => {
+      const tip = repo.commits[repo.branches['main'] ?? '']
+      const first = repo.commits[tip?.parents[0] ?? '']
+      return first?.message === 'ログイン画面を追加' && (first.tree['login.html'] ?? '').includes('<h1>ログイン</h1>')
+    },
+  },
+  {
+    id: 'am',
+    title: 'メールで届いたパッチを取り込む',
+    description:
+      'リポジトリに push できない協力者から、変更がパッチファイル (mail/0001-挨拶を追加.patch) で届きました。git am で、このパッチを main のコミットとして取り込みましょう。',
+    hint: 'cat mail/0001-挨拶を追加.patch で中身を確かめられます。git am mail/0001-挨拶を追加.patch で、パッチのメッセージと変更のままコミットになります。',
+    setup: [
+      'git switch -c contributor',
+      ...change('greeting.txt', 'こんにちは', '挨拶を追加'),
+      'git format-patch -1 -o mail',
+      'git switch main',
+      'git branch -D contributor',
+      ...change('README.md', '更新', 'README を更新'),
+    ],
+    solutions: [['git am mail/0001-挨拶を追加.patch']],
+    check: (repo) => repo.commits[repo.branches['main'] ?? '']?.message === '挨拶を追加',
+  },  {
+    id: 'hooks',
+    title: 'コミットのルールをフックで守る',
+    description:
+      'チームでは、コミットメッセージに課題の番号 (#12 など) を書く決まりです。番号のないメッセージを拒む commit-msg フックを作って有効にし、そのうえで「#12 ログインを追加」というコミットを作りましょう (login.html を追加します)。',
+    hint: 'echo \'grep -qE "#[0-9]+" "$1" || exit 1\' > .git/hooks/commit-msg でフックを書き、chmod +x .git/hooks/commit-msg で有効にします。$1 にはメッセージを書いたファイルの名前が入ります。',
+    setup: [],
+    solutions: [
+      [
+        `echo 'grep -qE "#[0-9]+" "$1" || exit 1' > .git/hooks/commit-msg`,
+        'chmod +x .git/hooks/commit-msg',
+        'echo "<form></form>" > login.html',
+        'git add login.html',
+        'git commit -m "#12 ログインを追加"',
+      ],
+    ],
+    check: (repo) => {
+      const hook = repo.gitFiles['hooks/commit-msg']
+      if (!hook?.executable) return false
+      // 番号のないメッセージでのコミットが、本当に拒まれるか試す
+      return !executeCommand(repo, 'git commit --allow-empty -m "番号なし"').ok
+    },
+  },
+  {
+    id: 'orphan',
+    title: '履歴のないブランチを作る',
+    description:
+      'プロジェクトのサイトを gh-pages ブランチで公開します。main の履歴とは関係ないので、--orphan で履歴のない gh-pages ブランチを作り、index.html だけを「サイトを公開」としてコミットしましょう。',
+    hint: 'git switch --orphan gh-pages で、ステージも空の新しいブランチに移ります。ファイルを作って git add し、コミットすると、親のないコミット (root-commit) ができます。',
+    setup: [...change('app.txt', '機能 A', '機能 A')],
+    solutions: [
+      ['git switch --orphan gh-pages', 'echo "<h1>BranchLab</h1>" > index.html', 'git add index.html', 'git commit -m "サイトを公開"'],
+    ],
+    check: (repo) => {
+      const pages = repo.commits[repo.branches['gh-pages'] ?? '']
+      return pages !== undefined && pages.parents.length === 0 && Object.keys(pages.tree).join() === 'index.html'
+    },
+  },
+  {
+    id: 'bundle',
+    title: 'ファイルでリポジトリを渡す',
+    description:
+      'ネットワークにつながらない環境の人に、main の履歴をファイルで渡します。git bundle で main を repo.bundle にまとめ、そのファイルから ../offline に clone できることを確かめましょう。',
+    hint: 'git bundle create repo.bundle main でファイルにまとめ、git bundle verify repo.bundle で確かめます。git clone repo.bundle ../offline で、そのファイルから clone できます。',
+    setup: [...change('app.txt', '機能 A', '機能 A'), ...change('app.txt', '機能 B', '機能 B')],
+    solutions: [['git bundle create repo.bundle main', 'git clone repo.bundle ../offline']],
+    check: (repo) => {
+      const offline = repo.clones['~/offline']
+      return (repo.workdir['repo.bundle'] ?? '').startsWith('# v2 git bundle') && offline?.branches['main'] === repo.branches['main']
+    },
   },
 ]
 
