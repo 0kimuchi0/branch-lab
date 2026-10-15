@@ -678,6 +678,26 @@
   font-weight: 500;
 }
 
+.label-original rect {
+  fill: var(--graph-bg);
+  stroke: var(--text-muted);
+  stroke-dasharray: 2 2;
+}
+
+.label-original text {
+  fill: var(--text-muted);
+  font-weight: 500;
+}
+
+.label-replaced rect {
+  fill: color-mix(in srgb, var(--lane-2) 14%, var(--surface));
+  stroke: var(--lane-2);
+}
+
+.label-replaced text {
+  fill: var(--lane-2);
+}
+
 @keyframes node-in {
   from {
     opacity: 0;

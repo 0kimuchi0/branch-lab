@@ -16,6 +16,7 @@ import {
 import {
   GitError,
   chmod,
+  gitDirPath,
   cleanupMessage,
   configBool,
   headCommitIdOrNull,
@@ -63,6 +64,10 @@ import { amAbort, amContinue, amShowCurrentPatch, amSkip, gitAm, gitApply, gitFo
 import { sparseAdd, sparseDisable, sparseInit, sparseList, sparseSet } from './sparse'
 import { notesAdd, notesAppend, notesCopy, notesEdit, notesList, notesRemove, notesShow } from './notes'
 import { rerereCommand } from './rerere'
+import { filterBranch, type FilterBranchOptions, type FilterRunner } from './filterBranch'
+import { fsck, gc, notesPrune, prune, reflogDelete, reflogExpire } from './gc'
+import { forEachRef, showRef, updateRef } from './refs'
+import { replaceAdd, replaceDelete, replaceGraft, replaceList, restoreOriginals, withReplacements } from './replace'
 import {
   activeRepo,
   removeSubmodule,
@@ -71,11 +76,13 @@ import {
   submoduleInit,
   submoduleStatus,
   submoduleUpdate,
+  GITMODULES,
+  parseGitmodules,
   syncServersIn,
   syncServersOut,
   syncSubmodules,
 } from './submodule'
-import { changeDirectory, worktreeAdd, worktreeList, worktreePrune, worktreeRemove } from './worktree'
+import { changeDirectory, duplicateLocation, worktreeAdd, worktreeList, worktreePrune, worktreeRemove } from './worktree'
 import { bisectLog, bisectMark, bisectReset, bisectRunning, bisectStart } from './bisect'
 import { blame, gitDiff, show } from './inspect'
 import { createTag, deleteTags, listTags } from './tag'
@@ -112,8 +119,9 @@ export interface CommandResult {
 export const HELP_TEXT = [
   'ファイルの操作 (シェルのコマンド):',
   '  echo "内容" > ファイル     ファイルを上書きする (>> なら追記)',
-  '  touch / cat / ls / rm      作成・表示・一覧・削除',
-  '  cd <パス> / pwd            worktree やサブモジュールの中に移動する・今いる場所を表示する',
+  '  touch / cat / ls / rm [-r] / mv    作成・表示・一覧・削除・移動',
+  '  grep / sed \'s/前/後/g\' [-i] / chmod +x   検索・置換・フックを実行できるようにする',
+  '  cd <パス> / pwd            worktree・サブモジュール・clone したリポジトリの中に移動する・今いる場所を表示する',
   '',
   'Git のコマンド (先頭の git は省略できます。rm だけは git rm と区別します):',
   '  status / reflog [<ブランチ>]',
@@ -146,8 +154,15 @@ export const HELP_TEXT = [
   '  cherry [-v] [<上流> [<先端>]] / range-diff <A>...<B> | <基点> <A> <B> | <範囲1> <範囲2>   (パッチを比べる)',
   '  bundle create <ファイル> <リビジョン>... / bundle verify / list-heads / unbundle <ファイル>   (clone・fetch・pull の元にもできる)',
   '  submodule add <URL> [<パス>] / submodule [status] / init / update [--init] [--remote] / deinit / foreach <コマンド>',
+  '      (status・update・foreach は --recursive で、サブモジュールの中のサブモジュールにも行う)',
   '  worktree add [-b <ブランチ>] [--detach] <パス> [<コミット>] / worktree list / worktree remove [-f] <パス>',
   '  remote [-v] / remote add <名前> <URL> / remove / rename / set-url / get-url',
+  '  gc [--prune=now] / prune [-n] / fsck [--unreachable] [--no-reflogs]   (たどれないコミットを調べる・消す)',
+  '  reflog expire --expire=now --all / reflog delete <参照>@{<n>}   (reflog のエントリを消す)',
+  '  replace <コミット> <置き換え先> / replace --graft <コミット> [<親>...] / replace -d <コミット> / replace -l',
+  '  filter-branch [--tree-filter | --index-filter | --msg-filter | --parent-filter <コマンド>]',
+  '      [--subdirectory-filter <ディレクトリ>] [--prune-empty] [--tag-name-filter cat] [-f] [-- --all | <範囲>]',
+  '  update-ref [-d] <参照> [<コミット>] / for-each-ref [<パターン>] / show-ref   (refs/original/ なども扱う)',
   '  (merge / rebase / cherry-pick / revert は --continue・--abort が使えます)',
   '',
   '<コミット> の例: C1, main, v1.0, origin/main, HEAD~1, HEAD^2, HEAD@{1}, main@{2}',
@@ -821,8 +836,10 @@ function runSubmodule(repo: Repo, args: readonly string[], raw: string): Operati
       if (url === undefined || extra.length > 0) usage('git submodule add [-b <ブランチ>] <URL> [<パス>]')
       return submoduleAdd(repo, url, path, parsed.values.get('-b'))
     }
-    case 'status':
-      return submoduleStatus(repo, parseArgs(rest, { flags: ['--recursive'] }).positional)
+    case 'status': {
+      const parsed = parseArgs(rest, { flags: ['--recursive'] })
+      return submoduleStatus(repo, parsed.positional, parsed.flags.has('--recursive'))
+    }
     case 'init':
       return submoduleInit(repo, parseArgs(rest, { flags: [] }).positional)
     case 'update': {
@@ -830,6 +847,7 @@ function runSubmodule(repo: Repo, args: readonly string[], raw: string): Operati
       return submoduleUpdate(repo, parsed.positional, {
         init: parsed.flags.has('--init'),
         remote: parsed.flags.has('--remote'),
+        recursive: parsed.flags.has('--recursive'),
       })
     }
     case 'deinit': {
@@ -843,30 +861,50 @@ function runSubmodule(repo: Repo, args: readonly string[], raw: string): Operati
   }
 }
 
-/** git submodule foreach <コマンド>: チェックアウトしている各サブモジュールの中でコマンドを実行する。 */
+/**
+ * git submodule foreach [--recursive] <コマンド>: チェックアウトしている各サブモジュールの中でコマンドを実行する。
+ * コマンドの中の $name・$sm_path・$displaypath・$sha1・$toplevel は、本物と同じくそのサブモジュールの値になる。
+ */
 function submoduleForeach(repo: Repo, raw: string): OperationResult {
   let command = raw.slice(raw.indexOf('foreach') + 'foreach'.length).trim()
+  const recursive = /^--recursive\b/.test(command)
+  if (recursive) command = command.slice('--recursive'.length).trim()
   if (/^(["']).*\1$/s.test(command)) command = command.slice(1, -1)
-  if (command === '') usage('git submodule foreach <コマンド>')
-  let current = repo
+  if (command === '') usage('git submodule foreach [--recursive] <コマンド>')
   const lines: string[] = []
-  for (const path of Object.keys(repo.submodules).sort()) {
-    lines.push(`Entering '${path}'`)
-    const nested = syncServersIn(current, current.submodules[path] as Repo)
-    const ran = executeLocal(nested, command)
-    if (ran.output) lines.push(ran.output)
-    if (!ran.ok) throw new GitError([...lines, `fatal: run_command returned non-zero status for ${path}`].join('\n'))
-    current = syncServersOut({ ...current, submodules: { ...current.submodules, [path]: ran.repo } }, ran.repo)
+  const visit = (parent: Repo, prefix: string): Repo => {
+    let current = parent
+    const names = new Map(parseGitmodules(parent.workdir[GITMODULES] ?? parent.index[GITMODULES]).map((entry) => [entry.path, entry.name]))
+    for (const path of Object.keys(parent.submodules).sort()) {
+      lines.push(`Entering '${prefix}${path}'`)
+      const nested = syncServersIn(current, { ...(current.submodules[path] as Repo), submodule: null })
+      const values: Readonly<Record<string, string>> = {
+        name: names.get(path) ?? path,
+        sm_path: path,
+        path,
+        displaypath: `${prefix}${path}`,
+        sha1: headCommitIdOrNull(nested) ?? '',
+        toplevel: parent.worktree,
+      }
+      const expanded = command.replace(/\$\{?(name|sm_path|path|displaypath|sha1|toplevel)\}?/g, (_, key: string) => values[key] ?? '')
+      const ran = runChain(nested, expanded)
+      if (ran.output) lines.push(ran.output)
+      if (!ran.ok) throw new GitError([...lines, `fatal: run_command returned non-zero status for ${prefix}${path}`].join('\n'))
+      const inner = recursive ? syncSubmodules(visit(ran.repo, `${prefix}${path}/`)) : ran.repo
+      current = syncServersOut({ ...current, submodules: { ...current.submodules, [path]: inner } }, inner)
+    }
+    return current
   }
-  return { repo: current, output: lines.join('\n') }
+  const result = visit(repo, '')
+  return { repo: result, output: lines.join('\n') }
 }
 
 function runNotes(repo: Repo, args: readonly string[]): OperationResult {
   const [sub = 'list', ...rest] = args[0]?.startsWith('-') ? ['list', ...args] : args
   const parsed = parseArgs(rest, {
-    flags: ['-f', '--ignore-missing'],
+    flags: ['-f', '--ignore-missing', '-n', '-v'],
     values: ['-m'],
-    aliases: { '--force': '-f', '--message': '-m' },
+    aliases: { '--force': '-f', '--message': '-m', '--dry-run': '-n', '--verbose': '-v' },
   })
   const messages = parsed.allValues.get('-m') ?? []
   const [first, second, ...extra] = parsed.positional
@@ -890,6 +928,9 @@ function runNotes(repo: Repo, args: readonly string[]): OperationResult {
     case 'copy':
       if (first === undefined || second === undefined || extra.length > 0) usage('git notes copy [-f] <元> <先>')
       return notesCopy(repo, first, second, parsed.flags.has('-f'))
+    case 'prune':
+      if (first !== undefined) usage('git notes prune [-n] [-v]')
+      return notesPrune(repo, { dryRun: parsed.flags.has('-n'), verbose: parsed.flags.has('-v') })
     default:
       throw new GitError(`error: 未対応の notes のサブコマンドです: ${sub}`)
   }
@@ -940,8 +981,119 @@ function runLog(repo: Repo, args: readonly string[]): OperationResult {
   })
 }
 
+function runReflog(repo: Repo, args: readonly string[]): OperationResult {
+  const [sub, ...rest] = args
+  if (sub === 'expire') {
+    const parsed = parseArgs(rest, {
+      flags: ['--all', '-n', '--verbose', '--stale-fix', '--rewrite', '--updateref', '--single-worktree'],
+      values: ['--expire', '--expire-unreachable'],
+      aliases: { '--dry-run': '-n' },
+    })
+    const expire = parsed.values.get('--expire')
+    const expireUnreachable = parsed.values.get('--expire-unreachable')
+    return reflogExpire(repo, parsed.positional, {
+      ...(expire === undefined ? {} : { expire }),
+      ...(expireUnreachable === undefined ? {} : { expireUnreachable }),
+      all: parsed.flags.has('--all'),
+      dryRun: parsed.flags.has('-n'),
+    })
+  }
+  if (sub === 'delete') {
+    const parsed = parseArgs(rest, { flags: ['--rewrite', '--updateref', '-n', '--verbose'], aliases: { '--dry-run': '-n' } })
+    return parsed.flags.has('-n') ? { repo, output: '' } : reflogDelete(repo, parsed.positional)
+  }
+  const parsed = parseArgs(args, { flags: [] })
+  const [first, second, ...extra] = parsed.positional
+  const ref = first === 'show' ? second : first
+  if (extra.length > 0 || (first !== 'show' && second !== undefined)) {
+    usage('git reflog [show] [<ブランチ>] / reflog expire [--expire=<日時>] [--all | <参照>...] / reflog delete <参照>@{<n>}')
+  }
+  return reflog(repo, ref)
+}
+
+function runReplace(repo: Repo, args: readonly string[]): OperationResult {
+  const parsed = parseArgs(args, {
+    flags: ['-f', '-d', '-l', '--graft', '--edit', '--raw', '--convert-graft-file'],
+    values: ['--format'],
+    aliases: { '--force': '-f', '--delete': '-d', '--list': '-l', '-e': '--edit' },
+  })
+  const text = 'git replace [-f] <コミット> <置き換え先> / replace [-f] --graft <コミット> [<親>...] / replace -d <コミット>... / replace [-l [<パターン>]]'
+  if (parsed.flags.has('--edit') || parsed.flags.has('--convert-graft-file')) {
+    throw new GitError('git replace --edit / --convert-graft-file は、このアプリでは未対応です (--graft か <コミット> <置き換え先> を使ってください)')
+  }
+  const [first, ...rest] = parsed.positional
+  if (parsed.flags.has('-d')) return replaceDelete(repo, parsed.positional)
+  if (parsed.flags.has('--graft')) {
+    if (first === undefined) usage(text)
+    return replaceGraft(repo, first, rest, parsed.flags.has('-f'))
+  }
+  if (parsed.flags.has('-l') || first === undefined) {
+    if (rest.length > 0) usage(text)
+    return replaceList(repo, first, parsed.values.get('--format'))
+  }
+  if (rest.length !== 1) usage(text)
+  return replaceAdd(repo, first, rest[0] as string, parsed.flags.has('-f'))
+}
+
+/** フィルタのコマンドを実行する。stdin を渡すと、cat・sed・grep がそれを読む。 */
+const runFilter: FilterRunner = (repo, command, stdin) => {
+  const saved = stdinText
+  stdinText = stdin ?? null
+  try {
+    return runChain(repo, command)
+  } finally {
+    stdinText = saved
+  }
+}
+
+/** a && b / a || b / a; b をシェルと同じく順に実行する (cd・clone はしない)。 */
+function runChain(repo: Repo, text: string): CommandResult {
+  let current = repo
+  let ok = true
+  const outputs: string[] = []
+  for (const part of splitChain(text)) {
+    if ((part.op === '&&' && !ok) || (part.op === '||' && ok) || part.text === '') continue
+    const ran = executeLocal(current, part.text)
+    if (ran.output) outputs.push(ran.output)
+    ok = ran.ok
+    if (ran.ok) current = ran.repo
+  }
+  return { repo: current, output: outputs.join('\n'), ok }
+}
+
+function runFilterBranch(repo: Repo, args: readonly string[], squelchWarning = false): OperationResult {
+  const parsed = parseArgs(args, {
+    flags: ['--prune-empty', '-f', '--all', '--branches', '--tags', '--remotes'],
+    values: [
+      '--tree-filter', '--index-filter', '--msg-filter', '--parent-filter', '--tag-name-filter', '--subdirectory-filter',
+      '--original', '-d', '--env-filter', '--commit-filter', '--setup', '--state-branch',
+    ],
+    aliases: { '--force': '-f' },
+  })
+  if (parsed.values.has('--env-filter')) {
+    throw new GitError('このアプリのコミットには作成者と日時がないため、--env-filter は未対応です')
+  }
+  for (const option of ['--commit-filter', '--setup', '--state-branch']) {
+    if (parsed.values.has(option)) throw new GitError(`${option} は、このアプリでは未対応です`)
+  }
+  const value = (name: string) => parsed.values.get(name)
+  const options: FilterBranchOptions = {
+    ...(value('--tree-filter') === undefined ? {} : { treeFilter: value('--tree-filter') }),
+    ...(value('--index-filter') === undefined ? {} : { indexFilter: value('--index-filter') }),
+    ...(value('--msg-filter') === undefined ? {} : { msgFilter: value('--msg-filter') }),
+    ...(value('--parent-filter') === undefined ? {} : { parentFilter: value('--parent-filter') }),
+    ...(value('--tag-name-filter') === undefined ? {} : { tagNameFilter: value('--tag-name-filter') }),
+    ...(value('--subdirectory-filter') === undefined ? {} : { subdirectoryFilter: value('--subdirectory-filter') }),
+    ...(value('--original') === undefined ? {} : { original: value('--original') }),
+    pruneEmpty: parsed.flags.has('--prune-empty'),
+    force: parsed.flags.has('-f'),
+    squelchWarning,
+  }
+  const kinds = ['--all', '--branches', '--tags', '--remotes'].filter((flag) => parsed.flags.has(flag))
+  return filterBranch(repo, [...kinds, ...parsed.positional, ...(parsed.paths ?? [])], options, runFilter)
+}
+
 function runWorktree(repo: Repo, args: readonly string[]): OperationResult {
-  if (repo.home !== undefined) throw new GitError('clone したリポジトリやサブモジュールの中での git worktree は、このアプリでは未対応です')
   const [sub, ...rest] = args
   switch (sub) {
     case 'add': {
@@ -1106,7 +1258,7 @@ function runGitWithSubmodules(repo: Repo, name: string, args: readonly string[],
   const recurse = flag ?? configBool(repo, 'submodule.recurse') ?? false
   if (!recurse || result.repo.operation !== null || result.repo.editor !== null) return result
   if (Object.keys(result.repo.submodules).length === 0) return result
-  const updated = submoduleUpdate(result.repo, [], {})
+  const updated = submoduleUpdate(result.repo, [], { recursive: true })
   return { repo: updated.repo, output: [result.output, updated.output].filter(Boolean).join('\n') }
 }
 
@@ -1264,7 +1416,10 @@ function runGitCommand(repo: Repo, name: string, args: readonly string[], raw: s
       return add(repo, parsed.flags.has('-A') ? [...specs, '.'] : specs)
     }
     case 'rm': {
-      const parsed = parseArgs(args, { flags: ['--cached', '-f', '-r'], aliases: { '--force': '-f' } })
+      const parsed = parseArgs(args, {
+        flags: ['--cached', '-f', '-r', '--ignore-unmatch', '-q'],
+        aliases: { '--force': '-f', '--quiet': '-q' },
+      })
       const paths = [...parsed.positional, ...(parsed.paths ?? [])].map((path) => path.replace(/\/$/, ''))
       // サブモジュールは gitlink と .gitmodules の記述ごと消す
       const submodules = paths.filter((path) => isSubmodulePath(repo, path))
@@ -1280,11 +1435,12 @@ function runGitCommand(repo: Repo, name: string, args: readonly string[], raw: s
         const removed = gitRemove(current, files, {
           cached: parsed.flags.has('--cached'),
           force: parsed.flags.has('-f'),
+          ignoreUnmatch: parsed.flags.has('--ignore-unmatch'),
         })
         current = removed.repo
         if (removed.output) lines.push(removed.output)
       }
-      return { repo: current, output: lines.join('\n') }
+      return { repo: current, output: parsed.flags.has('-q') ? '' : lines.join('\n') }
     }
     case 'submodule':
       return runSubmodule(repo, args, raw)
@@ -1392,13 +1548,77 @@ function runGitCommand(repo: Repo, name: string, args: readonly string[], raw: s
       const [sub, ...paths] = args
       return rerereCommand(repo, sub, paths)
     }
-    case 'reflog': {
-      const parsed = parseArgs(args, { flags: [] })
-      const [first, second, ...rest] = parsed.positional
-      const ref = first === 'show' ? second : first
-      if (rest.length > 0 || (first !== 'show' && second !== undefined)) usage('git reflog [show] [<ブランチ>]')
-      return reflog(repo, ref)
+    case 'reflog':
+      return runReflog(repo, args)
+    case 'gc': {
+      // --prune だけ (値なし) は既定の期限と同じ
+      const parsed = parseArgs(
+        args.filter((arg) => arg !== '--prune'),
+        { flags: ['--aggressive', '--auto', '--quiet', '--no-prune', '--force'], values: ['--prune'], aliases: { '-q': '--quiet' } },
+      )
+      if (parsed.positional.length > 0) usage('git gc [--prune=<日時>] [--no-prune] [--aggressive] [--auto] [--quiet]')
+      const pruneValue = parsed.flags.has('--no-prune') ? 'never' : parsed.values.get('--prune')
+      return gc(repo, {
+        ...(pruneValue === undefined ? {} : { prune: pruneValue }),
+        aggressive: parsed.flags.has('--aggressive'),
+        auto: parsed.flags.has('--auto'),
+        quiet: parsed.flags.has('--quiet'),
+      })
     }
+    case 'prune': {
+      const parsed = parseArgs(args, {
+        flags: ['-n', '-v', '--progress', '--no-progress'],
+        values: ['--expire'],
+        aliases: { '--dry-run': '-n', '--verbose': '-v' },
+      })
+      const expire = parsed.values.get('--expire')
+      return prune(repo, { dryRun: parsed.flags.has('-n'), verbose: parsed.flags.has('-v'), ...(expire === undefined ? {} : { expire }) })
+    }
+    case 'fsck': {
+      const parsed = parseArgs(args, {
+        flags: [
+          '--unreachable', '--no-reflogs', '--dangling', '--no-dangling', '--root', '--lost-found',
+          '--full', '--no-full', '--strict', '--connectivity-only', '--no-progress', '--progress', '--cache', '--name-objects',
+        ],
+      })
+      if (parsed.positional.length > 0) usage('git fsck [--unreachable] [--no-reflogs] [--no-dangling] [--root] [--lost-found]')
+      return fsck(repo, {
+        unreachable: parsed.flags.has('--unreachable'),
+        noReflogs: parsed.flags.has('--no-reflogs'),
+        noDangling: parsed.flags.has('--no-dangling'),
+        root: parsed.flags.has('--root'),
+        lostFound: parsed.flags.has('--lost-found'),
+      })
+    }
+    case 'replace':
+      return runReplace(repo, args)
+    case 'update-ref': {
+      const parsed = parseArgs(args, { flags: ['-d', '--no-deref', '--create-reflog'], values: ['-m'] })
+      const [name, first, second, ...extra] = parsed.positional
+      const text = 'git update-ref [-m <理由>] (-d <参照> [<古い値>] | <参照> <新しい値> [<古い値>])'
+      if (name === undefined || extra.length > 0) usage(text)
+      const message = parsed.values.get('-m')
+      if (parsed.flags.has('-d')) {
+        if (second !== undefined) usage(text)
+        return updateRef(repo, name, undefined, { delete: true, ...(first === undefined ? {} : { oldValue: first }), ...(message === undefined ? {} : { message }) })
+      }
+      return updateRef(repo, name, first, { ...(second === undefined ? {} : { oldValue: second }), ...(message === undefined ? {} : { message }) })
+    }
+    case 'for-each-ref': {
+      const parsed = parseArgs(args, { flags: [], values: ['--format'] })
+      return forEachRef(repo, parsed.positional, parsed.values.get('--format'))
+    }
+    case 'show-ref': {
+      const parsed = parseArgs(args, { flags: ['--heads', '--tags', '--head', '-q'], aliases: { '--branches': '--heads', '--quiet': '-q' } })
+      const result = showRef(repo, parsed.positional, {
+        heads: parsed.flags.has('--heads'),
+        tags: parsed.flags.has('--tags'),
+        head: parsed.flags.has('--head'),
+      })
+      return parsed.flags.has('-q') ? { repo, output: '' } : result
+    }
+    case 'filter-branch':
+      return runFilterBranch(repo, args, commandEnv['FILTER_BRANCH_SQUELCH_WARNING'] === '1')
     case 'push':
       return runPush(repo, args)
     case 'fetch':
@@ -1430,7 +1650,15 @@ function requireOne(args: readonly string[], text: string): string {
   return args[0] as string
 }
 
-const SHELL_COMMANDS = new Set(['echo', 'touch', 'cat', 'ls', 'rm', 'pwd', 'chmod', 'grep', 'exit'])
+const SHELL_COMMANDS = new Set([
+  'echo', 'touch', 'cat', 'ls', 'rm', 'pwd', 'chmod', 'grep', 'exit', 'sed', 'mv', 'mkdir', 'true', 'false',
+])
+
+/** git filter-branch の --msg-filter などに渡す標準入力。cat・sed・grep がファイルを指定されなければ読む。 */
+let stdinText: string | null = null
+
+/** コマンドの前に書いた環境変数 (FILTER_BRANCH_SQUELCH_WARNING=1 git filter-branch … など)。 */
+let commandEnv: Readonly<Record<string, string>> = {}
 
 /** フックの中から実行するフック (git commit を実行する pre-commit など) が、際限なく続かないようにする。 */
 let hookDepth = 0
@@ -1532,7 +1760,7 @@ function runGrep(repo: Repo, args: readonly string[]): OperationResult {
   const expanded = args.flatMap((arg) => (/^-[a-zA-Z]{2,}$/.test(arg) ? [...arg.slice(1)].map((c) => `-${c}`) : [arg]))
   const parsed = parseArgs(expanded, { flags: ['-q', '-v', '-i', '-c', '-E', '-F', '-n'] })
   const [pattern, ...files] = parsed.positional
-  if (pattern === undefined || files.length === 0) usage('grep [-q] [-v] [-i] [-c] [-E] <パターン> <ファイル>...')
+  if (pattern === undefined || (files.length === 0 && stdinText === null)) usage('grep [-q] [-v] [-i] [-c] [-E] <パターン> <ファイル>...')
   let regex: RegExp
   try {
     regex = new RegExp(parsed.flags.has('-F') ? pattern.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') : pattern, parsed.flags.has('-i') ? 'i' : '')
@@ -1541,8 +1769,9 @@ function runGrep(repo: Repo, args: readonly string[]): OperationResult {
   }
   const out: string[] = []
   let found = 0
-  for (const file of files) {
-    const content = readFile(repo, file).output
+  // ファイルを指定しなければ標準入力を読む
+  for (const file of files.length === 0 ? [null] : files) {
+    const content = file === null ? (stdinText ?? '').replace(/\n$/, '') : readFile(repo, file).output
     const matched = content
       .split('\n')
       .map((text, index) => ({ text, index }))
@@ -1569,8 +1798,27 @@ function runShell(repo: Repo, name: string, tokens: readonly Token[]): Operation
       if (args.length === 0) usage('touch <ファイル>...')
       return args.reduce<OperationResult>((result, path) => touchFile(result.repo, path), { repo, output: '' })
     }
-    case 'cat':
-      return readFile(repo, requireOne(args, 'cat <ファイル>'))
+    case 'cat': {
+      // ファイルを指定しなければ標準入力を出す (filter-branch の --msg-filter cat など)
+      if (args.length === 0 && stdinText !== null) return { repo, output: stdinText.replace(/\n$/, '') }
+      if (args.length === 0) usage('cat <ファイル>...')
+      return { repo, output: args.map((path) => readFile(repo, path).output).join('\n') }
+    }
+    case 'sed':
+      return runSed(repo, args)
+    case 'mv': {
+      const [from, to, ...extra] = args.filter((arg) => !arg.startsWith('-'))
+      if (from === undefined || to === undefined || extra.length > 0) usage('mv <元> <先>')
+      return moveFile(repo, from, to)
+    }
+    case 'mkdir':
+      // ディレクトリはファイルがあれば自然にできるので、何もしない (Git も空のディレクトリは記録しない)
+      if (args.filter((arg) => !arg.startsWith('-')).length === 0) usage('mkdir [-p] <ディレクトリ>...')
+      return { repo, output: '' }
+    case 'true':
+      return { repo, output: '' }
+    case 'false':
+      throw new GitError('')
     case 'ls': {
       const dirs = args.filter((arg) => !arg.startsWith('-'))
       if (dirs.length > 1) usage('ls [<ディレクトリ>]')
@@ -1588,11 +1836,220 @@ function runShell(repo: Repo, name: string, tokens: readonly Token[]): Operation
     case 'pwd':
       return { repo, output: repo.worktree }
     default: {
-      const paths = args.filter((arg) => arg !== '-f')
-      if (paths.length === 0) usage('rm <ファイル>...')
-      return paths.reduce<OperationResult>((result, path) => removeFile(result.repo, path), { repo, output: '' })
+      const flags = args.filter((arg) => /^-[a-zA-Z]+$/.test(arg)).join('')
+      const force = flags.includes('f')
+      const recursive = /[rR]/.test(flags)
+      const paths = args.filter((arg) => !/^-[a-zA-Z]+$/.test(arg)).map((path) => path.replace(/\/+$/, ''))
+      if (paths.length === 0) usage('rm [-f] [-r] <ファイル>...')
+      return paths.reduce<OperationResult>((result, path) => {
+        const current = result.repo
+        const inside = Object.keys(current.workdir).filter((file) => file.startsWith(`${path}/`))
+        if (inside.length > 0 && !isSubmodulePath(current, path)) {
+          if (!recursive) throw new GitError(`rm: cannot remove '${path}': Is a directory`)
+          return { repo: inside.reduce((repo2, file) => removeFile(repo2, file).repo, current), output: '' }
+        }
+        const inner = gitDirPath(path)
+        const exists = inner === null ? path in current.workdir || isSubmodulePath(current, path) : inner in current.gitFiles
+        if (force && !exists) return result
+        return removeFile(current, path)
+      }, { repo, output: '' })
     }
   }
+}
+
+/** mv <元> <先>: ファイル (またはディレクトリの中のファイルすべて) を移す。先がディレクトリなら、その中に移す。 */
+function moveFile(repo: Repo, from: string, rawTo: string): OperationResult {
+  const source = from.replace(/\/+$/, '')
+  const files = Object.keys(repo.workdir).filter((file) => file === source || file.startsWith(`${source}/`))
+  if (files.length === 0) throw new GitError(`mv: cannot stat '${from}': No such file or directory`)
+  const targetIsDir = rawTo.endsWith('/') || Object.keys(repo.workdir).some((file) => file.startsWith(`${rawTo.replace(/\/+$/, '')}/`))
+  const to = rawTo.replace(/\/+$/, '')
+  const base = targetIsDir ? `${to}/${source.split('/').at(-1) as string}` : to
+  let current = repo
+  for (const file of files) {
+    const content = repo.workdir[file] as string
+    current = removeFile(current, file).repo
+    current = writeFile(current, `${base}${file.slice(source.length)}`, content, false).repo
+  }
+  return { repo: current, output: '' }
+}
+
+interface SedCommand {
+  readonly address: { readonly line: number } | { readonly last: true } | { readonly regex: RegExp } | null
+  readonly kind: 's' | 'd' | 'p'
+  readonly regex?: RegExp
+  readonly replacement?: string
+  readonly print?: boolean
+}
+
+/** sed の基本正規表現 (BRE) を JavaScript の正規表現にする (\( \) \{ \} \+ \? \| が特別な意味)。 */
+function sedRegex(pattern: string, extended: boolean, flags: string): RegExp {
+  let body = pattern
+  if (!extended) {
+    body = ''
+    for (let i = 0; i < pattern.length; i++) {
+      const char = pattern[i] as string
+      if (char === '\\' && i + 1 < pattern.length) {
+        const next = pattern[++i] as string
+        body += '(){}+?|'.includes(next) ? next : `\\${next}`
+      } else body += '(){}+?|'.includes(char) ? `\\${char}` : char
+    }
+  }
+  try {
+    return new RegExp(body, flags)
+  } catch {
+    throw new GitError(`sed: -e expression #1: 正規表現として読めません: ${pattern}`)
+  }
+}
+
+/** sed の置換文字列を JavaScript の置換文字列にする (& は一致した部分、\1 はグループ)。 */
+function sedReplacement(text: string): string {
+  let result = ''
+  for (let i = 0; i < text.length; i++) {
+    const char = text[i] as string
+    if (char === '\\' && i + 1 < text.length) {
+      const next = text[++i] as string
+      result += /\d/.test(next) ? `$${next}` : next === 'n' ? '\n' : next === 't' ? '\t' : next === '$' ? '$$' : next
+    } else if (char === '&') result += '$&'
+    else if (char === '$') result += '$$'
+    else result += char
+  }
+  return result
+}
+
+/** sed のスクリプト (s/…/…/flags・/…/d・<行>d・p を ; か改行で区切ったもの) を読む。 */
+function parseSedScript(script: string, extended: boolean): SedCommand[] {
+  const commands: SedCommand[] = []
+  let i = 0
+  const readDelimited = (delimiter: string): string => {
+    let text = ''
+    while (i < script.length && script[i] !== delimiter) {
+      if (script[i] === '\\' && script[i + 1] === delimiter) {
+        text += delimiter
+        i += 2
+        continue
+      }
+      if (script[i] === '\\' && i + 1 < script.length) {
+        text += script.slice(i, i + 2)
+        i += 2
+        continue
+      }
+      text += script[i]
+      i++
+    }
+    if (i >= script.length) throw new GitError(`sed: -e expression #1: unterminated \`s' command`)
+    i++
+    return text
+  }
+  while (i < script.length) {
+    while (i < script.length && /[\s;]/.test(script[i] as string)) i++
+    if (i >= script.length) break
+    let address: SedCommand['address'] = null
+    const number = /^\d+/.exec(script.slice(i))
+    if (number) {
+      address = { line: Number(number[0]) }
+      i += number[0].length
+    } else if (script[i] === '$') {
+      address = { last: true }
+      i++
+    } else if (script[i] === '/') {
+      i++
+      address = { regex: sedRegex(readDelimited('/'), extended, '') }
+    }
+    while (i < script.length && script[i] === ' ') i++
+    const kind = script[i]
+    i++
+    if (kind === 'd' || kind === 'p') {
+      commands.push({ address, kind })
+    } else if (kind === 's') {
+      const delimiter = script[i++]
+      if (delimiter === undefined) throw new GitError("sed: -e expression #1: unterminated `s' command")
+      const pattern = readDelimited(delimiter)
+      const replacement = readDelimited(delimiter)
+      const flags = /^[gIip0-9]*/.exec(script.slice(i))?.[0] ?? ''
+      i += flags.length
+      const regexFlags = `${flags.includes('g') ? 'g' : ''}${/[iI]/.test(flags) ? 'i' : ''}`
+      commands.push({
+        address,
+        kind: 's',
+        regex: sedRegex(pattern, extended, regexFlags),
+        replacement: sedReplacement(replacement),
+        print: flags.includes('p'),
+      })
+    } else {
+      throw new GitError(`sed: このアプリの sed で使えるのは s・d・p のコマンドだけです: ${script}`)
+    }
+  }
+  return commands
+}
+
+/** sed [-n] [-E] [-i] [-e <スクリプト>]... [<スクリプト>] [<ファイル>...]: ファイル (なければ標準入力) を行ごとに書き換える。 */
+function runSed(repo: Repo, args: readonly string[]): OperationResult {
+  const scripts: string[] = []
+  const files: string[] = []
+  let inPlace = false
+  let extended = false
+  let quiet = false
+  for (let i = 0; i < args.length; i++) {
+    const arg = args[i] as string
+    if (arg === '-e' || arg === '--expression') {
+      const script = args[++i]
+      if (script === undefined) usage('sed [-n] [-E] [-i] [-e <スクリプト>] <ファイル>...')
+      scripts.push(script)
+    } else if (/^-[nEriz]+$/.test(arg) || arg === '--in-place' || arg === '--quiet') {
+      inPlace ||= arg.includes('i') && !arg.startsWith('--q')
+      extended ||= /[Er]/.test(arg) && arg.startsWith('-') && !arg.startsWith('--')
+      quiet ||= arg === '--quiet' || (/n/.test(arg) && !arg.startsWith('--'))
+    } else if (scripts.length === 0 && !args.slice(0, i).some((other) => other === '-e' || other === '--expression')) {
+      scripts.push(arg)
+    } else files.push(arg)
+  }
+  if (scripts.length === 0) usage('sed [-n] [-E] [-i] [-e <スクリプト>] <ファイル>...')
+  const commands = scripts.flatMap((script) => parseSedScript(script, extended))
+  const apply = (text: string): string => {
+    const lines = text.replace(/\n$/, '').split('\n')
+    if (text === '') lines.length = 0
+    const out: string[] = []
+    lines.forEach((original, index) => {
+      let line = original
+      let deleted = false
+      for (const command of commands) {
+        const address = command.address
+        const matches =
+          address === null ||
+          ('line' in address && address.line === index + 1) ||
+          ('last' in address && index === lines.length - 1) ||
+          ('regex' in address && address.regex.test(line))
+        if (!matches) continue
+        if (command.kind === 'd') {
+          deleted = true
+          break
+        }
+        if (command.kind === 'p') out.push(line)
+        else if (command.regex !== undefined) {
+          const replaced = line.replace(command.regex, command.replacement ?? '')
+          const changed = command.regex.test(line)
+          line = replaced
+          if (command.print && changed) out.push(line)
+        }
+      }
+      if (!deleted && !quiet) out.push(line)
+    })
+    return out.join('\n')
+  }
+  if (files.length === 0) {
+    if (inPlace) throw new GitError('sed: no input files')
+    return { repo, output: apply(stdinText ?? '') }
+  }
+  if (inPlace) {
+    let current = repo
+    for (const file of files) {
+      const result = apply(readFile(current, file).output)
+      current = writeFile(current, file, result === '' ? '' : `${result}\n`, false).repo
+    }
+    return { repo: current, output: '' }
+  }
+  return { repo, output: files.map((file) => apply(readFile(repo, file).output)).join('\n') }
 }
 
 /** エディタを保存して閉じる操作を表すコマンド。ログと共有 URL にはこの形で残る。 */
@@ -1663,6 +2120,18 @@ function runEditorSave(repo: Repo, input: string): CommandResult {
  * cd でサブモジュールの中にいるなら、コマンドはそのサブモジュールで実行し、結果を親に戻す。
  */
 export function executeCommand(repo: Repo, input: string): CommandResult {
+  const result = executeRouted(repo, input)
+  // worktree add と clone は、ほかのリポジトリや worktree と同じ場所に作れない
+  if (result.ok && /\b(worktree|clone)\b/.test(input) && !input.startsWith(EDITOR_SAVE)) {
+    const duplicate = duplicateLocation(result.repo)
+    if (duplicate !== null && duplicateLocation(repo) === null) {
+      return { repo, output: `fatal: '${duplicate}' already exists`, ok: false }
+    }
+  }
+  return result
+}
+
+function executeRouted(repo: Repo, input: string): CommandResult {
   // a && b / a || b / a; b は、シェルと同じく順に実行する (エディタの保存の :wq は分けない)
   const parts = input.startsWith(EDITOR_SAVE) ? [] : splitChain(input)
   if (parts.length > 1) {
@@ -1697,12 +2166,52 @@ export function executeCommand(repo: Repo, input: string): CommandResult {
     const result = executeLocal(repo, input)
     return { ...result, repo: syncSubmodules(result.repo) }
   }
-  const result = executeLocal(syncServersIn(repo, nested), input)
+  // サブモジュールの中のサブモジュールにいれば、さらにその中で実行する
+  const result = executeCommand(syncServersIn(repo, nested), input)
   const stored: Repo = { ...repo, submodules: { ...repo.submodules, [path]: result.repo } }
   return { ...result, repo: syncSubmodules(syncServersOut(stored, result.repo)) }
 }
 
-function executeLocal(repo: Repo, input: string): CommandResult {
+/** 本物の Git でも置き換え (git replace) を使わずに、元のコミットを扱うコマンド。 */
+const RAW_COMMANDS = new Set([
+  'gc', 'prune', 'fsck', 'replace', 'push', 'fetch', 'bundle', 'update-ref', 'for-each-ref', 'show-ref', 'reflog',
+  'filter-branch', 'teammate',
+])
+
+/**
+ * 今いるリポジトリで 1 つのコマンドを実行する。git replace で置き換えたコミットがあれば、
+ * 置き換えたあとの内容で実行し (git --no-replace-objects なら元のまま)、結果のコミットは元の内容に戻す。
+ * 先頭の FILTER_BRANCH_SQUELCH_WARNING=1 のような環境変数の指定も読む。
+ */
+function executeLocal(repo: Repo, rawInput: string): CommandResult {
+  let input = rawInput
+  const env: Record<string, string> = {}
+  for (let match = /^\s*([A-Z_][A-Z0-9_]*)=(\S*)\s+/.exec(input); match; match = /^\s*([A-Z_][A-Z0-9_]*)=(\S*)\s+/.exec(input)) {
+    env[match[1] as string] = match[2] as string
+    input = input.slice(match[0].length)
+  }
+  const savedEnv = commandEnv
+  commandEnv = env
+  try {
+    const noReplace = /^\s*git\s+--no-replace-objects\b/.test(input) || env['GIT_NO_REPLACE_OBJECTS'] !== undefined
+    input = input.replace(/^(\s*git)\s+--no-replace-objects\b/, '$1')
+    const words = tokenize(input)
+    const name = words[0] === 'git' ? words[1] : words[0]
+    const replaced = Object.keys(repo.replaces).length > 0 && !RAW_COMMANDS.has(name ?? '')
+    if (!replaced) return executeWithExec(repo, input)
+    if (noReplace) {
+      // 置き換えを使わないので、log の (replaced) の表示もしない
+      const result = executeWithExec({ ...repo, replaces: {} }, input)
+      return { ...result, repo: { ...result.repo, replaces: repo.replaces } }
+    }
+    const result = executeWithExec(withReplacements(repo), input)
+    return { ...result, repo: restoreOriginals(repo, result.repo) }
+  } finally {
+    commandEnv = savedEnv
+  }
+}
+
+function executeWithExec(repo: Repo, input: string): CommandResult {
   const result = executeOnce(repo, input)
   return result.ok ? runPendingExec(result) : result
 }

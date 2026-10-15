@@ -13,6 +13,7 @@ import {
   type CommitId,
   type Repo,
 } from '../git/model'
+import { withReplacements } from '../git/replace'
 
 export const X_GAP = 100
 export const Y_GAP = 96
@@ -43,7 +44,7 @@ export interface LayoutEdge {
   readonly reachable: boolean
 }
 
-export type LabelKind = 'branch' | 'current' | 'head' | 'tag' | 'bisect' | 'remote'
+export type LabelKind = 'branch' | 'current' | 'head' | 'tag' | 'bisect' | 'remote' | 'original' | 'replaced'
 
 export interface LayoutLabel {
   readonly key: string
@@ -135,6 +136,8 @@ const LABEL_ORDER: Readonly<Record<LabelKind, number>> = {
   tag: 2,
   bisect: 3,
   remote: 4,
+  original: 5,
+  replaced: 6,
 }
 
 /** コミットと参照からグラフの座標を計算する。 */
@@ -228,7 +231,11 @@ function branchOrder(names: Iterable<string>): string[] {
   return [...names].sort((a, b) => Number(b === DEFAULT_BRANCH) - Number(a === DEFAULT_BRANCH))
 }
 
-/** ローカルリポジトリのグラフ。ブランチ・HEAD・リモート追跡ブランチ (origin/main など) を描く。 */
+/**
+ * ローカルリポジトリのグラフ。ブランチ・HEAD・リモート追跡ブランチ (origin/main など)・refs/original を描く。
+ * git replace で置き換えたコミットは、置き換えたあとの親で描き (git log と同じ)、replaced のラベルを付ける。
+ * 置き換え先のコミットは、ほかの参照からたどれなければ描かない。
+ */
 export function computeLayout(repo: Repo): GraphLayout {
   const current = currentBranch(repo)
   const refs: GraphRef[] = branchOrder(Object.keys(repo.branches)).map((name) => ({
@@ -263,7 +270,21 @@ export function computeLayout(repo: Repo): GraphLayout {
       target: repo.remoteBranches[name] as CommitId,
     })
   }
-  return layoutGraph(repo.commits, refs)
+  for (const [name, target] of Object.entries(repo.originalRefs).sort(([a], [b]) => a.localeCompare(b))) {
+    refs.push({ key: `original:${name}`, text: name.replace(/^refs\/original\/refs\/(heads\/)?/, 'original: '), kind: 'original', target })
+  }
+  const view = withReplacements(repo).commits
+  let commits = view
+  const targets = new Set(Object.values(repo.replaces))
+  if (targets.size > 0) {
+    const shown = new Set<CommitId>()
+    for (const ref of refs) for (const id of ancestors(view, ref.target)) shown.add(id)
+    commits = Object.fromEntries(Object.entries(view).filter(([id]) => !targets.has(id) || shown.has(id)))
+  }
+  for (const id of Object.keys(repo.replaces).sort()) {
+    if (id in commits) refs.push({ key: `replaced:${id}`, text: 'replaced', kind: 'replaced', target: id })
+  }
+  return layoutGraph(commits, refs)
 }
 
 function tagRefs(tags: Repo['tags']): GraphRef[] {

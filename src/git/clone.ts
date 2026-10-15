@@ -19,7 +19,7 @@ function readFileOrNull(repo: Repo, path: string): string | null {
 }
 import { parseBundle } from './bundle'
 import { activeRepo, cloneRemote, submoduleUpdate, syncServersOut } from './submodule'
-import { currentDirectory, resolvePath, worktreePaths } from './worktree'
+import { allLocations, currentDirectory, resolvePath } from './worktree'
 
 export interface CloneOptions {
   readonly branch?: string
@@ -60,7 +60,7 @@ export function gitClone(root: Repo, url: string, directory: string | undefined,
   }
   const name = directory ?? nameFromUrl(url)
   const path = resolvePath(currentDirectory(root), name)
-  const taken = [...worktreePaths(root), ...Object.keys(root.clones)]
+  const taken = allLocations(root).map((location) => location.path)
   if (taken.some((other) => other === path || path.startsWith(`${other}/`) || other.startsWith(`${path}/`))) {
     throw new GitError(
       taken.includes(path)
@@ -83,7 +83,7 @@ export function gitClone(root: Repo, url: string, directory: string | undefined,
   cloned = { ...cloned, libraries: root.libraries, ...(options.sparse ? { sparse: [] } : {}) }
   const lines = [`Cloning into '${name}'...`]
   if (options.recurseSubmodules) {
-    const updated = submoduleUpdate(cloned, [], { init: true })
+    const updated = submoduleUpdate(cloned, [], { init: true, recursive: true })
     cloned = updated.repo
     if (updated.output) lines.push(updated.output)
   }
