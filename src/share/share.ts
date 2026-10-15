@@ -1,18 +1,22 @@
 /**
- * 現在の状態を URL で共有する。状態そのものではなく「モード・お題・入力したコマンドの列」を
+ * 現在の状態を URL で共有する。状態そのものではなく「モード・お題 (やレッスンとステップ)・入力したコマンドの列」を
  * URL のハッシュに入れ、開いた側で同じコマンドを実行し直して状態を再現する。
  * Repo はコマンドから決定的に作られるので、ログも含めて同じ画面になる。
  */
 import { executeCommand } from '../git/commands'
 import { createRepo, type Repo } from '../git/model'
 import type { BuiltPuzzle } from '../puzzles/puzzles'
+import { LESSONS, lessonStart } from '../tutorial/lessons'
 
-export type Mode = 'free' | 'puzzle'
+export type Mode = 'free' | 'puzzle' | 'tutorial'
 
 export interface SharedState {
   readonly mode: Mode
   /** お題モードのときのお題の ID。 */
   readonly puzzleId?: string
+  /** チュートリアルのときのレッスンの ID と、今のステップ (0 始まり)。 */
+  readonly lessonId?: string
+  readonly step?: number
   readonly commands: readonly string[]
 }
 
@@ -22,7 +26,8 @@ export interface ReplayedEntry {
   readonly ok: boolean
 }
 
-const VERSION = 1
+/** 2 でチュートリアルを足した。1 のリンク (自由に試す・お題) もそのまま読める。 */
+const VERSION = 2
 const HASH_KEY = 's'
 /** 開いた側で重い処理にならないよう、受け付ける量に上限を設ける。 */
 export const MAX_COMMANDS = 500
@@ -47,6 +52,7 @@ export function encodeShare(state: SharedState): string {
     v: VERSION,
     m: state.mode,
     ...(state.mode === 'puzzle' && state.puzzleId !== undefined ? { p: state.puzzleId } : {}),
+    ...(state.mode === 'tutorial' && state.lessonId !== undefined ? { l: state.lessonId, i: state.step ?? 0 } : {}),
     c: state.commands,
   }
   return `#${HASH_KEY}=${toBase64Url(JSON.stringify(payload))}`
@@ -60,16 +66,18 @@ export function decodeShare(hash: string): SharedState | null {
   try {
     const payload: unknown = JSON.parse(fromBase64Url(encoded))
     if (typeof payload !== 'object' || payload === null) return null
-    const { v, m, p, c } = payload as Record<string, unknown>
-    if (v !== VERSION || (m !== 'free' && m !== 'puzzle')) return null
+    const { v, m, p, l, i, c } = payload as Record<string, unknown>
+    if (v !== 1 && v !== VERSION) return null
+    if (m !== 'free' && m !== 'puzzle' && !(m === 'tutorial' && v === VERSION)) return null
     if (!Array.isArray(c) || c.length > MAX_COMMANDS) return null
     if (!c.every((command) => typeof command === 'string' && command.length <= MAX_COMMAND_LENGTH)) {
       return null
     }
     if (m === 'puzzle' && typeof p !== 'string') return null
-    return m === 'puzzle'
-      ? { mode: m, puzzleId: p as string, commands: c as string[] }
-      : { mode: m, commands: c as string[] }
+    if (m === 'tutorial' && (typeof l !== 'string' || typeof i !== 'number' || !Number.isInteger(i) || i < 0)) return null
+    if (m === 'puzzle') return { mode: m, puzzleId: p as string, commands: c as string[] }
+    if (m === 'tutorial') return { mode: m, lessonId: l as string, step: i as number, commands: c as string[] }
+    return { mode: m, commands: c as string[] }
   } catch {
     return null
   }
@@ -94,6 +102,9 @@ export interface RestoredState {
   readonly mode: Mode
   /** お題モードのとき、puzzles の中の位置。 */
   readonly puzzleIndex: number
+  /** チュートリアルのとき、LESSONS の中の位置と、今のステップ。 */
+  readonly lessonIndex: number
+  readonly step: number
   readonly repo: Repo
   readonly log: ReplayedEntry[]
 }
@@ -104,10 +115,17 @@ export function restoreShare(
   puzzles: readonly BuiltPuzzle[],
 ): RestoredState | null {
   if (state.mode === 'free') {
-    return { mode: 'free', puzzleIndex: 0, ...replay(createRepo(), state.commands) }
+    return { mode: 'free', puzzleIndex: 0, lessonIndex: 0, step: 0, ...replay(createRepo(), state.commands) }
+  }
+  if (state.mode === 'tutorial') {
+    const lessonIndex = LESSONS.findIndex((lesson) => lesson.id === state.lessonId)
+    const lesson = LESSONS[lessonIndex]
+    if (!lesson) return null
+    const step = Math.min(state.step ?? 0, lesson.steps.length - 1)
+    return { mode: 'tutorial', puzzleIndex: 0, lessonIndex, step, ...replay(lessonStart(lesson), state.commands) }
   }
   const puzzleIndex = puzzles.findIndex((built) => built.puzzle.id === state.puzzleId)
   const built = puzzles[puzzleIndex]
   if (!built) return null
-  return { mode: 'puzzle', puzzleIndex, ...replay(built.start, state.commands) }
+  return { mode: 'puzzle', puzzleIndex, lessonIndex: 0, step: 0, ...replay(built.start, state.commands) }
 }

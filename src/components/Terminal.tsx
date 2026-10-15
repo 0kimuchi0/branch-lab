@@ -15,6 +15,10 @@ interface TerminalProps {
   readonly resetLabel: string
   /** エディタが開いている間は入力できない (Git がエディタを待っているため)。 */
   readonly editorOpen: boolean
+  /** 入力欄に入れるコマンド (チュートリアルやヘルプの「入力欄に入れる」)。id が変わるたびに入れる。 */
+  readonly draft?: { readonly text: string; readonly id: number } | null
+  /** ログが空のときに出す案内。 */
+  readonly emptyHint?: string
 }
 
 /** 差分を出すコマンドかどうか (出力の +/- 行に色を付ける)。 */
@@ -83,10 +87,23 @@ const EXAMPLES = [
   'git diff',
 ] as const
 
-export function Terminal({ log, onRun, onReset, resetLabel, editorOpen }: TerminalProps) {
+export function Terminal({ log, onRun, onReset, resetLabel, editorOpen, draft, emptyHint }: TerminalProps) {
   const [value, setValue] = useState('')
   const [cursor, setCursor] = useState<number | null>(null)
   const logRef = useRef<HTMLDivElement>(null)
+  const inputRef = useRef<HTMLInputElement>(null)
+
+  // 「入力欄に入れる」で渡されたコマンドは、描画の途中で入力欄に反映する (渡されるたびに id が変わる)
+  const [appliedDraft, setAppliedDraft] = useState<number | null>(null)
+  if (draft && draft.id !== appliedDraft) {
+    setAppliedDraft(draft.id)
+    setValue(draft.text)
+    setCursor(null)
+  }
+  const draftId = draft?.id
+  useEffect(() => {
+    if (draftId !== undefined) inputRef.current?.focus()
+  }, [draftId])
 
   useEffect(() => {
     const el = logRef.current
@@ -129,9 +146,9 @@ export function Terminal({ log, onRun, onReset, resetLabel, editorOpen }: Termin
       <div className="terminal-log" ref={logRef} aria-live="polite">
         {log.length === 0 && (
           <p className="terminal-hint">
-            コマンドを入力するか、下のボタンを押してみてください。
+            {emptyHint ?? 'コマンドを入力するか、下のボタンを押してみてください。'}
             <br />
-            <code>help</code> で使えるコマンドを表示します。
+            <code>help</code> で使えるコマンドを、<code>help &lt;コマンド&gt;</code> でその説明を表示します。
           </p>
         )}
         {log.map((entry) => (
@@ -161,6 +178,7 @@ export function Terminal({ log, onRun, onReset, resetLabel, editorOpen }: Termin
           $
         </span>
         <input
+          ref={inputRef}
           type="text"
           value={value}
           onChange={(event) => {

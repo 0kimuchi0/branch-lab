@@ -109,8 +109,8 @@ describe('executeCommand', () => {
   })
 
   it('git だけ、または help で使い方を表示する', () => {
-    expect(executeCommand(createRepo(), 'git').output).toContain('Git のコマンド')
-    expect(executeCommand(createRepo(), 'help').output).toContain('git rm と区別')
+    expect(executeCommand(createRepo(), 'git').output).toContain('記録する (基本):')
+    expect(executeCommand(createRepo(), 'help').output).toContain('git rm を区別')
   })
 
   it('空入力は何もしない', () => {

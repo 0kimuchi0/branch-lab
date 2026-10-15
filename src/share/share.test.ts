@@ -61,3 +61,22 @@ describe('replay / restoreShare', () => {
     expect(restoreShare({ mode: 'puzzle', puzzleId: 'nope', commands: [] }, puzzles)).toBeNull()
   })
 })
+
+describe('チュートリアルの共有', () => {
+  it('レッスンとステップも往復でき、コマンドを実行し直して復元する', async () => {
+    const { LESSONS } = await import('../tutorial/lessons')
+    const state = { mode: 'tutorial' as const, lessonId: 'branch', step: 2, commands: ['git switch -c feature'] }
+    const decoded = decodeShare(encodeShare(state))
+    expect(decoded).toEqual(state)
+    const restored = restoreShare(decoded as NonNullable<typeof decoded>, puzzles)
+    expect(restored?.lessonIndex).toBe(LESSONS.findIndex((lesson) => lesson.id === 'branch'))
+    expect(restored?.step).toBe(2)
+    expect(restored?.repo.head).toEqual({ type: 'branch', name: 'feature' })
+    expect(restoreShare({ ...state, lessonId: 'nothing' }, puzzles)).toBeNull()
+  })
+
+  it('前の形式 (v1) のリンクも読める', () => {
+    const v1 = `#s=${btoa(JSON.stringify({ v: 1, m: 'free', c: ['git status'] }))}`
+    expect(decodeShare(v1)).toEqual({ mode: 'free', commands: ['git status'] })
+  })
+})
