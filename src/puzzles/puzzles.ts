@@ -425,6 +425,36 @@ export const PUZZLES: readonly Puzzle[] = [
     ],
     solutions: [['git sparse-checkout set web']],
     check: (repo) => repo.sparse !== null && repo.sparse.length === 1 && repo.sparse[0] === 'web',
+  },  {
+    id: 'autosquash',
+    title: 'あとから直しを混ぜ込む',
+    description:
+      '「ログイン画面を追加」のコミットで、login.html の見出しを書き忘れていました。その後に「README を更新」もコミットしています。直しを commit --fixup で作り、rebase --autosquash で元のコミットに混ぜ込んで、コミットを 2 つのままにしましょう。',
+    hint: 'echo "<h1>ログイン</h1>" >> login.html で直して git add し、git commit --fixup=C1 で "fixup! ログイン画面を追加" のコミットを作ります。git rebase --autosquash C0 で、C1 の直後に fixup として並べ替えてまとめます。',
+    setup: [...change('login.html', '<form></form>', 'ログイン画面を追加'), ...change('README.md', 'ログインの説明', 'README を更新')],
+    solutions: [['echo "<h1>ログイン</h1>" >> login.html', 'git add login.html', 'git commit --fixup=C1', 'git rebase --autosquash C0']],
+    check: (repo) => {
+      const tip = repo.commits[repo.branches['main'] ?? '']
+      const first = repo.commits[tip?.parents[0] ?? '']
+      return first?.message === 'ログイン画面を追加' && (first.tree['login.html'] ?? '').includes('<h1>ログイン</h1>')
+    },
+  },
+  {
+    id: 'am',
+    title: 'メールで届いたパッチを取り込む',
+    description:
+      'リポジトリに push できない協力者から、変更がパッチファイル (mail/0001-挨拶を追加.patch) で届きました。git am で、このパッチを main のコミットとして取り込みましょう。',
+    hint: 'cat mail/0001-挨拶を追加.patch で中身を確かめられます。git am mail/0001-挨拶を追加.patch で、パッチのメッセージと変更のままコミットになります。',
+    setup: [
+      'git switch -c contributor',
+      ...change('greeting.txt', 'こんにちは', '挨拶を追加'),
+      'git format-patch -1 -o mail',
+      'git switch main',
+      'git branch -D contributor',
+      ...change('README.md', '更新', 'README を更新'),
+    ],
+    solutions: [['git am mail/0001-挨拶を追加.patch']],
+    check: (repo) => repo.commits[repo.branches['main'] ?? '']?.message === '挨拶を追加',
   },
 ]
 

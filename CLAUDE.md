@@ -26,6 +26,8 @@ React + TypeScript + Vite、テストは Vitest。UI の文言は日本語。
   エディタが開いている間、ほかのコマンドは実行できない。
 - `src/git/log.ts`: log (範囲・絞り込み・書式・--graph の線)。`src/git/notes.ts`: notes (`Repo.notes`)。
   `src/git/sparse.ts`: sparse-checkout (`Repo.sparse`)。cone の外のファイルも workdir に持ち、`isSparseHidden` で見えなくする。
+- `src/git/patch.ts`: format-patch / apply / am。パッチは作業ディレクトリのファイルとして読み書きし、
+  am の途中の状態は `Operation` の `AmOperation`。`src/git/compare.ts`: cherry / range-diff (行番号を除いた差分で比べる)。
 - `src/git/inspect.ts`: diff / show / blame。`src/git/bisect.ts`: bisect (状態は `Repo.bisect`)。`src/git/stash.ts`: stash (コミットにはせず `Repo.stash` に持つ)。
   `src/git/tag.ts`: tag。
 - reflog: HEAD やブランチを動かす処理は `logRefs(before, after, メッセージ)` で `Repo.reflogs` に記録する
@@ -76,6 +78,6 @@ main に push すると https://branch-lab-dun.vercel.app にデプロイされ�
 
 ## 今後の予定
 
-- `commit --fixup` と `rebase --autosquash`
-- `format-patch` / `am`
-- `range-diff`、`cherry`
+- フック (`pre-commit`・`commit-msg` など) の模擬
+- `bundle`
+- `switch --orphan`

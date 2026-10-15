@@ -18,7 +18,7 @@ npm run build    # 型チェックと本番ビルド
 画面上部のタブで 2 つのモードを切り替えられます。
 
 - **自由に試す**: clone 直後のリポジトリで、好きなコマンドを試せます。
-- **お題**: 「マージする」「コンフリクトを解消する」「コミットをまとめる」「作業を退避して急ぎの修正」「バグを入れたコミットを探す」「サブモジュールを最新にする」「チームメイトの立場で push する」など 24 問。
+- **お題**: 「マージする」「コンフリクトを解消する」「コミットをまとめる」「作業を退避して急ぎの修正」「バグを入れたコミットを探す」「サブモジュールを最新にする」「チームメイトの立場で push する」「メールで届いたパッチを取り込む」など 26 問。
   目標のグラフと同じ履歴を作れたら正解です。コミット ID やメッセージが違っても、
   履歴の形と各コミットの由来 (コピーや revert を含む) が同じなら正解になります。
   クリアした記録はブラウザに保存されます。
@@ -60,11 +60,12 @@ URL のハッシュ (`#s=...`) には状態そのものではなく、モード�
 | `restore [--staged] [--source=<コミット>] <ファイル>` | 作業ディレクトリ (または ステージ) を戻す |
 | `rm [--cached] [-f] <ファイル>` | ステージと作業ディレクトリから消す |
 | `commit [-m "…"] [-a] [--allow-empty] [--amend] [--no-edit]` | ステージの内容でコミットする (`-m` がなければエディタが開く) |
+| `commit --fixup=<コミット>` / `--squash=<コミット>` | `rebase --autosquash` でまとめるための `fixup!` / `squash!` のコミットを作る |
 | `branch [<名前> [<起点>]]` / `-d` / `-D` / `-m` / `-u` | ブランチの一覧・作成・削除・名前の変更・upstream の設定 |
 | `switch <名前>` / `-c <名前> [<起点>]` / `--detach <コミット>` / `switch -` | ブランチを切り替える (リモートにだけあるブランチは追跡ブランチを作る、`-` は直前のブランチ) |
 | `checkout <名前\|コミット>` / `-b <名前>` / `-- <ファイル>` | switch と restore を兼ねる昔からのコマンド |
 | `merge [--no-ff] [--ff-only] [--no-edit] [-s <ストラテジー>] [-X ours\|theirs] <ブランチ>...` | fast-forward またはマージコミットでマージする (2 つ以上なら octopus、`-s ours` は履歴だけをマージ) |
-| `rebase [-i] [-r] [-x <コマンド>] [-X ours\|theirs] <ブランチ>` | 現在のブランチのコミットを付け替える (`-i` は todo をエディタで編集する、`-r` / `--rebase-merges` はマージの形を保つ) |
+| `rebase [-i] [-r] [-x <コマンド>] [-X ours\|theirs] [--autosquash] <ブランチ>` | 現在のブランチのコミットを付け替える (`-i` は todo をエディタで編集する、`-r` / `--rebase-merges` はマージの形を保つ、`--autosquash` は `fixup!` / `squash!` のコミットをまとめる) |
 | `cherry-pick [-e] [-m <親>] [-X …] [--allow-empty] <コミット>...` | コミットの変更を複製する (`-m` でマージコミットも) |
 | `revert [--no-edit] [-m <親>] [-X …] <コミット>...` | コミットの変更を打ち消すコミットを作る |
 | `tag [-a] [-m "…"] [-f] <タグ> [<コミット>]` / `tag -l [<パターン>]` / `tag -d <タグ>` | タグを付ける・一覧を見る・消す |
@@ -74,6 +75,11 @@ URL のハッシュ (`#s=...`) には状態そのものではなく、モード�
 | `bisect start [<bad> [<good>...]]` / `good` / `bad` / `skip` / `reset` / `log` / `run <コマンド>` | 二分探索でバグを入れたコミットを探す (`new` / `old` も可) |
 | `config <キー> [<値>]` / `config --unset <キー>` / `config --list` | 設定を読み書きする (`rerere.enabled`・`rerere.autoUpdate`・`pull.rebase`・`pull.ff`・`merge.ff` が働く) |
 | `rerere` / `rerere status` / `diff` / `remaining` / `forget <パス>` / `clear` | コンフリクトの解決を記録し、同じコンフリクトで再利用する (`rerere.enabled` のとき) |
+| `format-patch [-<数>] [-o <ディレクトリ>] [--stdout] [<起点> \| <A>..<B>]` | コミットをパッチファイル (`0001-件名.patch`) にする |
+| `apply [--check] [--index \| --cached] [-R] <パッチ>` | パッチを作業ディレクトリ (やステージ) に当てる |
+| `am [-3] <パッチ>...` / `am --continue` / `--skip` / `--abort` / `--show-current-patch` | パッチをコミットとして取り込む |
+| `cherry [-v] [<上流> [<先端>]]` | 上流に同じ変更が入ったコミットに `-`、まだのコミットに `+` を付ける |
+| `range-diff <A>...<B>` / `<基点> <A> <B>` / `<範囲1> <範囲2>` | 2 つのコミットの並び (rebase の前後など) を対応づけて違いを見る |
 | `clone [-b <ブランチ>] [--recurse-submodules] [--sparse] <URL> [<ディレクトリ>]` | リモートの URL から別のリポジトリを作る (`cd` で中に入る) |
 | `sparse-checkout init` / `set <ディレクトリ>...` / `add` / `list` / `disable` | 作業ディレクトリに出すディレクトリを絞る (cone モード) |
 | `worktree add [-b <ブランチ>] [--detach] <パス> [<コミット>]` / `worktree list` / `worktree remove [-f] <パス>` | 作業ディレクトリをもう 1 つ作る (`cd` で移る) |
@@ -105,6 +111,8 @@ URL のハッシュ (`#s=...`) には状態そのものではなく、モード�
 末尾に `~n` (第 1 親を n 回たどる) や `^n` (n 番目の親) を付けられます (例: `HEAD~2`, `main^`, `HEAD^2`)。
 `HEAD@{n}` / `main@{n}` / `@{n}` は reflog の n 個前、`@{-1}` は直前にいたブランチです
 (例: `git reset --hard HEAD@{1}` で直前の reset を取り消せます)。
+
+`echo` 以外のコマンドでも、`> ファイル` / `>> ファイル` で出力をファイルに書けます (例: `git format-patch -2 --stdout > all.patch`)。
 
 先頭の `git` は省略できます (ただし `rm` はシェルの `rm`、`git rm` は Git の `rm` として区別します)。
 
@@ -155,6 +163,10 @@ octopus マージでコンフリクトが出た場合は、本物と同じく中
 - `notes` は本物ではコミット (refs/notes/commits) として保存されますが、ここでは別に持ち、push もしません。
   `notes list` はメモの付いたコミットの ID だけを表示します。
 - `sparse-checkout` は cone モードだけです。
+- `format-patch` のパッチには作者 (`From:`) と日時 (`Date:`) の行がなく、ファイル名には日本語の件名もそのまま使います。
+  `am` はパッチの元のコミットがこのリポジトリにあれば、それを由来として記録し、`-3` ではそのコミットを使って 3-way マージします。
+- `commit --fixup=amend:` / `--fixup=reword:` は未対応です。`range-diff` のコミットの対応づけは、
+  同じパッチ・同じ由来・同じ件名の順で行います (本物は差分の大きさから対応を決めます)。
 - `config` は 1 つだけで、`--global` と `--local` を区別しません。
 - `rerere` は、本物はコンフリクトの箇所 (hunk) ごとに解決を覚えますが、ここではファイル全体の内容で覚えます。
 - `blame` には作者と日時がなく、コミット ID と件名を表示します。`bisect run` のコマンドはこのアプリのコマンドで、成功なら good、失敗なら bad です
@@ -188,6 +200,8 @@ src/
     log.ts         log (範囲・絞り込み・書式・--graph)
     notes.ts       notes
     sparse.ts      sparse-checkout
+    patch.ts       format-patch / apply / am
+    compare.ts     cherry / range-diff
     commands.ts    入力文字列の解析と実行。規則違反は例外にせず結果として返す
   graph/
     layout.ts      コミットグラフの座標を計算する純粋関数 (ローカル・リモートの両方)
@@ -215,6 +229,6 @@ Vite として自動で認識されるので、設定ファイルはありませ
 
 ## 今後の拡張案
 
-- `commit --fixup` と `rebase --autosquash`
-- `format-patch` / `am` (パッチでのやりとり)
-- `range-diff`、`cherry`
+- フック (`pre-commit`・`commit-msg` など) の模擬
+- `bundle` (ファイルでリポジトリを受け渡す)
+- `switch --orphan` (履歴のないブランチ)

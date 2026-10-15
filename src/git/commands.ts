@@ -50,6 +50,7 @@ import {
 } from './model'
 import { getConfig, listConfig, setConfig, unsetConfig } from './config'
 import { gitClone } from './clone'
+import { cherry, rangeDiff } from './compare'
 import { log } from './log'
 import { amAbort, amContinue, amShowCurrentPatch, amSkip, gitAm, gitApply, gitFormatPatch } from './patch'
 import { sparseAdd, sparseDisable, sparseInit, sparseList, sparseSet } from './sparse'
@@ -135,6 +136,7 @@ export const HELP_TEXT = [
   '  clone [-b <ブランチ>] [--recurse-submodules] [--sparse] <URL> [<ディレクトリ>]   (リモートの URL から別のリポジトリを作る)',
   '  format-patch [-<数>] [-o <ディレクトリ>] [--stdout] [<起点> | <A>..<B>]   (コミットをパッチファイルにする)',
   '  apply [--check] [--index | --cached] [-R] <パッチ> / am [-3] <パッチ>... / am --continue / --skip / --abort',
+  '  cherry [-v] [<上流> [<先端>]] / range-diff <A>...<B> | <基点> <A> <B> | <範囲1> <範囲2>   (パッチを比べる)',
   '  submodule add <URL> [<パス>] / submodule [status] / init / update [--init] [--remote] / deinit / foreach <コマンド>',
   '  worktree add [-b <ブランチ>] [--detach] <パス> [<コミット>] / worktree list / worktree remove [-f] <パス>',
   '  remote [-v] / remote add <名前> <URL> / remove / rename / set-url / get-url',
@@ -942,6 +944,19 @@ function runGitCommand(repo: Repo, name: string, args: readonly string[], raw: s
       return runLog(repo, args)
     case 'notes':
       return runNotes(repo, args)
+    case 'cherry': {
+      const parsed = parseArgs(args, { flags: ['-v'], aliases: { '--verbose': '-v' } })
+      const [upstream, head, limit, ...extra] = parsed.positional
+      if (extra.length > 0) usage('git cherry [-v] [<上流> [<先端> [<境界>]]]')
+      // 上流を省略すると、今のブランチの upstream
+      const branch = repo.head.type === 'branch' ? repo.head.name : null
+      const tracked = branch === null ? undefined : repo.upstreams[branch]
+      const base = upstream ?? tracked
+      if (base === undefined) throw new GitError('fatal: Could not find a tracked remote branch, please specify <upstream> manually.')
+      return cherry(repo, base, head, limit, parsed.flags.has('-v'))
+    }
+    case 'range-diff':
+      return rangeDiff(repo, parseArgs(args, { flags: ['--no-color'] }).positional)
     case 'format-patch': {
       const expanded = args.flatMap((arg) => (/^-\d+$/.test(arg) ? ['--count', arg.slice(1)] : [arg]))
       const parsed = parseArgs(expanded, {
