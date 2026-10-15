@@ -338,6 +338,8 @@ export interface Repo {
    * キーは .git からのパス。作業ディレクトリには含めず、git add の対象にもならない。
    */
   readonly gitFiles: Readonly<Record<string, GitFile>>
+  /** FETCH_HEAD: 最後に fetch したもの (git merge FETCH_HEAD で使う)。description はマージメッセージに使う。 */
+  readonly fetchHead: { readonly id: CommitId; readonly description: string } | null
   /** git notes: コミット → そのコミットに付けたメモ。 */
   readonly notes: Readonly<Record<CommitId, string>>
 }
@@ -533,6 +535,7 @@ export function createRepo(): Repo {
     clones: {},
     clone: null,
     gitFiles: {},
+    fetchHead: null,
     reflogs: {
       HEAD: [{ id: root.id, message: `clone: from ${REMOTE_NAME}` }],
       [DEFAULT_BRANCH]: [{ id: root.id, message: `clone: from ${REMOTE_NAME}` }],
@@ -634,6 +637,7 @@ export function reachableCommits(repo: Repo): Set<CommitId> {
   ]
   const headId = headCommitIdOrNull(repo)
   if (headId !== null) tips.push(headId)
+  if (repo.fetchHead !== null) tips.push(repo.fetchHead.id)
   if (repo.operation?.type === 'merge') tips.push(repo.operation.theirs)
   if (repo.bisect) tips.push(...(repo.bisect.bad === null ? [] : [repo.bisect.bad]), ...repo.bisect.good)
   for (const state of [currentWorktreeState(repo), ...Object.values(repo.worktrees)]) {
@@ -695,6 +699,10 @@ export function resolveRef(repo: Repo, ref: string): CommitId {
   let id: CommitId
   if (reflogRef) id = resolveReflogRef(repo, reflogRef[1] ?? '', Number(reflogRef[2]))
   else if (base === 'HEAD' || base === '@') id = headCommitId(repo)
+  else if (base === 'FETCH_HEAD') {
+    if (repo.fetchHead === null) throw new GitError("fatal: ambiguous argument 'FETCH_HEAD': unknown revision")
+    id = repo.fetchHead.id
+  }
   else if (base in repo.tags) id = (repo.tags[base] as Tag).target
   else if (base in repo.branches) id = repo.branches[base] as CommitId
   else if (base in repo.remoteBranches) id = repo.remoteBranches[base] as CommitId

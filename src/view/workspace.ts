@@ -5,6 +5,14 @@
 import { MAIN_WORKTREE, headTree, isSparseHidden, REMOTE_NAME, type Repo } from '../git/model'
 import { changedPaths, displayContent } from '../git/tree'
 
+/** 画面に出すファイルの内容 (サブモジュールは Subproject commit、バンドルは見出しとコミットの数)。 */
+function fileContent(content: string): string {
+  if (!content.startsWith('# v2 git bundle\n')) return displayContent(content)
+  const [header = ''] = content.split('\nPACK ')
+  const count = (content.match(/"parents":/g) ?? []).length
+  return `${header.replace(/\n+$/, '')}\n(バンドルの中身: コミット ${count} 個)\n`
+}
+
 export type FileState = 'clean' | 'untracked' | 'added' | 'modified' | 'deleted' | 'conflict'
 
 export interface AreaFile {
@@ -40,7 +48,7 @@ export function workdirFiles(repo: Repo): AreaFile[] {
       : !(path in repo.index) ? 'untracked'
       : content === undefined ? 'deleted'
       : 'modified'
-    return { path, state, content: content === undefined ? undefined : displayContent(content) }
+    return { path, state, content: content === undefined ? undefined : fileContent(content) }
   })
 }
 
@@ -57,7 +65,7 @@ export function stagedFiles(repo: Repo): AreaFile[] {
       : !(path in head) ? 'added'
       : content === undefined ? 'deleted'
       : 'modified'
-    return { path, state, content: content === undefined ? undefined : displayContent(content) }
+    return { path, state, content: content === undefined ? undefined : fileContent(content) }
   })
 }
 

@@ -5,10 +5,20 @@
 import {
   GitError,
   MAIN_WORKTREE,
+  readFile,
   type Repo,
   type OperationResult,
 } from './model'
-import { cloneRemote, submoduleUpdate, syncServersOut } from './submodule'
+
+function readFileOrNull(repo: Repo, path: string): string | null {
+  try {
+    return readFile(repo, path).output
+  } catch {
+    return null
+  }
+}
+import { parseBundle } from './bundle'
+import { activeRepo, cloneRemote, submoduleUpdate, syncServersOut } from './submodule'
 import { currentDirectory, resolvePath, worktreePaths } from './worktree'
 
 export interface CloneOptions {
@@ -25,12 +35,27 @@ function nameFromUrl(url: string): string {
 
 /** git clone [--branch <ブランチ>] [--recurse-submodules] [--sparse] <URL> [<ディレクトリ>] (root は一番外側のリポジトリ) */
 export function gitClone(root: Repo, url: string, directory: string | undefined, options: CloneOptions = {}): OperationResult {
-  const remote = Object.values(root.remotes).find((other) => other.url === url)
+  let remote = Object.values(root.remotes).find((other) => other.url === url)
   const library = root.libraries[url]
+  // 今いる場所のバンドルのファイルからも clone できる
+  if (!remote && !library) {
+    const here = activeRepo(root)
+    const file = readFileOrNull(here, url)
+    if (file !== null && file.startsWith('# v2 git bundle')) {
+      const bundle = parseBundle(file, url)
+      if (bundle.prerequisites.length > 0) {
+        throw new GitError(`fatal: ${url} は前提のコミット (${bundle.prerequisites.map((item) => item.id).join(', ')}) が必要なので、clone できません`)
+      }
+      const branches = Object.fromEntries(
+        bundle.refs.filter((ref) => ref.name.startsWith('refs/heads/')).map((ref) => [ref.name.slice('refs/heads/'.length), ref.id]),
+      )
+      remote = { name: 'origin', url: resolvePath(currentDirectory(root), url), commits: bundle.commits, branches, tags: bundle.tags }
+    }
+  }
   if (!remote && !library) {
     throw new GitError(
       `fatal: repository '${url}' not found\n` +
-        '(このアプリで clone できるのは、リモート (git remote -v) とサブモジュールの URL です)',
+        '(このアプリで clone できるのは、リモート (git remote -v) とサブモジュールの URL と、バンドルのファイルです)',
     )
   }
   const name = directory ?? nameFromUrl(url)

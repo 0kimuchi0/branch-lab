@@ -82,6 +82,11 @@ function conflictLines(conflicts: readonly Conflict[]): string[] {
  */
 export function mergeMessage(repo: Repo, refs: string | readonly string[]): string {
   const list = typeof refs === 'string' ? [refs] : refs
+  // FETCH_HEAD は、fetch したときの説明 (branch 'main' of <URL>) を使う (Git と同じ)
+  if (list.length === 1 && list[0] === 'FETCH_HEAD' && repo.fetchHead !== null) {
+    const current = currentBranch(repo)
+    return `Merge ${repo.fetchHead.description}${current === null || current === 'main' ? '' : ` into ${current}`}`
+  }
   const groups: Array<[string, string, string[]]> = [
     ['branch', 'branches', []],
     ['tag', 'tags', []],

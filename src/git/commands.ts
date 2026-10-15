@@ -6,6 +6,7 @@ import {
   parseStrategy,
   parseStrategyOption,
   rebase,
+  rebase as rebaseOnto,
   rebaseInteractive,
   revert,
   saveEditor,
@@ -55,6 +56,7 @@ import {
 } from './model'
 import { getConfig, listConfig, setConfig, unsetConfig } from './config'
 import { gitClone } from './clone'
+import { bundleCreate, bundleListHeads, bundleUnbundle, bundleVerify, fetchBundle } from './bundle'
 import { cherry, rangeDiff } from './compare'
 import { log } from './log'
 import { amAbort, amContinue, amShowCurrentPatch, amSkip, gitAm, gitApply, gitFormatPatch } from './patch'
@@ -142,6 +144,7 @@ export const HELP_TEXT = [
   '  format-patch [-<数>] [-o <ディレクトリ>] [--stdout] [<起点> | <A>..<B>]   (コミットをパッチファイルにする)',
   '  apply [--check] [--index | --cached] [-R] <パッチ> / am [-3] <パッチ>... / am --continue / --skip / --abort',
   '  cherry [-v] [<上流> [<先端>]] / range-diff <A>...<B> | <基点> <A> <B> | <範囲1> <範囲2>   (パッチを比べる)',
+  '  bundle create <ファイル> <リビジョン>... / bundle verify / list-heads / unbundle <ファイル>   (clone・fetch・pull の元にもできる)',
   '  submodule add <URL> [<パス>] / submodule [status] / init / update [--init] [--remote] / deinit / foreach <コマンド>',
   '  worktree add [-b <ブランチ>] [--detach] <パス> [<コミット>] / worktree list / worktree remove [-f] <パス>',
   '  remote [-v] / remote add <名前> <URL> / remove / rename / set-url / get-url',
@@ -748,8 +751,20 @@ function runPush(repo: Repo, args: readonly string[]): OperationResult {
   })
 }
 
+/** 引数がリモートの名前ではなく、バンドルのファイルなら true。 */
+function isBundleFile(repo: Repo, path: string | undefined): path is string {
+  if (path === undefined || path in repo.remotes) return false
+  try {
+    return readFile(repo, path).output.startsWith('# v2 git bundle')
+  } catch {
+    return false
+  }
+}
+
 function runFetch(repo: Repo, args: readonly string[]): OperationResult {
   const parsed = parseArgs(args, { flags: ['--all'] })
+  const [first, ...refspecs] = parsed.positional
+  if (isBundleFile(repo, first)) return fetchBundle(repo, first, refspecs)
   const text = 'git fetch [<リモート>] / git fetch --all'
   const { remote, branch } = parseRemoteArgs(repo, parsed.positional, text)
   if (branch !== undefined || (parsed.flags.has('--all') && remote !== undefined)) usage(text)
@@ -764,6 +779,19 @@ function runPull(repo: Repo, args: readonly string[]): OperationResult {
     aliases: { '-r': '--rebase', '--strategy': '-s', '--strategy-option': '-X' },
   })
   const text = 'git pull [--rebase | --no-rebase] [<リモート> [<ブランチ>]]'
+  const [first, ...rest] = parsed.positional
+  if (isBundleFile(repo, first)) {
+    // バンドルから: FETCH_HEAD に取り込んで、それを merge (--rebase なら rebase) する
+    const fetched = fetchBundle(repo, first, rest.slice(0, 1))
+    const integrated = parsed.flags.has('--rebase')
+      ? rebaseOnto(fetched.repo, 'FETCH_HEAD')
+      : mergeMany(fetched.repo, ['FETCH_HEAD'], {
+          noEdit: parsed.flags.has('--no-edit'),
+          fastForwardOnly: parsed.flags.has('--ff-only'),
+          reflogAction: 'pull',
+        })
+    return { repo: integrated.repo, output: [fetched.output, integrated.output].join('\n') }
+  }
   const { remote, branch } = parseRemoteArgs(repo, parsed.positional, text)
   if (parsed.flags.has('--rebase') && parsed.flags.has('--no-rebase')) {
     throw new GitError('fatal: --rebase と --no-rebase は同時に指定できません')
@@ -1091,6 +1119,22 @@ function runGitCommand(repo: Repo, name: string, args: readonly string[], raw: s
       return runLog(repo, args)
     case 'notes':
       return runNotes(repo, args)
+    case 'bundle': {
+      const [sub, file, ...rest] = args
+      if (file === undefined) usage('git bundle create <ファイル> <リビジョン>... / verify / list-heads / unbundle <ファイル>')
+      switch (sub) {
+        case 'create':
+          return bundleCreate(repo, file, rest)
+        case 'verify':
+          return bundleVerify(repo, file)
+        case 'list-heads':
+          return bundleListHeads(repo, file)
+        case 'unbundle':
+          return bundleUnbundle(repo, file)
+        default:
+          throw new GitError(`error: 未対応の bundle のサブコマンドです: ${sub}`)
+      }
+    }
     case 'cherry': {
       const parsed = parseArgs(args, { flags: ['-v'], aliases: { '--verbose': '-v' } })
       const [upstream, head, limit, ...extra] = parsed.positional
