@@ -2,7 +2,7 @@
  * 作業ディレクトリとステージに表示するファイルの一覧を作る純粋関数。
  * 作業ディレクトリはステージと、ステージは HEAD と比べた状態を付ける。
  */
-import { MAIN_WORKTREE, headTree, REMOTE_NAME, type Repo } from '../git/model'
+import { MAIN_WORKTREE, headTree, isSparseHidden, REMOTE_NAME, type Repo } from '../git/model'
 import { changedPaths, displayContent } from '../git/tree'
 
 export type FileState = 'clean' | 'untracked' | 'added' | 'modified' | 'deleted' | 'conflict'
@@ -31,7 +31,8 @@ function allPaths(...trees: ReadonlyArray<Readonly<Record<string, string>>>): st
 export function workdirFiles(repo: Repo): AreaFile[] {
   const conflicted = new Set(repo.conflicts.map((conflict) => conflict.path))
   const changed = new Set(changedPaths(repo.index, repo.workdir))
-  return allPaths(repo.workdir, repo.index).map((path) => {
+  // sparse-checkout で作業ディレクトリに出していないファイルは並べない
+  return allPaths(repo.workdir, repo.index).filter((path) => !isSparseHidden(repo, path)).map((path) => {
     const content = repo.workdir[path]
     const state: FileState =
       conflicted.has(path) ? 'conflict'

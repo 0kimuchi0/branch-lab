@@ -268,6 +268,11 @@ export interface Repo {
   readonly libraries: Readonly<Record<string, Library>>
   /** コミット ID の頭文字 (既定は C)。 */
   readonly idPrefix?: string
+  /**
+   * git sparse-checkout (cone モード) で作業ディレクトリに出すディレクトリ。null なら無効 (すべて出す)。
+   * 外のファイルも作業ディレクトリ (workdir) にはステージと同じ内容で持ち、ls・cat・画面では見えないようにする。
+   */
+  readonly sparse: readonly string[] | null
   /** git notes: コミット → そのコミットに付けたメモ。 */
   readonly notes: Readonly<Record<CommitId, string>>
 }
@@ -295,6 +300,7 @@ export interface WorktreeState {
   readonly headReflog: readonly ReflogEntry[]
   readonly rererePending: RerereState['pending']
   readonly submodules: Readonly<Record<string, Repo>>
+  readonly sparse: readonly string[] | null
 }
 
 /** メインの worktree (clone したディレクトリ) のパス。 */
@@ -313,6 +319,7 @@ export function currentWorktreeState(repo: Repo): WorktreeState {
     headReflog: repo.reflogs['HEAD'] ?? [],
     rererePending: repo.rerere.pending,
     submodules: repo.submodules,
+    sparse: repo.sparse,
   }
 }
 
@@ -338,6 +345,7 @@ export function enterWorktree(repo: Repo, path: string): Repo {
     worktrees,
     submodules: target.submodules,
     submodule: null,
+    sparse: target.sparse,
   }
 }
 
@@ -418,6 +426,7 @@ export function createRepo(): Repo {
     submodule: null,
     libraries: {},
     notes: {},
+    sparse: null,
     reflogs: {
       HEAD: [{ id: root.id, message: `clone: from ${REMOTE_NAME}` }],
       [DEFAULT_BRANCH]: [{ id: root.id, message: `clone: from ${REMOTE_NAME}` }],
@@ -751,18 +760,20 @@ export function writeFile(
   if (inSubmodule !== null) {
     throw new GitError(`${path} はサブモジュール '${inSubmodule}' の中です (cd ${inSubmodule} で中に移動してください)`)
   }
-  const content = append ? (repo.workdir[path] ?? '') + text : text
+  // sparse-checkout で出していないファイルは、作業ディレクトリにないものとして書く
+  const base = isSparseHidden(repo, path) ? '' : (repo.workdir[path] ?? '')
+  const content = append ? base + text : text
   return { repo: { ...repo, workdir: withFile(repo.workdir, path, content) }, output: '' }
 }
 
 export function touchFile(repo: Repo, path: string): OperationResult {
-  if (path in repo.workdir && !isSubmodulePath(repo, path)) return { repo, output: '' }
+  if (path in repo.workdir && !isSubmodulePath(repo, path) && !isSparseHidden(repo, path)) return { repo, output: '' }
   return writeFile(repo, path, '', false)
 }
 
 export function readFile(repo: Repo, path: string): OperationResult {
   if (isSubmodulePath(repo, path)) throw new GitError(`cat: ${path}: ディレクトリです`)
-  const content = repo.workdir[path]
+  const content = isSparseHidden(repo, path) ? undefined : repo.workdir[path]
   if (content === undefined) {
     throw new GitError(`cat: ${path}: そのようなファイルはありません`)
   }
@@ -773,10 +784,31 @@ export function listFiles(repo: Repo): OperationResult {
   return {
     repo,
     output: Object.keys(repo.workdir)
+      .filter((path) => !isSparseHidden(repo, path))
       .sort()
       .map((path) => (isSubmodulePath(repo, path) ? `${path}/` : path))
       .join('\n'),
   }
+}
+
+/**
+ * sparse-checkout の cone に入るパスか。ルートのファイルと、指定したディレクトリの中、
+ * 指定したディレクトリの親ディレクトリの直下のファイルが入る (Git の cone モードと同じ)。
+ */
+export function inSparseCone(dirs: readonly string[], path: string): boolean {
+  const parent = path.includes('/') ? path.slice(0, path.lastIndexOf('/')) : ''
+  if (parent === '') return true
+  return dirs.some((dir) => path.startsWith(`${dir}/`) || dir === parent || dir.startsWith(`${parent}/`))
+}
+
+/** sparse-checkout で作業ディレクトリに出していないファイルか (変更したファイルは出す)。 */
+export function isSparseHidden(repo: Repo, path: string): boolean {
+  return (
+    repo.sparse !== null &&
+    !inSparseCone(repo.sparse, path) &&
+    path in repo.index &&
+    repo.workdir[path] === repo.index[path]
+  )
 }
 
 /** path がサブモジュール (gitlink) の位置か。 */
@@ -793,7 +825,7 @@ export function submoduleContaining(repo: Repo, path: string): string | null {
 /** シェルの rm。作業ディレクトリからだけ削除する。 */
 export function removeFile(repo: Repo, path: string): OperationResult {
   if (isSubmodulePath(repo, path)) throw new GitError(`rm: ${path} を削除できません: ディレクトリです`)
-  if (!(path in repo.workdir)) {
+  if (!(path in repo.workdir) || isSparseHidden(repo, path)) {
     throw new GitError(`rm: ${path}: そのようなファイルはありません`)
   }
   return { repo: { ...repo, workdir: withFile(repo.workdir, path, undefined) }, output: '' }
@@ -1531,6 +1563,12 @@ function statusLines(repo: Repo): string[] {
     lines.push(`ブランチ ${branch}`)
     const tracking = trackingLine(repo, branch)
     if (tracking) lines.push(tracking)
+  }
+  if (repo.sparse !== null) {
+    const tracked = Object.keys(repo.index)
+    const present = tracked.filter((path) => !isSparseHidden(repo, path)).length
+    const percent = tracked.length === 0 ? 100 : Math.round((present / tracked.length) * 100)
+    lines.push(`スパースチェックアウト中です (追跡しているファイルの ${percent}% が作業ディレクトリにあります)`)
   }
   if (repo.bisect) {
     lines.push(`bisect 中です ('${repo.bisect.start}' から始めました)。git bisect good / bad で判定してください`)

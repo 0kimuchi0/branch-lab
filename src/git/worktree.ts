@@ -132,6 +132,7 @@ export function worktreeAdd(
     rererePending: {},
     // サブモジュールは、新しい worktree では git submodule update --init するまで空のまま
     submodules: {},
+    sparse: null,
   }
   return {
     repo: { ...current, worktrees: { ...current.worktrees, [path]: state } },

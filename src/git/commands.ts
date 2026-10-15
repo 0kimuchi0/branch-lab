@@ -47,6 +47,7 @@ import {
 } from './model'
 import { getConfig, listConfig, setConfig, unsetConfig } from './config'
 import { log } from './log'
+import { sparseAdd, sparseDisable, sparseInit, sparseList, sparseSet } from './sparse'
 import { notesAdd, notesAppend, notesCopy, notesEdit, notesList, notesRemove, notesShow } from './notes'
 import { rerereCommand } from './rerere'
 import {
@@ -125,6 +126,7 @@ export const HELP_TEXT = [
   '  config <キー> [<値>] / config --unset <キー> / config --list   (rerere.enabled・pull.rebase・merge.ff など)',
   '  rerere [status | diff | remaining | forget <パス> | clear]   (git config rerere.enabled true で有効)',
   '  notes add [-m "…"] [<コミット>] / append / edit / show / list / remove / copy',
+  '  sparse-checkout init / set <ディレクトリ>... / add / list / disable   (作業ディレクトリに出すファイルを絞る)',
   '  submodule add <URL> [<パス>] / submodule [status] / init / update [--init] [--remote] / deinit / foreach <コマンド>',
   '  worktree add [-b <ブランチ>] [--detach] <パス> [<コミット>] / worktree list / worktree remove [-f] <パス>',
   '  remote [-v] / remote add <名前> <URL> / remove / rename / set-url / get-url',
@@ -897,6 +899,27 @@ function runGit(repo: Repo, name: string, args: readonly string[], raw: string):
       return runLog(repo, args)
     case 'notes':
       return runNotes(repo, args)
+    case 'sparse-checkout': {
+      const [sub, ...rest] = args
+      const parsed = parseArgs(rest, { flags: ['--cone', '--no-cone'] })
+      if (parsed.flags.has('--no-cone')) throw new GitError('cone モードでない sparse-checkout は、このアプリでは未対応です')
+      switch (sub) {
+        case 'init':
+          return sparseInit(repo)
+        case 'set':
+          return sparseSet(repo, parsed.positional)
+        case 'add':
+          return sparseAdd(repo, parsed.positional)
+        case 'list':
+          return sparseList(repo)
+        case 'disable':
+          return sparseDisable(repo)
+        case 'reapply':
+          return { repo, output: '' }
+        default:
+          usage('git sparse-checkout init / set <ディレクトリ>... / add <ディレクトリ>... / list / disable')
+      }
+    }
     case 'diff': {
       const parsed = parseArgs(args, {
         flags: ['--staged', '--name-only', '--stat'],
