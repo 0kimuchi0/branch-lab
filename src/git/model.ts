@@ -269,6 +269,15 @@ export interface Repo {
   /** コミット ID の頭文字 (既定は C)。 */
   readonly idPrefix?: string
   /**
+   * clone やサブモジュールとして入れ子に持つリポジトリなら、その場所 (~/teammate など)。
+   * 一番外側のリポジトリ (~/branch-lab) では undefined。
+   */
+  readonly home?: string
+  /** git clone で作ったリポジトリ (場所 → そのリポジトリ)。一番外側のリポジトリだけが持つ。 */
+  readonly clones: Readonly<Record<string, Repo>>
+  /** cd で clone したリポジトリの中にいるなら、その場所。 */
+  readonly clone: string | null
+  /**
    * git sparse-checkout (cone モード) で作業ディレクトリに出すディレクトリ。null なら無効 (すべて出す)。
    * 外のファイルも作業ディレクトリ (workdir) にはステージと同じ内容で持ち、ls・cat・画面では見えないようにする。
    */
@@ -427,6 +436,8 @@ export function createRepo(): Repo {
     libraries: {},
     notes: {},
     sparse: null,
+    clones: {},
+    clone: null,
     reflogs: {
       HEAD: [{ id: root.id, message: `clone: from ${REMOTE_NAME}` }],
       [DEFAULT_BRANCH]: [{ id: root.id, message: `clone: from ${REMOTE_NAME}` }],

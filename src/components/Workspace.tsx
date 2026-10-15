@@ -66,7 +66,7 @@ export function Workspace({ repo }: { readonly repo: Repo }) {
   const worktrees = useMemo(() => worktreeRows(repo), [repo])
   const many = worktrees.length > 1
   // worktree が複数あるときと、サブモジュールの中にいるときは、作業ディレクトリの場所を出す
-  const showPath = many || repo.idPrefix !== undefined
+  const showPath = many || repo.home !== undefined
 
   return (
     <div className="workspace">

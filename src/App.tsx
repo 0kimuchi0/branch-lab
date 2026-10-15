@@ -187,7 +187,7 @@ export default function App() {
         </p>
         <div className="header-row">
           <p className="status" aria-live="polite">
-            {(Object.keys(session.repo.worktrees).length > 0 || session.repo.submodule !== null) &&
+            {(Object.keys(session.repo.worktrees).length > 0 || session.repo.submodule !== null || session.repo.clone !== null) &&
               `${currentDirectory(session.repo)} — `}
             HEAD: {branch ?? '(detached)'} @ {headCommitId(active)}
           </p>

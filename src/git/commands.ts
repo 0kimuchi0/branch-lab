@@ -46,6 +46,7 @@ import {
   type ResetMode,
 } from './model'
 import { getConfig, listConfig, setConfig, unsetConfig } from './config'
+import { gitClone } from './clone'
 import { log } from './log'
 import { sparseAdd, sparseDisable, sparseInit, sparseList, sparseSet } from './sparse'
 import { notesAdd, notesAppend, notesCopy, notesEdit, notesList, notesRemove, notesShow } from './notes'
@@ -58,8 +59,8 @@ import {
   submoduleInit,
   submoduleStatus,
   submoduleUpdate,
-  syncLibraryIn,
-  syncLibraryOut,
+  syncServersIn,
+  syncServersOut,
   syncSubmodules,
 } from './submodule'
 import { changeDirectory, worktreeAdd, worktreeList, worktreePrune, worktreeRemove } from './worktree'
@@ -127,6 +128,7 @@ export const HELP_TEXT = [
   '  rerere [status | diff | remaining | forget <パス> | clear]   (git config rerere.enabled true で有効)',
   '  notes add [-m "…"] [<コミット>] / append / edit / show / list / remove / copy',
   '  sparse-checkout init / set <ディレクトリ>... / add / list / disable   (作業ディレクトリに出すファイルを絞る)',
+  '  clone [-b <ブランチ>] [--recurse-submodules] [--sparse] <URL> [<ディレクトリ>]   (リモートの URL から別のリポジトリを作る)',
   '  submodule add <URL> [<パス>] / submodule [status] / init / update [--init] [--remote] / deinit / foreach <コマンド>',
   '  worktree add [-b <ブランチ>] [--detach] <パス> [<コミット>] / worktree list / worktree remove [-f] <パス>',
   '  remote [-v] / remote add <名前> <URL> / remove / rename / set-url / get-url',
@@ -707,11 +709,11 @@ function submoduleForeach(repo: Repo, raw: string): OperationResult {
   const lines: string[] = []
   for (const path of Object.keys(repo.submodules).sort()) {
     lines.push(`Entering '${path}'`)
-    const nested = syncLibraryIn(current, current.submodules[path] as Repo)
+    const nested = syncServersIn(current, current.submodules[path] as Repo)
     const ran = executeLocal(nested, command)
     if (ran.output) lines.push(ran.output)
     if (!ran.ok) throw new GitError([...lines, `fatal: run_command returned non-zero status for ${path}`].join('\n'))
-    current = syncLibraryOut({ ...current, submodules: { ...current.submodules, [path]: ran.repo } }, ran.repo)
+    current = syncServersOut({ ...current, submodules: { ...current.submodules, [path]: ran.repo } }, ran.repo)
   }
   return { repo: current, output: lines.join('\n') }
 }
@@ -796,7 +798,7 @@ function runLog(repo: Repo, args: readonly string[]): OperationResult {
 }
 
 function runWorktree(repo: Repo, args: readonly string[]): OperationResult {
-  if (repo.idPrefix !== undefined) throw new GitError('サブモジュールの中での git worktree は、このアプリでは未対応です')
+  if (repo.home !== undefined) throw new GitError('clone したリポジトリやサブモジュールの中での git worktree は、このアプリでは未対応です')
   const [sub, ...rest] = args
   switch (sub) {
     case 'add': {
@@ -890,7 +892,25 @@ function runTeammate(repo: Repo, args: readonly string[]): OperationResult {
   return teammateCommit(repo, first)
 }
 
+const RECURSE_COMMANDS = new Set(['switch', 'checkout', 'pull', 'reset'])
+
+/**
+ * --recurse-submodules (または submodule.recurse の設定) が付いた switch / checkout / pull / reset は、
+ * 終わったあとでサブモジュールを記録したコミットにする (git submodule update と同じ)。
+ */
 function runGit(repo: Repo, name: string, args: readonly string[], raw: string): OperationResult {
+  if (!RECURSE_COMMANDS.has(name)) return runGitCommand(repo, name, args, raw)
+  const flag = args.includes('--recurse-submodules') ? true : args.includes('--no-recurse-submodules') ? false : undefined
+  const rest = args.filter((arg) => arg !== '--recurse-submodules' && arg !== '--no-recurse-submodules')
+  const result = runGitCommand(repo, name, rest, raw)
+  const recurse = flag ?? configBool(repo, 'submodule.recurse') ?? false
+  if (!recurse || result.repo.operation !== null || result.repo.editor !== null) return result
+  if (Object.keys(result.repo.submodules).length === 0) return result
+  const updated = submoduleUpdate(result.repo, [], {})
+  return { repo: updated.repo, output: [result.output, updated.output].filter(Boolean).join('\n') }
+}
+
+function runGitCommand(repo: Repo, name: string, args: readonly string[], raw: string): OperationResult {
   switch (name) {
     case 'status':
       parseArgs(args, { flags: [] })
@@ -1207,20 +1227,57 @@ function runEditorSave(repo: Repo, input: string): CommandResult {
 export function executeCommand(repo: Repo, input: string): CommandResult {
   const tokens = lex(input)
   if (tokens[0]?.value === 'cd' && !tokens[0].quoted) return runCd(repo, tokens.slice(1))
+  // git clone は今いる場所に新しいリポジトリを作るので、一番外側のリポジトリで扱う
+  const words = tokens.map((token) => token.value)
+  const cloneArgs = words[0] === 'clone' ? words.slice(1) : words[0] === 'git' && words[1] === 'clone' ? words.slice(2) : null
+  if (cloneArgs !== null && !activeRepo(repo).editor) return runClone(repo, cloneArgs)
+  // clone したリポジトリの中にいれば、そのリポジトリで実行する (その中のサブモジュールも同じように扱う)
+  const clone = repo.clone === null ? undefined : repo.clones[repo.clone]
+  if (repo.clone !== null && clone !== undefined) {
+    const result = executeCommand(syncServersIn(repo, clone), input)
+    const stored: Repo = { ...repo, clones: { ...repo.clones, [repo.clone]: result.repo } }
+    return { ...result, repo: syncServersOut(stored, result.repo) }
+  }
   const path = repo.submodule
   const nested = path === null ? undefined : repo.submodules[path]
   if (path === null || nested === undefined) {
     const result = executeLocal(repo, input)
     return { ...result, repo: syncSubmodules(result.repo) }
   }
-  const result = executeLocal(syncLibraryIn(repo, nested), input)
+  const result = executeLocal(syncServersIn(repo, nested), input)
   const stored: Repo = { ...repo, submodules: { ...repo.submodules, [path]: result.repo } }
-  return { ...result, repo: syncSubmodules(syncLibraryOut(stored, result.repo)) }
+  return { ...result, repo: syncSubmodules(syncServersOut(stored, result.repo)) }
 }
 
 function executeLocal(repo: Repo, input: string): CommandResult {
   const result = executeOnce(repo, input)
   return result.ok ? runPendingExec(result) : result
+}
+
+function runClone(root: Repo, args: readonly string[]): CommandResult {
+  try {
+    const parsed = parseArgs(args, {
+      flags: ['--recurse-submodules', '--sparse', '--no-checkout'],
+      values: ['-b', '--depth'],
+      aliases: { '--branch': '-b', '--recursive': '--recurse-submodules' },
+    })
+    if (parsed.values.has('--depth')) throw new GitError('浅い clone (--depth) は、このアプリでは未対応です')
+    if (parsed.flags.has('--no-checkout')) throw new GitError('--no-checkout は、このアプリでは未対応です')
+    const [url, directory, ...extra] = parsed.positional
+    if (url === undefined || extra.length > 0) usage('git clone [-b <ブランチ>] [--recurse-submodules] [--sparse] <URL> [<ディレクトリ>]')
+    const branch = parsed.values.get('-b')
+    return {
+      ...gitClone(root, url, directory, {
+        ...(branch === undefined ? {} : { branch }),
+        recurseSubmodules: parsed.flags.has('--recurse-submodules'),
+        sparse: parsed.flags.has('--sparse'),
+      }),
+      ok: true,
+    }
+  } catch (error) {
+    if (error instanceof GitError) return { repo: root, output: error.message, ok: false }
+    throw error
+  }
 }
 
 function runCd(root: Repo, args: readonly Token[]): CommandResult {

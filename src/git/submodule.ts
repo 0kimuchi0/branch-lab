@@ -113,11 +113,26 @@ function ensureLibrary(repo: Repo, url: string): { repo: Repo; library: Library 
   return { repo: { ...repo, libraries: { ...repo.libraries, [url]: library } }, library }
 }
 
-/** 取得元を clone したサブモジュールの Repo。at を指定するとそのコミットで detached HEAD にする。 */
-function cloneLibrary(library: Library, worktree: string, at?: CommitId): Repo {
-  const remote = library.remote
-  const branch = DEFAULT_BRANCH in remote.branches ? DEFAULT_BRANCH : (Object.keys(remote.branches)[0] as string)
-  const tip = remote.branches[branch] as CommitId
+export interface CloneOptions {
+  /** clone 先の場所 (~/teammate など)。 */
+  readonly worktree: string
+  /** コミット ID の頭文字 (origin と同じ C なら undefined)。 */
+  readonly prefix?: string
+  readonly nextId: number
+  /** --branch: チェックアウトするブランチ (既定は main)。 */
+  readonly branch?: string
+  /** このコミットで detached HEAD にする (git submodule update)。 */
+  readonly at?: CommitId
+}
+
+/** 模擬のサーバーのリポジトリ (remote) を clone した Repo。 */
+export function cloneRemote(remote: Remote, options: CloneOptions): Repo {
+  const fallback = DEFAULT_BRANCH in remote.branches ? DEFAULT_BRANCH : Object.keys(remote.branches).sort()[0]
+  const branch = options.branch ?? fallback
+  if (branch === undefined) throw new GitError('warning: 空のリポジトリを clone しました。このアプリでは空のリポジトリの clone は未対応です')
+  const tip = remote.branches[branch]
+  if (tip === undefined) throw new GitError(`fatal: Remote branch ${branch} not found in upstream origin`)
+  const at = options.at
   const id = at ?? tip
   const tree: Tree = (remote.commits[id] as Commit).tree
   const message = `clone: from ${remote.url}`
@@ -136,10 +151,21 @@ function cloneLibrary(library: Library, worktree: string, at?: CommitId): Repo {
     remotes: { origin: { ...remote, name: 'origin' } },
     remoteBranches: Object.fromEntries(Object.entries(remote.branches).map(([name, target]) => [`origin/${name}`, target])),
     upstreams: { [branch]: `origin/${branch}` },
-    nextId: library.nextId,
-    idPrefix: library.prefix,
-    worktree,
+    nextId: options.nextId,
+    ...(options.prefix === undefined ? {} : { idPrefix: options.prefix }),
+    worktree: options.worktree,
+    home: options.worktree,
   }
+}
+
+/** 取得元を clone したサブモジュールの Repo。at を指定するとそのコミットで detached HEAD にする。 */
+function cloneLibrary(library: Library, worktree: string, at?: CommitId): Repo {
+  return cloneRemote(library.remote, {
+    worktree,
+    prefix: library.prefix,
+    nextId: library.nextId,
+    ...(at === undefined ? {} : { at }),
+  })
 }
 
 /** サブモジュールの、取得元と同じ URL のリモートの名前。 */
@@ -148,34 +174,40 @@ function libraryRemoteName(nested: Repo, url: string): string | null {
 }
 
 /**
- * サブモジュールでコマンドを実行する前に、取得元の最新の中身をリモートに反映する
- * (ほかの worktree の clone から push した内容も見えるようにする)。
+ * 入れ子のリポジトリ (clone・サブモジュール) でコマンドを実行する前に、模擬のサーバー
+ * (一番外側のリポジトリのリモートと、サブモジュールの取得元) の最新の中身を、同じ URL のリモートに反映する。
+ * コミットの採番も、同じ頭文字のリポジトリどうしで共有する (ID がぶつからないように)。
  */
-export function syncLibraryIn(root: Repo, nested: Repo): Repo {
-  let next = nested
-  for (const [url, library] of Object.entries(root.libraries)) {
-    const name = libraryRemoteName(next, url)
-    if (name === null) continue
-    next = { ...next, remotes: { ...next.remotes, [name]: { ...library.remote, name } } }
-    if (next.idPrefix === library.prefix) next = { ...next, nextId: Math.max(next.nextId, library.nextId) }
+export function syncServersIn(root: Repo, nested: Repo): Repo {
+  const remotes = { ...nested.remotes }
+  let nextId = nested.nextId
+  for (const [name, remote] of Object.entries(nested.remotes)) {
+    const server = Object.values(root.remotes).find((other) => other.url === remote.url) ?? root.libraries[remote.url]?.remote
+    if (server) remotes[name] = { ...server, name }
   }
-  return next
+  if (nested.idPrefix === undefined) nextId = Math.max(nextId, root.nextId)
+  for (const library of Object.values(root.libraries)) {
+    if (library.prefix === nested.idPrefix) nextId = Math.max(nextId, library.nextId)
+  }
+  return { ...nested, remotes, nextId, libraries: root.libraries }
 }
 
-/** サブモジュールでコマンドを実行したあとに、push した内容と採番を取得元に書き戻す。 */
-export function syncLibraryOut(root: Repo, nested: Repo): Repo {
-  const libraries = { ...root.libraries }
-  for (const [url, library] of Object.entries(root.libraries)) {
-    const name = libraryRemoteName(nested, url)
-    if (name === null) continue
-    const remote = nested.remotes[name] as Remote
-    libraries[url] = {
-      ...library,
-      remote: { ...remote, name: 'origin' },
-      nextId: nested.idPrefix === library.prefix ? Math.max(library.nextId, nested.nextId) : library.nextId,
+/** 入れ子のリポジトリでコマンドを実行したあとに、push した内容と採番を模擬のサーバーに書き戻す。 */
+export function syncServersOut(root: Repo, nested: Repo): Repo {
+  const remotes = { ...root.remotes }
+  const libraries = { ...root.libraries, ...nested.libraries }
+  for (const remote of Object.values(nested.remotes)) {
+    for (const [name, other] of Object.entries(root.remotes)) {
+      if (other.url === remote.url) remotes[name] = { ...remote, name }
     }
+    const library = libraries[remote.url]
+    if (library) libraries[remote.url] = { ...library, remote: { ...remote, name: 'origin' } }
   }
-  return { ...root, libraries }
+  for (const [url, library] of Object.entries(libraries)) {
+    if (library.prefix === nested.idPrefix) libraries[url] = { ...library, nextId: Math.max(library.nextId, nested.nextId) }
+  }
+  const nextId = nested.idPrefix === undefined ? Math.max(root.nextId, nested.nextId) : root.nextId
+  return { ...root, remotes, libraries, nextId }
 }
 
 /**
@@ -194,8 +226,10 @@ export function syncSubmodules(root: Repo): Repo {
   return workdir === root.workdir ? root : { ...root, workdir }
 }
 
-/** 今いるリポジトリ (サブモジュールの中にいればそのサブモジュール)。 */
+/** 今いるリポジトリ (clone したリポジトリやサブモジュールの中にいれば、そのリポジトリ)。 */
 export function activeRepo(root: Repo): Repo {
+  const clone = root.clone === null ? undefined : root.clones[root.clone]
+  if (clone) return activeRepo(clone)
   return root.submodule === null ? root : (root.submodules[root.submodule] ?? root)
 }
 
@@ -303,7 +337,7 @@ export function submoduleUpdate(
       lines.push(`Cloning into '${current.worktree}/${entry.path}'...`)
       nested = cloneLibrary(library, `${current.worktree}/${entry.path}`)
     }
-    nested = syncLibraryIn(current, nested)
+    nested = syncServersIn(current, nested)
     let target = recorded
     if (options.remote || !(recorded in nested.commits)) {
       const remoteName = libraryRemoteName(nested, url) ?? 'origin'
