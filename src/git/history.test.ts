@@ -393,3 +393,111 @@ describe('rebase --rebase-merges', () => {
     expect(Object.keys(tip?.tree ?? {}).sort()).toEqual(['README.md', 'a.txt', 'm.txt'])
   })
 })
+
+describe('マージのストラテジーと octopus', () => {
+  /** a・b・c の 3 つのブランチを main (C0) から分けた Repo (それぞれ別のファイルを足す)。 */
+  function threeBranches(): Repo {
+    return run([
+      'git switch -c a', ...commitFile('a.txt', 'a'),
+      'git switch -c b main', ...commitFile('b.txt', 'b'),
+      'git switch -c c main', ...commitFile('c.txt', 'c'),
+      'git switch main', ...commitFile('m.txt', 'm'),
+    ])
+  }
+
+  it('2 つ以上のブランチを指定すると、octopus で 1 つのマージコミットにまとめる', () => {
+    const result = executeCommand(threeBranches(), 'git merge --no-edit a b c')
+    expect(result.ok).toBe(true)
+    expect(result.output.split('\n').slice(0, 4)).toEqual([
+      'Trying simple merge with a',
+      'Trying simple merge with b',
+      'Trying simple merge with c',
+      "Merge made by the 'octopus' strategy.",
+    ])
+    const tip = result.repo.commits[result.repo.branches['main'] as string]
+    expect(tip?.parents).toEqual(['C4', 'C1', 'C2', 'C3'])
+    expect(tip?.message).toBe("Merge branches 'a', 'b' and 'c'")
+    expect(Object.keys(tip?.tree ?? {}).sort()).toEqual(['README.md', 'a.txt', 'b.txt', 'c.txt', 'm.txt'])
+    expect(result.repo.reflogs['HEAD']?.[0]?.message).toBe("merge a b c: Merge made by the 'octopus' strategy.")
+  })
+
+  it('HEAD がどれかの祖先なら fast-forward してからマージし、HEAD は親にしない', () => {
+    const repo = run(['git switch -c a', ...commitFile('a.txt', 'a'), 'git switch -c b main', ...commitFile('b.txt', 'b'), 'git switch main'])
+    const result = executeCommand(repo, 'git merge --no-edit a b')
+    expect(result.output.split('\n')[0]).toBe('Fast-forwarding to: a')
+    expect(result.repo.commits[result.repo.branches['main'] as string]?.parents).toEqual(['C1', 'C2'])
+    // --no-ff なら HEAD も親にする
+    const noFf = run(['git merge --no-ff --no-edit a b'], repo)
+    expect(noFf.commits[noFf.branches['main'] as string]?.parents).toEqual(['C0', 'C1', 'C2'])
+  })
+
+  it('取り込み済みのブランチは飛ばし、残りが 1 つならふつうのマージになる', () => {
+    const repo = run(['git merge --no-edit a'], threeBranches())
+    const result = executeCommand(repo, 'git merge --no-edit a b')
+    expect(result.output.split('\n')[0]).toBe('Already up to date with a')
+    expect(result.output).toContain("Merge made by the 'ort' strategy.")
+    expect(result.repo.commits[result.repo.branches['main'] as string]?.parents).toHaveLength(2)
+  })
+
+  it('コンフリクトする octopus は中止し、何も変えない', () => {
+    const repo = run([
+      'git switch -c a', 'echo "a" > README.md', 'git commit -am a',
+      'git switch -c b main', 'echo "b" > README.md', 'git commit -am b',
+      'git switch -c c main', ...commitFile('c.txt', 'c'),
+      'git switch main',
+    ])
+    const result = executeCommand(repo, 'git merge --no-edit c a b')
+    expect(result.ok).toBe(false)
+    expect(result.output).toContain('Merge with strategy octopus failed.')
+    expect(result.output).toContain('Should not be doing an octopus.')
+    expect(result.repo).toBe(repo)
+  })
+
+  it('-s ours は相手の変更を取り込まずに、履歴だけをマージする', () => {
+    const repo = run(['git switch -c old', ...commitFile('old.txt', 'old'), 'git switch main', ...commitFile('m.txt', 'm')])
+    const result = executeCommand(repo, 'git merge -s ours --no-edit old')
+    expect(result.output).toContain("Merge made by the 'ours' strategy.")
+    const tip = result.repo.commits[result.repo.branches['main'] as string]
+    expect(tip?.parents).toEqual(['C2', 'C1'])
+    expect(tip?.tree).toEqual(repo.commits['C2']?.tree)
+    expect(executeCommand(repo, 'git merge -s subtree old').ok).toBe(false)
+    expect(executeCommand(repo, 'git merge -s nothing old').output).toContain("Could not find merge strategy 'nothing'.")
+  })
+
+  it('-X ours / -X theirs はコンフリクトする箇所をその側で解決する', () => {
+    const ours = run(['git merge -X ours --no-edit feature'], conflicting())
+    expect(ours.operation).toBeNull()
+    expect(ours.commits[ours.branches['main'] as string]?.tree['README.md']).toBe('main\n')
+    const theirs = run(['git merge --strategy-option=theirs --no-edit feature'], conflicting())
+    expect(theirs.commits[theirs.branches['main'] as string]?.tree['README.md']).toBe('feature\n')
+  })
+
+  it('cherry-pick と rebase でも -X が使える (rebase の theirs は付け替えるコミットの側)', () => {
+    const picked = run(['git cherry-pick -X theirs C1'], conflicting())
+    expect(picked.commits[picked.branches['main'] as string]?.tree['README.md']).toBe('feature\n')
+    const rebased = run(['git switch feature', 'git rebase -X theirs main'], conflicting())
+    expect(rebased.operation).toBeNull()
+    expect(rebased.commits[rebased.branches['feature'] as string]?.tree['README.md']).toBe('feature\n')
+    const rebasedOurs = run(['git switch feature', 'git rebase -X ours main'], conflicting())
+    expect(rebasedOurs.commits[rebasedOurs.branches['feature'] as string]?.tree['README.md']).toBe('main\n')
+  })
+
+  it('マージメッセージは、ブランチ・タグ・コミットに分けて並べる', () => {
+    const repo = run(['git tag v1 C2', 'git switch -c topic C0'], threeBranches())
+    const result = executeCommand(repo, 'git merge --no-edit a v1 C3')
+    expect(result.repo.commits[result.repo.branches['topic'] as string]?.message).toBe(
+      "Merge branch 'a', tag 'v1' and commit 'C3' into topic",
+    )
+  })
+
+  it('rebase -r は octopus のマージも作り直す', () => {
+    const repo = run(['git merge --no-edit a b c', 'git switch -c topic C0', ...commitFile('t.txt', 't')], threeBranches())
+    const todo = executeCommand(run(['git switch main'], repo), 'git rebase -i -r topic').repo.editor?.text ?? ''
+    expect(todo).toContain("merge -C C5 a b c # Merge branches 'a', 'b' and 'c'")
+    const rebased = run(['git switch main', 'git rebase -r topic'], repo)
+    const tip = rebased.commits[rebased.branches['main'] as string]
+    expect(tip?.parents).toHaveLength(4)
+    expect(tip?.source).toBe('C5')
+    expect(Object.keys(tip?.tree ?? {}).sort()).toEqual(['README.md', 'a.txt', 'b.txt', 'c.txt', 'm.txt', 't.txt'])
+  })
+})

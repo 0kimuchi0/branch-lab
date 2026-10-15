@@ -2,7 +2,7 @@
  * git diff と同じ unified 形式の差分を作る。
  * 行の対応は tree.ts の最長共通部分列で求め、前後 3 行を文脈として付ける。
  */
-import { changedPaths, lcsPairs, splitLines, type Tree } from './tree'
+import { changedPaths, displayContent, lcsPairs, splitLines, type Tree } from './tree'
 
 const CONTEXT = 3
 
@@ -75,7 +75,8 @@ export function fileDiff(path: string, oldText: string | undefined, newText: str
   const lines = [`diff --git a/${path} b/${path}`]
   if (oldText === undefined) lines.push('new file mode 100644')
   if (newText === undefined) lines.push('deleted file mode 100644')
-  const hunks = diffHunks(oldText ?? '', newText ?? '')
+  // サブモジュールは "Subproject commit <ID>" の 1 行として比べる (本物の Git と同じ)
+  const hunks = diffHunks(oldText === undefined ? '' : displayContent(oldText), newText === undefined ? '' : displayContent(newText))
   if (hunks.length > 0) {
     lines.push(oldText === undefined ? '--- /dev/null' : `--- a/${path}`)
     lines.push(newText === undefined ? '+++ /dev/null' : `+++ b/${path}`)
@@ -99,7 +100,10 @@ function matches(path: string, specs: readonly string[] | undefined): boolean {
 }
 
 function countChanges(oldText: string | undefined, newText: string | undefined): [number, number] {
-  const ops = editScript(splitLines(oldText ?? ''), splitLines(newText ?? ''))
+  const ops = editScript(
+    splitLines(oldText === undefined ? '' : displayContent(oldText)),
+    splitLines(newText === undefined ? '' : displayContent(newText)),
+  )
   return [ops.filter((op) => op.type === '+').length, ops.filter((op) => op.type === '-').length]
 }
 

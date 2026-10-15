@@ -2,15 +2,20 @@ import {
   abortOperation,
   cherryPick,
   continueOperation,
-  merge,
+  mergeMany,
+  parseStrategy,
+  parseStrategyOption,
   rebase,
   rebaseInteractive,
   revert,
   saveEditor,
   skipOperation,
+  type MergeStrategy,
 } from './history'
 import {
   GitError,
+  configBool,
+  isSubmodulePath,
   getRemote,
   add,
   commit,
@@ -19,6 +24,7 @@ import {
   detachHead,
   gitRemove,
   hasTrackedChanges,
+  headTree,
   listBranches,
   listFiles,
   log,
@@ -40,6 +46,21 @@ import {
   type Repo,
   type ResetMode,
 } from './model'
+import { getConfig, listConfig, setConfig, unsetConfig } from './config'
+import { rerereCommand } from './rerere'
+import {
+  activeRepo,
+  removeSubmodule,
+  submoduleAdd,
+  submoduleDeinit,
+  submoduleInit,
+  submoduleStatus,
+  submoduleUpdate,
+  syncLibraryIn,
+  syncLibraryOut,
+  syncSubmodules,
+} from './submodule'
+import { changeDirectory, worktreeAdd, worktreeList, worktreePrune, worktreeRemove } from './worktree'
 import { bisectLog, bisectMark, bisectReset, bisectRunning, bisectStart } from './bisect'
 import { blame, gitDiff, show } from './inspect'
 import { createTag, deleteTags, listTags } from './tag'
@@ -77,6 +98,7 @@ export const HELP_TEXT = [
   'ファイルの操作 (シェルのコマンド):',
   '  echo "内容" > ファイル     ファイルを上書きする (>> なら追記)',
   '  touch / cat / ls / rm      作成・表示・一覧・削除',
+  '  cd <パス> / pwd            worktree やサブモジュールの中に移動する・今いる場所を表示する',
   '',
   'Git のコマンド (先頭の git は省略できます。rm だけは git rm と区別します):',
   '  status / log [--oneline] [--all] / reflog [<ブランチ>]',
@@ -88,14 +110,19 @@ export const HELP_TEXT = [
   '  branch [<名前> [<起点>]] / branch -d <名前> / branch -m <新しい名前>',
   '  switch <名前> / switch - / switch -c <名前> / switch --detach <コミット>',
   '  checkout <名前|コミット> / checkout -b <名前>',
-  '  merge <ブランチ> [--no-ff] [--no-edit] / rebase [-i] [-r] [-x <コマンド>] <ブランチ>',
-  '  cherry-pick [-e] [-m <親>] [--allow-empty] <コミット>... / revert [--no-edit] [-m <親>] <コミット>...',
+  '  merge [--no-ff] [--no-edit] [-s ours|octopus] [-X ours|theirs] <ブランチ>... (2 つ以上なら octopus)',
+  '  rebase [-i] [-r] [-x <コマンド>] [-X ours|theirs] <ブランチ>',
+  '  cherry-pick [-e] [-m <親>] [-X …] [--allow-empty] <コミット>... / revert [--no-edit] [-m <親>] [-X …] <コミット>...',
   '  reset [--soft | --mixed | --hard] [<コミット>]',
   '  tag [-a] [-m "…"] [-f] <タグ> [<コミット>] / tag -l [<パターン>] / tag -d <タグ>',
   '  bisect start [<悪い> [<良い>]] / bisect good / bad / skip / reset / log / run [!] <コマンド>',
   '  stash [push [-m "…"] [-u] [-k]] / stash list / show [-p] / apply / pop [--index] / drop / clear / branch',
   '  push [-u] [-f] [--tags] [<リモート> [<ブランチ|タグ>]] / push <リモート> --delete <名前>',
   '  fetch [<リモート> | --all] / pull [--rebase | --no-rebase] [<リモート> [<ブランチ>]]',
+  '  config <キー> [<値>] / config --unset <キー> / config --list   (rerere.enabled・pull.rebase・merge.ff など)',
+  '  rerere [status | diff | remaining | forget <パス> | clear]   (git config rerere.enabled true で有効)',
+  '  submodule add <URL> [<パス>] / submodule [status] / init / update [--init] [--remote] / deinit / foreach <コマンド>',
+  '  worktree add [-b <ブランチ>] [--detach] <パス> [<コミット>] / worktree list / worktree remove [-f] <パス>',
   '  remote [-v] / remote add <名前> <URL> / remove / rename / set-url / get-url',
   '  (merge / rebase / cherry-pick / revert は --continue・--abort が使えます)',
   '',
@@ -188,6 +215,23 @@ function parseArgs(
     }
   }
   return { flags, values, allValues, positional, paths }
+}
+
+/** -s <ストラテジー> と -X <オプション> を読む。 */
+function strategyOptions(parsed: ParsedArgs): { strategy?: MergeStrategy; favor?: 'ours' | 'theirs' } {
+  const strategy = parsed.values.get('-s')
+  const option = parsed.values.get('-X')
+  return {
+    ...(strategy === undefined ? {} : { strategy: parseStrategy(strategy) }),
+    ...(option === undefined ? {} : { favor: parseStrategyOption(option) }),
+  }
+}
+
+/** 作業ディレクトリ・ステージ・HEAD のどこかにあるファイル (またはディレクトリ) か。 */
+function isKnownPath(repo: Repo, path: string): boolean {
+  const trees = [repo.workdir, repo.index, headTree(repo)]
+  const prefix = path.replace(/\/$/, '')
+  return path === '.' || trees.some((tree) => Object.keys(tree).some((file) => file === prefix || file.startsWith(`${prefix}/`)))
 }
 
 function usage(text: string): never {
@@ -570,21 +614,127 @@ function runFetch(repo: Repo, args: readonly string[]): OperationResult {
 function runPull(repo: Repo, args: readonly string[]): OperationResult {
   const parsed = parseArgs(args, {
     flags: ['--rebase', '--no-rebase', '--ff-only', '--no-edit'],
-    aliases: { '-r': '--rebase' },
+    values: ['-s', '-X'],
+    aliases: { '-r': '--rebase', '--strategy': '-s', '--strategy-option': '-X' },
   })
   const text = 'git pull [--rebase | --no-rebase] [<リモート> [<ブランチ>]]'
   const { remote, branch } = parseRemoteArgs(repo, parsed.positional, text)
   if (parsed.flags.has('--rebase') && parsed.flags.has('--no-rebase')) {
     throw new GitError('fatal: --rebase と --no-rebase は同時に指定できません')
   }
+  // オプションがなければ pull.rebase / pull.ff の設定を使う
+  const rebaseConfig = configBool(repo, 'pull.rebase')
+  const rebase =
+    parsed.flags.has('--rebase') ? true
+    : parsed.flags.has('--no-rebase') ? false
+    : rebaseConfig
   return pull(repo, {
     ...(remote === undefined ? {} : { remote }),
     ...(branch === undefined ? {} : { branch }),
-    ...(parsed.flags.has('--rebase') ? { rebase: true } : {}),
-    ...(parsed.flags.has('--no-rebase') ? { rebase: false } : {}),
-    fastForwardOnly: parsed.flags.has('--ff-only'),
+    ...(rebase === undefined ? {} : { rebase }),
+    fastForwardOnly: parsed.flags.has('--ff-only') || (rebase === undefined && repo.config['pull.ff'] === 'only'),
     noEdit: parsed.flags.has('--no-edit'),
+    ...strategyOptions(parsed),
   })
+}
+
+function runSubmodule(repo: Repo, args: readonly string[], raw: string): OperationResult {
+  const [sub = 'status', ...rest] = args[0]?.startsWith('-') ? ['status', ...args] : args
+  switch (sub) {
+    case 'add': {
+      const parsed = parseArgs(rest, { flags: [], values: ['-b'], aliases: { '--branch': '-b' } })
+      const [url, path, ...extra] = parsed.positional
+      if (url === undefined || extra.length > 0) usage('git submodule add [-b <ブランチ>] <URL> [<パス>]')
+      return submoduleAdd(repo, url, path, parsed.values.get('-b'))
+    }
+    case 'status':
+      return submoduleStatus(repo, parseArgs(rest, { flags: ['--recursive'] }).positional)
+    case 'init':
+      return submoduleInit(repo, parseArgs(rest, { flags: [] }).positional)
+    case 'update': {
+      const parsed = parseArgs(rest, { flags: ['--init', '--remote', '--recursive', '--checkout'] })
+      return submoduleUpdate(repo, parsed.positional, {
+        init: parsed.flags.has('--init'),
+        remote: parsed.flags.has('--remote'),
+      })
+    }
+    case 'deinit': {
+      const parsed = parseArgs(rest, { flags: ['-f', '--all'], aliases: { '--force': '-f' } })
+      return submoduleDeinit(repo, parsed.positional, { force: parsed.flags.has('-f'), all: parsed.flags.has('--all') })
+    }
+    case 'foreach':
+      return submoduleForeach(repo, raw)
+    default:
+      throw new GitError(`error: 未対応の submodule のサブコマンドです: ${sub}`)
+  }
+}
+
+/** git submodule foreach <コマンド>: チェックアウトしている各サブモジュールの中でコマンドを実行する。 */
+function submoduleForeach(repo: Repo, raw: string): OperationResult {
+  let command = raw.slice(raw.indexOf('foreach') + 'foreach'.length).trim()
+  if (/^(["']).*\1$/s.test(command)) command = command.slice(1, -1)
+  if (command === '') usage('git submodule foreach <コマンド>')
+  let current = repo
+  const lines: string[] = []
+  for (const path of Object.keys(repo.submodules).sort()) {
+    lines.push(`Entering '${path}'`)
+    const nested = syncLibraryIn(current, current.submodules[path] as Repo)
+    const ran = executeLocal(nested, command)
+    if (ran.output) lines.push(ran.output)
+    if (!ran.ok) throw new GitError([...lines, `fatal: run_command returned non-zero status for ${path}`].join('\n'))
+    current = syncLibraryOut({ ...current, submodules: { ...current.submodules, [path]: ran.repo } }, ran.repo)
+  }
+  return { repo: current, output: lines.join('\n') }
+}
+
+function runWorktree(repo: Repo, args: readonly string[]): OperationResult {
+  if (repo.idPrefix !== undefined) throw new GitError('サブモジュールの中での git worktree は、このアプリでは未対応です')
+  const [sub, ...rest] = args
+  switch (sub) {
+    case 'add': {
+      const parsed = parseArgs(rest, { flags: ['--detach'], values: ['-b', '-B'], aliases: { '-d': '--detach' } })
+      const text = 'git worktree add [-b <新しいブランチ>] [--detach] <パス> [<コミット>]'
+      const [path, commitish, ...extra] = parsed.positional
+      if (path === undefined || extra.length > 0) usage(text)
+      const newBranch = parsed.values.get('-b') ?? parsed.values.get('-B')
+      return worktreeAdd(repo, path, commitish, {
+        ...(newBranch === undefined ? {} : { newBranch }),
+        detach: parsed.flags.has('--detach'),
+      })
+    }
+    case 'list': {
+      parseArgs(rest, { flags: [] })
+      return worktreeList(repo)
+    }
+    case 'remove': {
+      const parsed = parseArgs(rest, { flags: ['-f'], aliases: { '--force': '-f' } })
+      return worktreeRemove(repo, requireOne(parsed.positional, 'git worktree remove [-f] <パス>'), parsed.flags.has('-f'))
+    }
+    case 'prune':
+      return worktreePrune(repo)
+    default:
+      throw new GitError(`使い方: git worktree add / list / remove / prune${sub === undefined ? '' : ` (未対応のサブコマンド: ${sub})`}`)
+  }
+}
+
+function runConfig(repo: Repo, args: readonly string[]): OperationResult {
+  const parsed = parseArgs(args, {
+    flags: ['--global', '--local', '--system', '-l', '--unset'],
+    aliases: { '--list': '-l' },
+  })
+  const [key, value, ...rest] = parsed.positional
+  const text = 'git config <キー> [<値>] / git config --unset <キー> / git config --list'
+  if (rest.length > 0) usage(text)
+  if (parsed.flags.has('-l')) {
+    if (key !== undefined) usage(text)
+    return listConfig(repo)
+  }
+  if (key === undefined) usage(text)
+  if (parsed.flags.has('--unset')) {
+    if (value !== undefined) usage(text)
+    return unsetConfig(repo, key)
+  }
+  return value === undefined ? getConfig(repo, key) : setConfig(repo, key, value)
 }
 
 function runRemote(repo: Repo, args: readonly string[]): OperationResult {
@@ -652,10 +802,16 @@ function runGit(repo: Repo, name: string, args: readonly string[], raw: string):
         flags: ['--staged', '--name-only', '--stat'],
         aliases: { '--cached': '--staged' },
       })
+      // -- がなくても、コミットとして読めずファイルとしてあるものは、Git と同じくパスとして扱う
+      const split = parsed.positional.findIndex(
+        (arg) => !arg.includes('..') && !tryResolveRef(repo, arg) && isKnownPath(repo, arg),
+      )
+      const commits = split === -1 ? parsed.positional : parsed.positional.slice(0, split)
+      const paths = [...(split === -1 ? [] : parsed.positional.slice(split)), ...(parsed.paths ?? [])]
       return gitDiff(repo, {
         staged: parsed.flags.has('--staged'),
-        commits: parsed.positional,
-        ...(parsed.paths ? { paths: parsed.paths } : {}),
+        commits,
+        ...(paths.length > 0 || parsed.paths ? { paths } : {}),
         nameOnly: parsed.flags.has('--name-only'),
         stat: parsed.flags.has('--stat'),
       })
@@ -694,11 +850,29 @@ function runGit(repo: Repo, name: string, args: readonly string[], raw: string):
     }
     case 'rm': {
       const parsed = parseArgs(args, { flags: ['--cached', '-f', '-r'], aliases: { '--force': '-f' } })
-      return gitRemove(repo, [...parsed.positional, ...(parsed.paths ?? [])], {
-        cached: parsed.flags.has('--cached'),
-        force: parsed.flags.has('-f'),
-      })
+      const paths = [...parsed.positional, ...(parsed.paths ?? [])].map((path) => path.replace(/\/$/, ''))
+      // サブモジュールは gitlink と .gitmodules の記述ごと消す
+      const submodules = paths.filter((path) => isSubmodulePath(repo, path))
+      let current = repo
+      const lines: string[] = []
+      for (const path of submodules) {
+        const removed = removeSubmodule(current, path, parsed.flags.has('--cached'))
+        current = removed.repo
+        lines.push(removed.output)
+      }
+      const files = paths.filter((path) => !submodules.includes(path))
+      if (files.length > 0 || submodules.length === 0) {
+        const removed = gitRemove(current, files, {
+          cached: parsed.flags.has('--cached'),
+          force: parsed.flags.has('-f'),
+        })
+        current = removed.repo
+        if (removed.output) lines.push(removed.output)
+      }
+      return { repo: current, output: lines.join('\n') }
     }
+    case 'submodule':
+      return runSubmodule(repo, args, raw)
     case 'restore':
       return runRestore(repo, args)
     case 'commit':
@@ -711,32 +885,40 @@ function runGit(repo: Repo, name: string, args: readonly string[], raw: string):
       return runCheckout(repo, args)
     case 'merge': {
       const parsed = parseArgs(args, {
-        flags: ['--no-ff', '--ff-only', '--no-edit', ...CONTROL_FLAGS.slice(0, 2)],
-        values: ['-m'],
+        flags: ['--ff', '--no-ff', '--ff-only', '--no-edit', ...CONTROL_FLAGS.slice(0, 2)],
+        values: ['-m', '-s', '-X'],
+        aliases: { '--strategy': '-s', '--strategy-option': '-X' },
       })
       const control = sequencerControl(repo, 'merge', parsed)
       if (control) return control
-      if (parsed.positional.length !== 1) usage('git merge <ブランチ>')
+      if (parsed.positional.length === 0) usage('git merge [-s <ストラテジー>] [-X <オプション>] <ブランチ>...')
       const message = parsed.values.get('-m')
-      return merge(repo, parsed.positional[0] as string, {
+      // --ff / --no-ff / --ff-only がなければ merge.ff の設定 (false なら --no-ff、only なら --ff-only) を使う
+      const ffConfig = parsed.flags.has('--ff') ? undefined : repo.config['merge.ff']
+      return mergeMany(repo, parsed.positional, {
         ...(message === undefined ? {} : { message }),
+        ...strategyOptions(parsed),
         noEdit: parsed.flags.has('--no-edit'),
-        noFastForward: parsed.flags.has('--no-ff'),
-        fastForwardOnly: parsed.flags.has('--ff-only'),
+        noFastForward: parsed.flags.has('--no-ff') || ffConfig === 'false',
+        fastForwardOnly: parsed.flags.has('--ff-only') || ffConfig === 'only',
       })
     }
     case 'rebase': {
       const parsed = parseArgs(args, {
         flags: [...CONTROL_FLAGS, '-i', '-r'],
-        values: ['-x'],
-        aliases: { '--interactive': '-i', '--exec': '-x', '--rebase-merges': '-r' },
+        values: ['-x', '-X'],
+        aliases: { '--interactive': '-i', '--exec': '-x', '--rebase-merges': '-r', '--strategy-option': '-X' },
       })
       const control = sequencerControl(repo, 'rebase', parsed)
       if (control) return control
       if (parsed.positional.length !== 1) usage('git rebase [-i] [-r] [-x <コマンド>] <ブランチ>')
       const upstream = parsed.positional[0] as string
       const exec = parsed.values.get('-x')
-      const options = { ...(exec === undefined ? {} : { exec }), rebaseMerges: parsed.flags.has('-r') }
+      const options = {
+        ...(exec === undefined ? {} : { exec }),
+        ...strategyOptions(parsed),
+        rebaseMerges: parsed.flags.has('-r'),
+      }
       return parsed.flags.has('-i')
         ? rebaseInteractive(repo, upstream, options)
         : rebase(repo, upstream, options)
@@ -744,8 +926,8 @@ function runGit(repo: Repo, name: string, args: readonly string[], raw: string):
     case 'cherry-pick': {
       const parsed = parseArgs(args, {
         flags: [...CONTROL_FLAGS, '--allow-empty', '-e'],
-        values: ['-m'],
-        aliases: { '--edit': '-e', '--mainline': '-m' },
+        values: ['-m', '-X'],
+        aliases: { '--edit': '-e', '--mainline': '-m', '--strategy-option': '-X' },
       })
       const mainline = parseMainline(parsed)
       return (
@@ -753,6 +935,7 @@ function runGit(repo: Repo, name: string, args: readonly string[], raw: string):
         cherryPick(repo, parsed.positional, {
           allowEmpty: parsed.flags.has('--allow-empty'),
           edit: parsed.flags.has('-e'),
+          ...strategyOptions(parsed),
           ...(mainline === undefined ? {} : { mainline }),
         })
       )
@@ -760,14 +943,15 @@ function runGit(repo: Repo, name: string, args: readonly string[], raw: string):
     case 'revert': {
       const parsed = parseArgs(args, {
         flags: [...CONTROL_FLAGS, '--no-edit'],
-        values: ['-m'],
-        aliases: { '--mainline': '-m' },
+        values: ['-m', '-X'],
+        aliases: { '--mainline': '-m', '--strategy-option': '-X' },
       })
       const mainline = parseMainline(parsed)
       return (
         sequencerControl(repo, 'revert', parsed) ??
         revert(repo, parsed.positional, {
           noEdit: parsed.flags.has('--no-edit'),
+          ...strategyOptions(parsed),
           ...(mainline === undefined ? {} : { mainline }),
         })
       )
@@ -780,6 +964,14 @@ function runGit(repo: Repo, name: string, args: readonly string[], raw: string):
       return runTag(repo, args)
     case 'bisect':
       return runBisect(repo, args, raw)
+    case 'config':
+      return runConfig(repo, args)
+    case 'worktree':
+      return runWorktree(repo, args)
+    case 'rerere': {
+      const [sub, ...paths] = args
+      return rerereCommand(repo, sub, paths)
+    }
     case 'reflog': {
       const parsed = parseArgs(args, { flags: [] })
       const [first, second, ...rest] = parsed.positional
@@ -815,7 +1007,7 @@ function requireOne(args: readonly string[], text: string): string {
   return args[0] as string
 }
 
-const SHELL_COMMANDS = new Set(['echo', 'touch', 'cat', 'ls', 'rm'])
+const SHELL_COMMANDS = new Set(['echo', 'touch', 'cat', 'ls', 'rm', 'pwd'])
 
 function runShell(repo: Repo, name: string, tokens: readonly Token[]): OperationResult {
   const args = tokens.map((token) => token.value)
@@ -830,6 +1022,8 @@ function runShell(repo: Repo, name: string, tokens: readonly Token[]): Operation
       return readFile(repo, requireOne(args, 'cat <ファイル>'))
     case 'ls':
       return listFiles(repo)
+    case 'pwd':
+      return { repo, output: repo.worktree }
     default: {
       const paths = args.filter((arg) => arg !== '-f')
       if (paths.length === 0) usage('rm <ファイル>...')
@@ -883,9 +1077,41 @@ function runEditorSave(repo: Repo, input: string): CommandResult {
  * git のコマンドは先頭の "git" を省略できる (rm だけはシェルの rm として扱う)。
  * Git の規則に反する操作は例外にせず、ok: false と説明文で返す。
  */
+/**
+ * 1 行のコマンドを実行する。repo は一番外側のリポジトリ。
+ * cd でサブモジュールの中にいるなら、コマンドはそのサブモジュールで実行し、結果を親に戻す。
+ */
 export function executeCommand(repo: Repo, input: string): CommandResult {
+  const tokens = lex(input)
+  if (tokens[0]?.value === 'cd' && !tokens[0].quoted) return runCd(repo, tokens.slice(1))
+  const path = repo.submodule
+  const nested = path === null ? undefined : repo.submodules[path]
+  if (path === null || nested === undefined) {
+    const result = executeLocal(repo, input)
+    return { ...result, repo: syncSubmodules(result.repo) }
+  }
+  const result = executeLocal(syncLibraryIn(repo, nested), input)
+  const stored: Repo = { ...repo, submodules: { ...repo.submodules, [path]: result.repo } }
+  return { ...result, repo: syncSubmodules(syncLibraryOut(stored, result.repo)) }
+}
+
+function executeLocal(repo: Repo, input: string): CommandResult {
   const result = executeOnce(repo, input)
   return result.ok ? runPendingExec(result) : result
+}
+
+function runCd(root: Repo, args: readonly Token[]): CommandResult {
+  const editor = activeRepo(root).editor
+  if (editor) {
+    return { repo: root, output: `エディタで ${editor.file} を開いています。先に「保存して閉じる」を押してください`, ok: false }
+  }
+  try {
+    if (args.length > 1) usage('cd <ディレクトリ>')
+    return { ...changeDirectory(root, args[0]?.value), ok: true }
+  } catch (error) {
+    if (error instanceof GitError) return { repo: root, output: error.message, ok: false }
+    throw error
+  }
 }
 
 /**

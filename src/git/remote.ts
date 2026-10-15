@@ -19,7 +19,7 @@ import {
   type Remote,
   type Repo,
 } from './model'
-import { merge, rebase } from './history'
+import { merge, rebase, type MergeStrategy } from './history'
 
 function copyCommits(
   from: Readonly<Record<CommitId, Commit>>,
@@ -326,6 +326,10 @@ export interface PullOptions {
   readonly fastForwardOnly?: boolean
   /** --no-edit: マージコミットのメッセージをエディタで編集しない。 */
   readonly noEdit?: boolean
+  /** -s: マージのストラテジー (merge で取り込むとき)。 */
+  readonly strategy?: MergeStrategy
+  /** -X ours / -X theirs */
+  readonly favor?: 'ours' | 'theirs'
 }
 
 /** git pull [<リモート> [<ブランチ>]]: fetch してから、upstream (または指定したブランチ) を merge / rebase する。 */
@@ -376,8 +380,10 @@ export function pull(repo: Repo, options: PullOptions = {}): OperationResult {
     )
   }
   const integrated = options.rebase
-    ? rebase(fetched.repo, ref)
+    ? rebase(fetched.repo, ref, options.favor ? { favor: options.favor } : {})
     : merge(fetched.repo, ref, {
+        ...(options.strategy ? { strategy: options.strategy } : {}),
+        ...(options.favor ? { favor: options.favor } : {}),
         defaultMessage: `Merge branch '${remoteBranch}' of ${remoteName === REMOTE_NAME ? REMOTE_NAME : getRemote(repo, remoteName).url}`,
         noEdit: options.noEdit ?? false,
         fastForwardOnly: options.fastForwardOnly ?? false,
@@ -398,7 +404,7 @@ export function teammateCommit(repo: Repo, branch = 'main', remoteName = REMOTE_
     throw new GitError(`${remoteName} に ${branch} というブランチはありません`)
   }
   const tip = remote.commits[tipId] ?? getCommit(repo, tipId)
-  const id = `C${repo.nextId}`
+  const id = `${repo.idPrefix ?? 'C'}${repo.nextId}`
   const tree = { ...tip.tree, 'team.txt': `${tip.tree['team.txt'] ?? ''}他の人の変更 (${id})\n` }
   const created: Commit = { id, parents: [tipId], message: `他の人の変更 (${id})`, tree }
   return {

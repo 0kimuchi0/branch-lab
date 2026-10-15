@@ -4,6 +4,8 @@
  */
 import {
   changedPaths,
+  conflictKey,
+  parseGitlink,
   treesEqual,
   withFile,
   type Conflict,
@@ -39,13 +41,13 @@ export interface PickItem {
 }
 
 /**
- * rebase --rebase-merges の merge の行。label の位置のコミットを HEAD にマージする。
+ * rebase --rebase-merges の merge の行。label の位置のコミットを HEAD にマージする (2 つ以上なら octopus)。
  * id は -C / -c で指定した元のマージコミット (メッセージをそこから取る)。edit ならメッセージをエディタで編集する。
  */
 export interface MergeItem {
   readonly action: 'merge'
   readonly id: CommitId | null
-  readonly label: string
+  readonly labels: readonly string[]
   readonly edit: boolean
 }
 
@@ -89,6 +91,8 @@ export interface SequenceOperation {
   readonly mainline: number | null
   /** rebase --rebase-merges の label で付けた名前 (refs/rewritten/<名前>)。 */
   readonly labels?: Readonly<Record<string, CommitId>>
+  /** -X ours / -X theirs: コンフリクトする箇所をどちらの側で解決するか。 */
+  readonly favor?: 'ours' | 'theirs'
 }
 
 /** merge の行でマージする相手のコミット (label の名前か、コミットそのもの)。 */
@@ -98,7 +102,14 @@ export function mergeTarget(repo: Repo, op: SequenceOperation, ref: string): Com
 
 /** merge の行で作るコミットのメッセージ。 */
 export function mergeItemMessage(repo: Repo, item: MergeItem): string {
-  return item.id === null ? `Merge branch '${item.label}'` : getCommit(repo, item.id).message
+  if (item.id !== null) return getCommit(repo, item.id).message
+  return `Merge ${item.labels.length > 1 ? 'branches' : 'branch'} ${joinNames(item.labels.map((label) => `'${label}'`))}`
+}
+
+/** "a", "a and b", "a, b and c" の形に並べる (Git のマージメッセージと同じ)。 */
+export function joinNames(names: readonly string[]): string {
+  if (names.length <= 1) return names.join('')
+  return `${names.slice(0, -1).join(', ')} and ${names.at(-1)}`
 }
 
 /** 途中で止まっている操作 (コンフリクトの解消待ちなど)。 */
@@ -156,6 +167,7 @@ export type AfterEdit =
       readonly origHead: CommitId
       readonly branch: string | null
       readonly commits: readonly CommitId[]
+      readonly favor?: 'ours' | 'theirs'
     }
 
 /** 開いているエディタ。Git がエディタを開いて、閉じられるのを待っている状態。 */
@@ -233,6 +245,129 @@ export interface Repo {
   readonly upstreams: Readonly<Record<string, string>>
   /** 次に採番するコミット番号。 */
   readonly nextId: number
+  /** git config で設定した値。キーは "rerere.enabled" のような小文字の名前。 */
+  readonly config: Readonly<Record<string, string>>
+  readonly rerere: RerereState
+  /** 今いる worktree のパス (メインの worktree は MAIN_WORKTREE)。 */
+  readonly worktree: string
+  /**
+   * ほかの worktree (git worktree add で作ったもの・今いないメインの worktree) の状態。キーはパス。
+   * 今いる worktree の状態は Repo の head・index・workdir などにある。
+   */
+  readonly worktrees: Readonly<Record<string, WorktreeState>>
+  /**
+   * 今いる worktree でチェックアウトしているサブモジュール (パス → そのリポジトリ)。
+   * サブモジュールも 1 つの Repo で、コミット ID の頭文字 (idPrefix) で区別する。
+   */
+  readonly submodules: Readonly<Record<string, Repo>>
+  /** cd でサブモジュールの中にいるなら、そのパス。コマンドはそのサブモジュールで実行する。 */
+  readonly submodule: string | null
+  /** サブモジュールの取得元 (URL → 模擬のサーバー)。どの worktree から clone しても同じ中身になる。 */
+  readonly libraries: Readonly<Record<string, Library>>
+  /** コミット ID の頭文字 (既定は C)。 */
+  readonly idPrefix?: string
+}
+
+/**
+ * サブモジュールの取得元になる、模擬のサーバー上のリポジトリ。
+ * prefix はそのコミット ID の頭文字、nextId は次に採番する番号 (clone どうしで ID がぶつからないように共有する)。
+ */
+export interface Library {
+  readonly remote: Remote
+  readonly prefix: string
+  readonly nextId: number
+}
+
+/** worktree ごとに持つ状態 (それ以外のブランチ・コミット・stash・設定などは共有する)。 */
+export interface WorktreeState {
+  readonly head: Head
+  readonly index: Tree
+  readonly workdir: Tree
+  readonly conflicts: readonly Conflict[]
+  readonly operation: Operation | null
+  readonly editor: Editor | null
+  readonly bisect: BisectState | null
+  /** この worktree の HEAD の reflog。 */
+  readonly headReflog: readonly ReflogEntry[]
+  readonly rererePending: RerereState['pending']
+  readonly submodules: Readonly<Record<string, Repo>>
+}
+
+/** メインの worktree (clone したディレクトリ) のパス。 */
+export const MAIN_WORKTREE = '~/branch-lab'
+
+/** 今いる worktree の状態を取り出す。 */
+export function currentWorktreeState(repo: Repo): WorktreeState {
+  return {
+    head: repo.head,
+    index: repo.index,
+    workdir: repo.workdir,
+    conflicts: repo.conflicts,
+    operation: repo.operation,
+    editor: repo.editor,
+    bisect: repo.bisect,
+    headReflog: repo.reflogs['HEAD'] ?? [],
+    rererePending: repo.rerere.pending,
+    submodules: repo.submodules,
+  }
+}
+
+/** 別の worktree に移る (cd)。今いる worktree の状態はしまっておく。 */
+export function enterWorktree(repo: Repo, path: string): Repo {
+  if (path === repo.worktree) return repo
+  const target = repo.worktrees[path]
+  if (target === undefined) throw new GitError(`fatal: '${path}' は worktree ではありません`)
+  const worktrees = { ...repo.worktrees, [repo.worktree]: currentWorktreeState(repo) }
+  delete worktrees[path]
+  return {
+    ...repo,
+    head: target.head,
+    index: target.index,
+    workdir: target.workdir,
+    conflicts: target.conflicts,
+    operation: target.operation,
+    editor: target.editor,
+    bisect: target.bisect,
+    reflogs: { ...repo.reflogs, HEAD: target.headReflog },
+    rerere: { ...repo.rerere, pending: target.rererePending },
+    worktree: path,
+    worktrees,
+    submodules: target.submodules,
+    submodule: null,
+  }
+}
+
+/** ほかの worktree で使っている (チェックアウトしている、またはその上で rebase している) ブランチなら、その worktree のパス。 */
+export function branchWorktree(repo: Repo, name: string): string | null {
+  for (const [path, state] of Object.entries(repo.worktrees)) {
+    if (state.head.type === 'branch' && state.head.name === name) return path
+    if (state.operation && state.operation.type !== 'merge' && state.operation.branch === name) return path
+    if (state.bisect && state.bisect.start === name) return path
+  }
+  return null
+}
+
+/** ほかの worktree で使っているブランチには切り替えられない。 */
+export function requireBranchFree(repo: Repo, name: string): void {
+  const path = branchWorktree(repo, name)
+  if (path !== null) throw new GitError(`fatal: '${name}' is already used by worktree at '${path}'`)
+}
+
+/** git rerere の記録 (.git/rr-cache と MERGE_RR)。 */
+export interface RerereState {
+  /** 今コンフリクトしていて、解決を記録する対象のパス → コンフリクトの鍵と、そのときの内容 (preimage)。 */
+  readonly pending: Readonly<Record<string, { readonly key: string; readonly preimage: string }>>
+  /** 記録した解決: コンフリクトの鍵 → 解決したあとの内容 (postimage)。 */
+  readonly resolved: Readonly<Record<string, string>>
+}
+
+export const EMPTY_RERERE: RerereState = { pending: {}, resolved: {} }
+
+/** git config の真偽値 (true / yes / on / 1)。未設定なら undefined。 */
+export function configBool(repo: Repo, key: string): boolean | undefined {
+  const value = repo.config[key]
+  if (value === undefined) return undefined
+  return ['true', 'yes', 'on', '1'].includes(value.toLowerCase())
 }
 
 export interface OperationResult {
@@ -271,6 +406,13 @@ export function createRepo(): Repo {
     stash: [],
     tags: {},
     bisect: null,
+    config: {},
+    rerere: EMPTY_RERERE,
+    worktree: MAIN_WORKTREE,
+    worktrees: {},
+    submodules: {},
+    submodule: null,
+    libraries: {},
     reflogs: {
       HEAD: [{ id: root.id, message: `clone: from ${REMOTE_NAME}` }],
       [DEFAULT_BRANCH]: [{ id: root.id, message: `clone: from ${REMOTE_NAME}` }],
@@ -361,7 +503,13 @@ export function reachableCommits(repo: Repo): Set<CommitId> {
   tips.push(headCommitId(repo))
   if (repo.operation?.type === 'merge') tips.push(repo.operation.theirs)
   if (repo.bisect) tips.push(...(repo.bisect.bad === null ? [] : [repo.bisect.bad]), ...repo.bisect.good)
-  if (repo.operation && repo.operation.type !== 'merge') tips.push(...Object.values(repo.operation.labels ?? {}))
+  for (const state of [currentWorktreeState(repo), ...Object.values(repo.worktrees)]) {
+    tips.push(state.head.type === 'branch' ? (repo.branches[state.head.name] as CommitId) : state.head.id)
+    const op = state.operation
+    if (op?.type === 'merge') tips.push(op.theirs)
+    else if (op) tips.push(op.origHead, ...Object.values(op.labels ?? {}))
+    if (state.bisect) tips.push(...(state.bisect.bad === null ? [] : [state.bisect.bad]), ...state.bisect.good)
+  }
   const reachable = new Set<CommitId>()
   for (const tip of tips) {
     for (const id of ancestors(repo.commits, tip)) reachable.add(id)
@@ -529,7 +677,10 @@ export function carryChanges(
   action: string,
 ): { index: Tree; workdir: Tree } {
   const head = headTree(repo)
-  const dirty = dirtyPaths(repo)
+  // サブモジュールの中で HEAD を動かしただけ (未ステージの gitlink) なら、Git と同じく上書きの対象にしない
+  const dirty = dirtyPaths(repo).filter(
+    (path) => !(parseGitlink(repo.workdir[path]) !== null && repo.index[path] === head[path]),
+  )
   const tracked = dirty.filter((path) => path in head || path in repo.index)
   const untracked = dirty.filter((path) => !tracked.includes(path))
 
@@ -588,19 +739,24 @@ export function writeFile(
   append: boolean,
 ): OperationResult {
   validatePath(path)
-  if (Object.keys(repo.workdir).some((other) => other.startsWith(`${path}/`))) {
+  if (Object.keys(repo.workdir).some((other) => other.startsWith(`${path}/`)) || isSubmodulePath(repo, path)) {
     throw new GitError(`${path} はディレクトリです`)
+  }
+  const inSubmodule = submoduleContaining(repo, path)
+  if (inSubmodule !== null) {
+    throw new GitError(`${path} はサブモジュール '${inSubmodule}' の中です (cd ${inSubmodule} で中に移動してください)`)
   }
   const content = append ? (repo.workdir[path] ?? '') + text : text
   return { repo: { ...repo, workdir: withFile(repo.workdir, path, content) }, output: '' }
 }
 
 export function touchFile(repo: Repo, path: string): OperationResult {
-  if (path in repo.workdir) return { repo, output: '' }
+  if (path in repo.workdir && !isSubmodulePath(repo, path)) return { repo, output: '' }
   return writeFile(repo, path, '', false)
 }
 
 export function readFile(repo: Repo, path: string): OperationResult {
+  if (isSubmodulePath(repo, path)) throw new GitError(`cat: ${path}: ディレクトリです`)
   const content = repo.workdir[path]
   if (content === undefined) {
     throw new GitError(`cat: ${path}: そのようなファイルはありません`)
@@ -609,11 +765,29 @@ export function readFile(repo: Repo, path: string): OperationResult {
 }
 
 export function listFiles(repo: Repo): OperationResult {
-  return { repo, output: Object.keys(repo.workdir).sort().join('\n') }
+  return {
+    repo,
+    output: Object.keys(repo.workdir)
+      .sort()
+      .map((path) => (isSubmodulePath(repo, path) ? `${path}/` : path))
+      .join('\n'),
+  }
+}
+
+/** path がサブモジュール (gitlink) の位置か。 */
+export function isSubmodulePath(repo: Repo, path: string): boolean {
+  return parseGitlink(repo.workdir[path] ?? repo.index[path]) !== null || path in repo.submodules
+}
+
+/** path がサブモジュールの中のファイルなら、そのサブモジュールのパス。 */
+export function submoduleContaining(repo: Repo, path: string): string | null {
+  const paths = new Set([...Object.keys(repo.submodules), ...Object.keys(repo.index).filter((p) => parseGitlink(repo.index[p]) !== null)])
+  return [...paths].find((sub) => path.startsWith(`${sub}/`)) ?? null
 }
 
 /** シェルの rm。作業ディレクトリからだけ削除する。 */
 export function removeFile(repo: Repo, path: string): OperationResult {
+  if (isSubmodulePath(repo, path)) throw new GitError(`rm: ${path} を削除できません: ディレクトリです`)
   if (!(path in repo.workdir)) {
     throw new GitError(`rm: ${path}: そのようなファイルはありません`)
   }
@@ -760,7 +934,7 @@ export function addCommit(
   repo: Repo,
   fields: Omit<Commit, 'id'>,
 ): { repo: Repo; commit: Commit } {
-  const commit: Commit = { id: `C${repo.nextId}`, ...fields }
+  const commit: Commit = { id: `${repo.idPrefix ?? 'C'}${repo.nextId}`, ...fields }
   const commits = { ...repo.commits, [commit.id]: commit }
   const next: Repo =
     repo.head.type === 'branch'
@@ -855,9 +1029,31 @@ export interface CommitOptions {
 /** コミットを作る。output は git commit の 1 行目と同じ形。 */
 export function createCommit(repo: Repo, pending: PendingCommit, message: string): { repo: Repo; output: string } {
   const { reflogAction, reflogMessage, ...fields } = pending
-  const { repo: next, commit: created } = addCommit(repo, { ...fields, message })
+  const recorded = recordResolutions(repo, fields.tree)
+  const { repo: next, commit: created } = addCommit(recorded.repo, { ...fields, message })
   const entry = reflogMessage ?? `${reflogAction ?? 'commit'}: ${subject(message)}`
-  return { repo: logRefs(repo, next, entry), output: commitSummary(created, currentBranch(next)) }
+  return {
+    repo: logRefs(recorded.repo, next, entry),
+    output: [...recorded.lines, commitSummary(created, currentBranch(next))].join('\n'),
+  }
+}
+
+/**
+ * rerere: コンフリクトを解決した内容を記録する (コミットするときと git rerere で呼ぶ)。
+ * tree の内容にまだコンフリクトマーカーが残っているパスは記録しない。
+ */
+export function recordResolutions(repo: Repo, tree: Tree, clear = true): { repo: Repo; lines: string[] } {
+  const entries = Object.entries(repo.rerere.pending)
+  if (entries.length === 0) return { repo, lines: [] }
+  const resolved = { ...repo.rerere.resolved }
+  const lines: string[] = []
+  for (const [path, { key }] of entries) {
+    const content = tree[path]
+    if (content === undefined || conflictKey(content) !== null || resolved[key] === content) continue
+    resolved[key] = content
+    lines.push(`Recorded resolution for '${path}'.`)
+  }
+  return { repo: { ...repo, rerere: { pending: clear ? {} : repo.rerere.pending, resolved } }, lines }
 }
 
 /** ステージ (インデックス) の内容でコミットする。メッセージがなければエディタを開く。 */
@@ -881,7 +1077,7 @@ export function commit(repo: Repo, options: CommitOptions = {}): OperationResult
   const parents =
     options.amend ? head.parents
     : op?.type === 'merge' ? [headId, op.theirs]
-    : merging && sequence ? [headId, mergeTarget(staged, sequence, merging.label)]
+    : merging && sequence ? [headId, ...merging.labels.map((label) => mergeTarget(staged, sequence, label))]
     : [headId]
   const parentTree = options.amend
     ? (staged.commits[head.parents[0] ?? '']?.tree ?? {})
@@ -988,7 +1184,9 @@ export function listBranches(repo: Repo, options: { readonly remotes?: boolean }
   const lines: string[] = []
   if (repo.head.type === 'detached') lines.push(`* (HEAD detached at ${repo.head.id})`)
   for (const name of Object.keys(repo.branches).sort()) {
-    lines.push(`${name === current ? '*' : ' '} ${name}`)
+    // ほかの worktree でチェックアウトしているブランチには + を付ける (Git と同じ)
+    const mark = name === current ? '*' : branchWorktree(repo, name) !== null ? '+' : ' '
+    lines.push(`${mark} ${name}`)
   }
   if (options.remotes) {
     for (const name of Object.keys(repo.remoteBranches).sort()) {
@@ -1005,6 +1203,10 @@ export function deleteBranch(repo: Repo, name: string, force = false): Operation
   }
   if (name === currentBranch(repo)) {
     throw new GitError(`error: 現在いるブランチ '${name}' は削除できません`)
+  }
+  const usedBy = branchWorktree(repo, name)
+  if (usedBy !== null) {
+    throw new GitError(`error: cannot delete branch '${name}' used by worktree at '${usedBy}'`)
   }
   const upstream = repo.upstreams[name]
   const upstreamId = upstream === undefined ? undefined : repo.remoteBranches[upstream]
@@ -1044,13 +1246,20 @@ export function renameBranch(repo: Repo, from: string, to: string): OperationRes
   }
   const head: Head =
     repo.head.type === 'branch' && repo.head.name === from ? { type: 'branch', name: to } : repo.head
+  // ほかの worktree でチェックアウトしていれば、そちらの HEAD も付け替える
+  const worktrees = Object.fromEntries(
+    Object.entries(repo.worktrees).map(([path, state]): [string, WorktreeState] => [
+      path,
+      state.head.type === 'branch' && state.head.name === from ? { ...state, head: { type: 'branch', name: to } } : state,
+    ]),
+  )
   const reflogs: Record<string, readonly ReflogEntry[]> = { ...repo.reflogs }
   reflogs[to] = [
     { id: target, message: `Branch: renamed refs/heads/${from} to refs/heads/${to}` },
     ...(reflogs[from] ?? []),
   ]
   delete reflogs[from]
-  return { repo: { ...repo, branches, upstreams, head, reflogs }, output: '' }
+  return { repo: { ...repo, branches, upstreams, head, reflogs, worktrees }, output: '' }
 }
 
 /** git branch -u origin/<ブランチ>: branch の upstream を設定する。 */
@@ -1142,6 +1351,7 @@ export function switchBranch(
   if (currentBranch(repo) === name) {
     return { repo, output: `すでに '${name}' にいます` }
   }
+  requireBranchFree(repo, name)
   const next = moveHead(repo, { type: 'branch', name }, repo.branches[name] as CommitId, 'switch', name)
   return {
     repo: next,
@@ -1188,9 +1398,9 @@ export function reset(
   const logged = logRefs(repo, moved, `reset: moving to ${target}`, { forceHead: true, forceBranch: true })
   const cleared: Repo =
     mode === 'hard' && repo.operation?.type !== 'rebase'
-      ? { ...logged, operation: null, conflicts: [] }
+      ? { ...logged, operation: null, conflicts: [], rerere: { ...logged.rerere, pending: {} } }
       : mode === 'hard'
-        ? { ...logged, conflicts: [] }
+        ? { ...logged, conflicts: [], rerere: { ...logged.rerere, pending: {} } }
         : logged
   const next: Repo =
     mode === 'soft' ? cleared
@@ -1327,7 +1537,7 @@ function statusLines(repo: Repo): string[] {
         : 'すべてのコンフリクトが解消されました。"git commit" でマージを完了してください',
     )
   } else if (op && op.current !== null) {
-    lines.push(`${op.type} の途中です (${op.current.action === 'merge' ? `merge ${op.current.label}` : op.current.id} を適用中)`)
+    lines.push(`${op.type} の途中です (${op.current.action === 'merge' ? `merge ${op.current.labels.join(' ')}` : op.current.id} を適用中)`)
   } else if (op?.type === 'rebase') {
     lines.push('コミットを修正できます。終わったら "git rebase --continue" を実行してください')
   }
@@ -1344,10 +1554,16 @@ function statusLines(repo: Repo): string[] {
       lines.push(`\t${CONFLICT_LABELS[conflict.kind]}  ${conflict.path}`)
     }
   }
-  if (status.unstaged.length > 0) {
+  // サブモジュールは、中のコミットが変わった・中に変更がある、を Git と同じく括弧で添える
+  const unstaged = [...status.unstaged.map((entry) => ({ ...entry, note: submoduleNote(repo, entry.path) }))]
+  for (const path of Object.keys(repo.submodules).sort()) {
+    const note = submoduleNote(repo, path)
+    if (note !== '' && !unstaged.some((entry) => entry.path === path)) unstaged.push({ path, change: 'modified', note })
+  }
+  if (unstaged.length > 0) {
     lines.push('', 'コミット予定に含まれていない変更:')
-    for (const entry of status.unstaged) {
-      lines.push(`\t${CHANGE_LABELS[entry.change]}  ${entry.path}`)
+    for (const entry of unstaged) {
+      lines.push(`\t${CHANGE_LABELS[entry.change]}  ${entry.path}${entry.note}`)
     }
   }
   if (status.untracked.length > 0) {
@@ -1355,13 +1571,24 @@ function statusLines(repo: Repo): string[] {
     for (const path of status.untracked) lines.push(`\t${path}`)
   }
   if (
-    status.staged.length + status.unstaged.length + status.untracked.length +
+    status.staged.length + unstaged.length + status.untracked.length +
       status.conflicts.length ===
     0
   ) {
     lines.push('', 'コミットするものはありません。作業ツリーはクリーンです')
   }
   return lines
+}
+
+/** サブモジュールの状態の注記 (" (new commits, modified content)" など)。サブモジュールでなければ空。 */
+function submoduleNote(repo: Repo, path: string): string {
+  const nested = repo.submodules[path]
+  if (nested === undefined) return ''
+  const notes: string[] = []
+  if (parseGitlink(repo.workdir[path]) !== parseGitlink(repo.index[path])) notes.push('new commits')
+  if (hasTrackedChanges(nested)) notes.push('modified content')
+  if (Object.keys(nested.workdir).some((file) => !(file in nested.index))) notes.push('untracked content')
+  return notes.length === 0 ? '' : ` (${notes.join(', ')})`
 }
 
 export function status(repo: Repo): OperationResult {

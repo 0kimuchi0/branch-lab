@@ -1,6 +1,7 @@
 /** お題の一覧と、お題から初期状態・目標の Repo を作る関数。 */
 import { editorSaveCommand, executeCommand } from '../git/commands'
-import { createRepo, headTree, type Repo } from '../git/model'
+import { MAIN_WORKTREE, createRepo, headTree, type Repo } from '../git/model'
+import { parseGitlink } from '../git/tree'
 import { matchesGoal } from './match'
 
 export interface Puzzle {
@@ -276,6 +277,107 @@ export const PUZZLES: readonly Puzzle[] = [
       ],
     ],
     checkRemote: true,
+  },
+  {
+    id: 'octopus',
+    title: '3 つのブランチをまとめてマージ',
+    description:
+      'docs・test・lint の 3 つのブランチに、それぞれ別の作業があります。マージコミットを 3 回作るのではなく、1 つのマージコミットで main にまとめて取り込みましょう。',
+    hint: 'git merge にブランチを複数並べると、octopus (タコ足) マージで 1 つのマージコミットにまとめます。git merge --no-edit docs test lint',
+    setup: [
+      'git switch -c docs',
+      ...change('docs.md', '使い方', 'ドキュメントを追加'),
+      'git switch -c test main',
+      ...change('test.txt', 'テスト', 'テストを追加'),
+      'git switch -c lint main',
+      ...change('lint.txt', 'ルール', 'lint の設定を追加'),
+      'git switch main',
+      ...change('README.md', '更新', 'README を更新'),
+    ],
+    solutions: [['git merge --no-edit docs test lint']],
+  },
+  {
+    id: 'rerere',
+    title: '同じコンフリクトを二度解かない',
+    description:
+      'feature を main にマージするとコンフリクトします。rerere を有効にしてからマージし、README.md を「両方の変更」に直してコミットしましょう。解決が記録されるので、同じコンフリクトが起きても次からは自動で直ります。',
+    hint: 'git config rerere.enabled true で有効にします。git merge feature でコンフリクトしたら echo "両方の変更" > README.md で直し、git add README.md して git commit します (エディタはそのまま保存して閉じます)。',
+    setup: [
+      'git switch -c feature',
+      'echo "feature の変更" > README.md',
+      'git commit -am "feature 側の変更"',
+      'git switch main',
+      'echo "main の変更" > README.md',
+      'git commit -am "main 側の変更"',
+    ],
+    solutions: [
+      [
+        'git config rerere.enabled true',
+        'git merge feature',
+        'echo "両方の変更" > README.md',
+        'git add README.md',
+        'git commit --no-edit',
+      ],
+    ],
+    check: (repo) => Object.values(repo.rerere.resolved).some((content) => content.includes('両方の変更')),
+  },
+  {
+    id: 'worktree',
+    title: '作業を止めずに急ぎの修正',
+    description:
+      'feature ブランチで作業している途中 (まだコミットしていない変更があります) に、main に急ぎの修正が必要になりました。stash を使わずに、git worktree で main 用の作業場所を別に作り、そこで fix.txt を追加してコミットしましょう。feature の作業中の変更はそのまま残します。',
+    hint: 'git worktree add ../hotfix main で main をチェックアウトした worktree を作り、cd ../hotfix で移ります。そこで fix.txt を作ってコミットしたら、cd ../branch-lab で戻ります。',
+    setup: [
+      'git switch -c feature',
+      ...change('feature.txt', '機能の途中まで', '機能を作り始める'),
+      'echo "作業中の変更" >> feature.txt',
+    ],
+    solutions: [
+      [
+        'git worktree add ../hotfix main',
+        'cd ../hotfix',
+        'echo "修正" > fix.txt',
+        'git add fix.txt',
+        'git commit -m "急ぎの修正"',
+        'cd ../branch-lab',
+      ],
+    ],
+    check: (repo) => {
+      const state = repo.worktree === MAIN_WORKTREE ? repo : repo.worktrees[MAIN_WORKTREE]
+      const main = repo.branches['main']
+      return (
+        // stash ではなく worktree を使って解く
+        Object.keys(repo.worktrees).length + Number(repo.worktree !== MAIN_WORKTREE) > 0 &&
+        state !== undefined &&
+        state.head.type === 'branch' &&
+        state.head.name === 'feature' &&
+        (state.workdir['feature.txt'] ?? '').includes('作業中の変更') &&
+        main !== undefined &&
+        'fix.txt' in (repo.commits[main]?.tree ?? {})
+      )
+    },
+  },
+  {
+    id: 'submodule',
+    title: 'サブモジュールを最新にする',
+    description:
+      'lib はサブモジュールとして取り込んだライブラリです。ライブラリの作者が新しいコミットを push しました。lib をその最新のコミットにして、親のリポジトリに「lib を更新」としてコミットしましょう。',
+    hint: 'git submodule update --remote で lib を取得元の最新にします (cd lib して git pull でも同じです)。親から見ると lib が変わっているので、git add lib して git commit します。',
+    setup: [
+      'git submodule add https://example.com/lib.git',
+      'git commit -m "lib を追加"',
+      'cd lib',
+      'teammate',
+      'cd ..',
+    ],
+    solutions: [
+      ['git submodule update --remote', 'git add lib', 'git commit -m "lib を更新"'],
+      ['cd lib', 'git pull', 'cd ..', 'git add lib', 'git commit -m "lib を更新"'],
+    ],
+    check: (repo) => {
+      const tip = repo.libraries['https://example.com/lib.git']?.remote.branches['main']
+      return tip !== undefined && parseGitlink(headTree(repo)['lib']) === tip
+    },
   },
 ]
 

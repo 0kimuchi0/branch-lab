@@ -5,6 +5,27 @@
 
 export type Tree = Readonly<Record<string, string>>
 
+/**
+ * サブモジュールの位置に置く値 (gitlink)。本物の Git では tree に「コミット ID を指す特別な項目」として入る。
+ * ここではファイルの内容として、echo では書けない文字 (\0) から始まる文字列で表す。
+ */
+const GITLINK_PREFIX = '\u0000gitlink '
+
+export function gitlink(id: string): string {
+  return `${GITLINK_PREFIX}${id}`
+}
+
+/** gitlink ならサブモジュールのコミット ID、そうでなければ null。 */
+export function parseGitlink(content: string | undefined): string | null {
+  return content?.startsWith(GITLINK_PREFIX) ? content.slice(GITLINK_PREFIX.length) : null
+}
+
+/** 表示用の内容 (gitlink は git diff と同じく "Subproject commit <ID>" にする)。 */
+export function displayContent(content: string): string {
+  const id = parseGitlink(content)
+  return id === null ? content : `Subproject commit ${id}\n`
+}
+
 /** a と b で内容が異なるパス (片方にしかないものを含む) を名前順に返す。 */
 export function changedPaths(a: Tree, b: Tree): string[] {
   const paths = new Set([...Object.keys(a), ...Object.keys(b)])
@@ -72,11 +93,14 @@ function withNewline(lines: readonly string[]): string[] {
 export interface MergeLabels {
   readonly ours: string
   readonly theirs: string
+  /** -X ours / -X theirs: 両方が変えた箇所は、コンフリクトにせずにこちらの側を採る。 */
+  readonly favor?: 'ours' | 'theirs'
 }
 
 /**
  * diff3 による行単位の 3-way マージ。
- * 両方が同じ箇所を別々に変えたときだけ、Git と同じ形式のコンフリクトマーカーを入れる。
+ * 両方が同じ箇所を別々に変えたときだけ、Git と同じ形式のコンフリクトマーカーを入れる
+ * (labels.favor があれば、マーカーを入れずにその側を採る)。
  */
 export function mergeText(
   base: string,
@@ -101,6 +125,7 @@ export function mergeText(
     const bChunk = b.slice(k, bEnd)
     if (sameLines(aChunk, oChunk)) out.push(...bChunk)
     else if (sameLines(bChunk, oChunk) || sameLines(aChunk, bChunk)) out.push(...aChunk)
+    else if (labels.favor) out.push(...(labels.favor === 'ours' ? aChunk : bChunk))
     else {
       // Git と同じく、両側で共通する先頭と末尾の行はマーカーの外に出す
       let head = 0
@@ -189,6 +214,9 @@ export function mergeTrees(
     } else if (a === undefined || b === undefined) {
       tree = withFile(tree, path, a ?? b)
       conflicts.push({ path, kind: a === undefined ? 'deleted-by-us' : 'deleted-by-them' })
+    } else if (parseGitlink(a) !== null || parseGitlink(b) !== null) {
+      // サブモジュールの指すコミットは行単位にマージできない。こちらの側を残してコンフリクトにする
+      conflicts.push({ path, kind: o === undefined ? 'both-added' : 'both-modified' })
     } else {
       const merged = mergeText(o ?? '', a, b, labels)
       tree = withFile(tree, path, merged.text)
@@ -198,4 +226,34 @@ export function mergeTrees(
     }
   }
   return { tree, conflicts }
+}
+
+/**
+ * rerere でコンフリクトを見分けるための鍵。コンフリクトマーカーのラベルを取り除き、
+ * 各コンフリクトの 2 つの側を並べ替えてそろえる (ours と theirs が入れ替わっても同じ鍵になる)。
+ * マーカーがなければ null。
+ */
+export function conflictKey(text: string): string | null {
+  const out: string[] = []
+  let sides: [string[], string[]] | null = null
+  let side = 0
+  let found = false
+  for (const line of splitLines(text)) {
+    if (sides === null && line.startsWith('<<<<<<<')) {
+      sides = [[], []]
+      side = 0
+      found = true
+    } else if (sides !== null && side === 0 && line.startsWith('=======')) {
+      side = 1
+    } else if (sides !== null && side === 1 && line.startsWith('>>>>>>>')) {
+      const [a, b] = sides.map((lines) => lines.join('')).sort() as [string, string]
+      out.push('<<<<<<<\n', a, '=======\n', b, '>>>>>>>\n')
+      sides = null
+    } else if (sides !== null) {
+      sides[side]?.push(line)
+    } else {
+      out.push(line)
+    }
+  }
+  return found && sides === null ? out.join('') : null
 }

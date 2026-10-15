@@ -2,8 +2,8 @@
  * 作業ディレクトリとステージに表示するファイルの一覧を作る純粋関数。
  * 作業ディレクトリはステージと、ステージは HEAD と比べた状態を付ける。
  */
-import { headTree, REMOTE_NAME, type Repo } from '../git/model'
-import { changedPaths } from '../git/tree'
+import { MAIN_WORKTREE, headTree, REMOTE_NAME, type Repo } from '../git/model'
+import { changedPaths, displayContent } from '../git/tree'
 
 export type FileState = 'clean' | 'untracked' | 'added' | 'modified' | 'deleted' | 'conflict'
 
@@ -39,7 +39,7 @@ export function workdirFiles(repo: Repo): AreaFile[] {
       : !(path in repo.index) ? 'untracked'
       : content === undefined ? 'deleted'
       : 'modified'
-    return { path, state, content }
+    return { path, state, content: content === undefined ? undefined : displayContent(content) }
   })
 }
 
@@ -56,7 +56,7 @@ export function stagedFiles(repo: Repo): AreaFile[] {
       : !(path in head) ? 'added'
       : content === undefined ? 'deleted'
       : 'modified'
-    return { path, state, content }
+    return { path, state, content: content === undefined ? undefined : displayContent(content) }
   })
 }
 
@@ -65,4 +65,25 @@ export function remoteNames(repo: Repo): string[] {
   return Object.keys(repo.remotes).sort(
     (a, b) => Number(b === REMOTE_NAME) - Number(a === REMOTE_NAME) || a.localeCompare(b),
   )
+}
+
+export interface WorktreeRow {
+  readonly path: string
+  /** チェックアウトしているブランチ名、または detached HEAD のコミット ID。 */
+  readonly checkedOut: string
+  readonly current: boolean
+}
+
+/** worktree の一覧 (メインが先頭)。git worktree add をしていなければ 1 行だけ。 */
+export function worktreeRows(repo: Repo): WorktreeRow[] {
+  const states = { ...repo.worktrees, [repo.worktree]: { head: repo.head } }
+  const paths = Object.keys(states).sort((a, b) => Number(b === MAIN_WORKTREE) - Number(a === MAIN_WORKTREE) || a.localeCompare(b))
+  return paths.map((path) => {
+    const head = (states[path] as { head: Repo['head'] }).head
+    return {
+      path,
+      checkedOut: head.type === 'branch' ? head.name : `${head.id} (detached HEAD)`,
+      current: path === repo.worktree,
+    }
+  })
 }
