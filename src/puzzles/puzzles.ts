@@ -378,6 +378,53 @@ export const PUZZLES: readonly Puzzle[] = [
       const tip = repo.libraries['https://example.com/lib.git']?.remote.branches['main']
       return tip !== undefined && parseGitlink(headTree(repo)['lib']) === tip
     },
+  },  {
+    id: 'clone',
+    title: 'チームメイトの立場で push する',
+    description:
+      'origin を ../teammate に clone して、チームメイトとして作業します。teammate で team.txt を追加して push し、元のリポジトリ (~/branch-lab) に戻って、その変更を pull で取り込みましょう。',
+    hint: 'git clone https://example.com/branch-lab.git ../teammate で clone し、cd ../teammate で移ります。コミットして git push したら、cd ../branch-lab で戻って git pull します。',
+    setup: [...change('app.txt', '機能 A', '機能 A'), 'git push'],
+    solutions: [
+      [
+        'git clone https://example.com/branch-lab.git ../teammate',
+        'cd ../teammate',
+        'echo "チームメイトの変更" > team.txt',
+        'git add team.txt',
+        'git commit -m "チームメイトの変更"',
+        'git push',
+        'cd ../branch-lab',
+        'git pull',
+      ],
+    ],
+    checkRemote: true,
+    check: (repo) => Object.keys(repo.clones).length > 0 && 'team.txt' in headTree(repo),
+  },
+  {
+    id: 'notes',
+    title: 'コミットを変えずにメモを付ける',
+    description:
+      '「機能 B」のコミットがレビュー済みであることを記録したいのですが、公開済みなのでコミットは書き換えられません。git notes で、そのコミットに「レビュー済み」というメモを付けましょう。',
+    hint: 'git log --oneline でコミットの ID を確かめ、git notes add -m "レビュー済み" <コミット> でメモを付けます。git log に Notes: として表示されます。',
+    setup: [...change('app.txt', '機能 A', '機能 A'), ...change('app.txt', '機能 B', '機能 B'), ...change('app.txt', '機能 C', '機能 C'), 'git push'],
+    solutions: [['git notes add -m "レビュー済み" C2']],
+    check: (repo) => (repo.notes['C2'] ?? '').includes('レビュー済み'),
+  },
+  {
+    id: 'sparse-checkout',
+    title: '必要なディレクトリだけを出す',
+    description:
+      'このリポジトリには docs・server・web のディレクトリがありますが、あなたが触るのは web だけです。sparse-checkout で、作業ディレクトリに web だけを出しましょう (ルートのファイルは残ります)。',
+    hint: 'git sparse-checkout set web で、web ディレクトリだけを出します。ls で確かめられます。git sparse-checkout disable で元に戻せます。',
+    setup: [
+      'echo "使い方" > docs/guide.md',
+      'echo "サーバー" > server/main.go',
+      'echo "画面" > web/index.html',
+      'git add .',
+      'git commit -m "プロジェクトの構成"',
+    ],
+    solutions: [['git sparse-checkout set web']],
+    check: (repo) => repo.sparse !== null && repo.sparse.length === 1 && repo.sparse[0] === 'web',
   },
 ]
 

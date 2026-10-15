@@ -18,7 +18,7 @@ npm run build    # 型チェックと本番ビルド
 画面上部のタブで 2 つのモードを切り替えられます。
 
 - **自由に試す**: clone 直後のリポジトリで、好きなコマンドを試せます。
-- **お題**: 「マージする」「コンフリクトを解消する」「コミットをまとめる」「作業を退避して急ぎの修正」「バグを入れたコミットを探す」「サブモジュールを最新にする」など 21 問。
+- **お題**: 「マージする」「コンフリクトを解消する」「コミットをまとめる」「作業を退避して急ぎの修正」「バグを入れたコミットを探す」「サブモジュールを最新にする」「チームメイトの立場で push する」など 24 問。
   目標のグラフと同じ履歴を作れたら正解です。コミット ID やメッセージが違っても、
   履歴の形と各コミットの由来 (コピーや revert を含む) が同じなら正解になります。
   クリアした記録はブラウザに保存されます。
@@ -43,13 +43,15 @@ URL のハッシュ (`#s=...`) には状態そのものではなく、モード�
 | --- | --- |
 | `echo "内容" > ファイル` / `>>` | ファイルを上書き / 追記する |
 | `touch` / `cat` / `ls` / `rm` | ファイルの作成・表示・一覧・削除 (`rm` は作業ディレクトリからだけ消す) |
-| `cd <パス>` / `pwd` | worktree やサブモジュールの中に移動する・今いる場所を表示する |
+| `cd <パス>` / `pwd` | worktree・clone したリポジトリ・サブモジュールの中に移動する・今いる場所を表示する |
 
 ### Git のコマンド
 
 | コマンド | 内容 |
 | --- | --- |
-| `status` / `log [--oneline] [--all]` | 状態と履歴を表示する |
+| `status` | 状態を表示する |
+| `log [--oneline] [--graph] [--all] [-n <数>] [--format=<書式>] [<範囲>] [-- <パス>]` | 履歴を表示する (下の「log の表示」も参照) |
+| `notes add [-f] [-m "…"] [<コミット>]` / `append` / `edit` / `show` / `list` / `remove` / `copy` | コミットを変えずにメモを付ける (`log` と `show` に表示される) |
 | `reflog [show] [<ブランチ>]` | HEAD (やブランチ) が動いた履歴を表示する |
 | `diff [--staged] [<コミット> [<コミット>]] [--stat] [--name-only] [-- <ファイル>]` | 差分を表示する (`A..B` も可) |
 | `show [<コミット>]` | コミットの内容と差分を表示する |
@@ -72,6 +74,8 @@ URL のハッシュ (`#s=...`) には状態そのものではなく、モード�
 | `bisect start [<bad> [<good>...]]` / `good` / `bad` / `skip` / `reset` / `log` / `run <コマンド>` | 二分探索でバグを入れたコミットを探す (`new` / `old` も可) |
 | `config <キー> [<値>]` / `config --unset <キー>` / `config --list` | 設定を読み書きする (`rerere.enabled`・`rerere.autoUpdate`・`pull.rebase`・`pull.ff`・`merge.ff` が働く) |
 | `rerere` / `rerere status` / `diff` / `remaining` / `forget <パス>` / `clear` | コンフリクトの解決を記録し、同じコンフリクトで再利用する (`rerere.enabled` のとき) |
+| `clone [-b <ブランチ>] [--recurse-submodules] [--sparse] <URL> [<ディレクトリ>]` | リモートの URL から別のリポジトリを作る (`cd` で中に入る) |
+| `sparse-checkout init` / `set <ディレクトリ>...` / `add` / `list` / `disable` | 作業ディレクトリに出すディレクトリを絞る (cone モード) |
 | `worktree add [-b <ブランチ>] [--detach] <パス> [<コミット>]` / `worktree list` / `worktree remove [-f] <パス>` | 作業ディレクトリをもう 1 つ作る (`cd` で移る) |
 | `submodule add [-b <ブランチ>] <URL> [<パス>]` / `submodule [status]` / `init` / `update [--init] [--remote]` / `deinit` / `foreach <コマンド>` | サブモジュールを取り込む・記録したコミットにする (`cd` で中に入る) |
 | `remote [-v]` / `remote add <名前> <URL>` / `remove` / `rename` / `set-url` / `get-url` | リモートの一覧・追加・削除・名前の変更 |
@@ -104,6 +108,18 @@ URL のハッシュ (`#s=...`) には状態そのものではなく、モード�
 
 先頭の `git` は省略できます (ただし `rm` はシェルの `rm`、`git rm` は Git の `rm` として区別します)。
 
+`log` は次のオプションに対応しています。`--graph` は本物と同じく topo-order で並べ、`*`・`|\`・`|/`・octopus の `*-.` で線を描きます。
+
+- 範囲: `A..B`・`A...B`・`^A`、`--all`・`--branches`・`--tags`・`--remotes`
+- 絞り込み: `-n <数>` / `-<数>`、`--first-parent`、`--merges` / `--no-merges`、`--grep=<パターン>` (`--invert-grep`)、`-- <パス>`
+- 表示: `--oneline`、`--pretty=oneline|short|medium|full`、`--format=<書式>` (`%h` `%H` `%s` `%b` `%B` `%d` `%D` `%p` `%P` `%N` `%n`)、
+  `-p`・`--stat`・`--name-only`、`--reverse`、`--no-decorate`、`--no-notes`
+
+`git clone https://example.com/branch-lab.git ../teammate` は、origin を `~/teammate` に clone します。
+`cd ../teammate` で移ってコミットして push すると、元のリポジトリ (`cd ../branch-lab`) から fetch / pull できます。
+`--recurse-submodules` を付けるとサブモジュールも取得し、`switch` / `checkout` / `pull` / `reset` に付ける
+(または `git config submodule.recurse true`) と、終わったあとでサブモジュールを記録したコミットにします。
+
 マージのストラテジーは `ort` (既定。`recursive`・`resolve` も同じ扱い)・`ours`・`octopus` です。
 `-X ours` / `-X theirs` は、両方が変えた箇所をコンフリクトにせずにその側で解決します
 (rebase では ours が付け替え先、theirs が付け替えるコミットの側です)。
@@ -131,8 +147,14 @@ octopus マージでコンフリクトが出た場合は、本物と同じく中
 - リモートはブラウザの中で模擬しています。URL には接続せず、`remote add` で追加したリモートは空のリポジトリから始まります
   (`remote remove` するとそのリモートの中身も消えます)。
 - サブモジュールの取得元も模擬で、初めて使う URL なら README.md だけのリポジトリになります。
-  サブモジュールの中のサブモジュールと worktree、`--recurse-submodules` は未対応です。
-- ファイルシステムは模擬で、`cd` で移動できるのは worktree とサブモジュールだけです。パスは `~/branch-lab` のような形です。
+  サブモジュールの中のサブモジュール、サブモジュールや clone したリポジトリの中の worktree は未対応です。
+- `clone` できるのは、リモートとサブモジュールの URL だけです。clone 先は worktree の外 (`~/teammate` など) にします。
+- ファイルシステムは模擬で、`cd` で移動できるのは worktree・clone したリポジトリ・サブモジュールだけです。パスは `~/branch-lab` のような形です。
+- `log` に作者と日時はありません (`--format` の `%an` や `%ad` などは使えません)。`--graph` の線は、
+  よくある形では本物と同じですが、複雑に交差する場合は本物と少し違うことがあります。
+- `notes` は本物ではコミット (refs/notes/commits) として保存されますが、ここでは別に持ち、push もしません。
+  `notes list` はメモの付いたコミットの ID だけを表示します。
+- `sparse-checkout` は cone モードだけです。
 - `config` は 1 つだけで、`--global` と `--local` を区別しません。
 - `rerere` は、本物はコンフリクトの箇所 (hunk) ごとに解決を覚えますが、ここではファイル全体の内容で覚えます。
 - `blame` には作者と日時がなく、コミット ID と件名を表示します。`bisect run` のコマンドはこのアプリのコマンドで、成功なら good、失敗なら bad です
@@ -161,7 +183,11 @@ src/
     config.ts      config
     rerere.ts      rerere
     worktree.ts    worktree と cd
-    submodule.ts   submodule と、サブモジュールの中でコマンドを実行するための同期
+    submodule.ts   submodule と、入れ子のリポジトリ (clone・サブモジュール) と模擬のサーバーの同期
+    clone.ts       clone
+    log.ts         log (範囲・絞り込み・書式・--graph)
+    notes.ts       notes
+    sparse.ts      sparse-checkout
     commands.ts    入力文字列の解析と実行。規則違反は例外にせず結果として返す
   graph/
     layout.ts      コミットグラフの座標を計算する純粋関数 (ローカル・リモートの両方)
@@ -189,6 +215,6 @@ Vite として自動で認識されるので、設定ファイルはありませ
 
 ## 今後の拡張案
 
-- `clone` (別の URL から新しく clone する) と `--recurse-submodules`
-- `notes`、`sparse-checkout`
-- `log --graph` などの表示オプション
+- `commit --fixup` と `rebase --autosquash`
+- `format-patch` / `am` (パッチでのやりとり)
+- `range-diff`、`cherry`

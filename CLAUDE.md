@@ -24,6 +24,8 @@ React + TypeScript + Vite、テストは Vitest。UI の文言は日本語。
 - エディタ: Git がエディタを開いて待つ状態は `Repo.editor` (開いた内容と、閉じたあとに続ける処理) で表す。
   保存は `:wq <JSON の文字列>` のコマンド (`saveEditor`) なので、ログと共有 URL でも再現できる。
   エディタが開いている間、ほかのコマンドは実行できない。
+- `src/git/log.ts`: log (範囲・絞り込み・書式・--graph の線)。`src/git/notes.ts`: notes (`Repo.notes`)。
+  `src/git/sparse.ts`: sparse-checkout (`Repo.sparse`)。cone の外のファイルも workdir に持ち、`isSparseHidden` で見えなくする。
 - `src/git/inspect.ts`: diff / show / blame。`src/git/bisect.ts`: bisect (状態は `Repo.bisect`)。`src/git/stash.ts`: stash (コミットにはせず `Repo.stash` に持つ)。
   `src/git/tag.ts`: tag。
 - reflog: HEAD やブランチを動かす処理は `logRefs(before, after, メッセージ)` で `Repo.reflogs` に記録する
@@ -39,8 +41,11 @@ React + TypeScript + Vite、テストは Vitest。UI の文言は日本語。
   ほかの worktree の状態は `Repo.worktrees` (`WorktreeState`) にしまう。`enterWorktree` で入れ替える。
 - `src/git/submodule.ts`: submodule。サブモジュールは別の `Repo` (`Repo.submodules`、コミット ID の頭文字は `idPrefix`) で、
   親の tree には gitlink (`tree.ts` の `gitlink`) を入れる。`cd` で中にいる間 (`Repo.submodule`) は、
-  `executeCommand` がサブモジュールでコマンドを実行し、`syncLibraryIn` / `syncLibraryOut` で取得元 (`Repo.libraries`) と、
+  `executeCommand` がサブモジュールでコマンドを実行し、`syncServersIn` / `syncServersOut` で取得元 (`Repo.libraries`) と、
   `syncSubmodules` で親の gitlink と同期する。画面に出すのは `activeRepo`。
+- `src/git/clone.ts`: clone。clone したリポジトリは一番外側の `Repo.clones` に持ち、`cd` で中にいる間 (`Repo.clone`) は
+  `executeCommand` がそのリポジトリで実行する。リモートとサブモジュールの取得元は URL ごとの模擬のサーバーとして扱い、
+  `syncServersIn` / `syncServersOut` で中身とコミットの採番を共有する。
 - `src/git/commands.ts`: 入力文字列の解析と実行。`GitError` は例外にせず `ok: false` で返す。
 - `src/graph/layout.ts`: グラフの座標を計算する純粋関数。
   x は祖先からの深さ、y はブランチごとのレーン (main が最上段)。どこからもたどれないコミットは後ろのレーンに薄く置く。
@@ -71,6 +76,6 @@ main に push すると https://branch-lab-dun.vercel.app にデプロイされ�
 
 ## 今後の予定
 
-- `clone` と `--recurse-submodules`
-- `notes`、`sparse-checkout`
-- `log --graph` などの表示オプション
+- `commit --fixup` と `rebase --autosquash`
+- `format-patch` / `am`
+- `range-diff`、`cherry`
