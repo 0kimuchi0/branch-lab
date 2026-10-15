@@ -8,7 +8,7 @@ import { Workspace } from './components/Workspace'
 import { editorSaveCommand, executeCommand } from './git/commands'
 import { activeRepo } from './git/submodule'
 import { currentDirectory } from './git/worktree'
-import { createRepo, currentBranch, headCommitId, type Repo } from './git/model'
+import { createRepo, currentBranch, headCommitIdOrNull, type Repo } from './git/model'
 import { PUZZLES, buildPuzzle, isSolved, type BuiltPuzzle } from './puzzles/puzzles'
 import {
   decodeShare,
@@ -189,7 +189,7 @@ export default function App() {
           <p className="status" aria-live="polite">
             {(Object.keys(session.repo.worktrees).length > 0 || session.repo.submodule !== null || session.repo.clone !== null) &&
               `${currentDirectory(session.repo)} — `}
-            HEAD: {branch ?? '(detached)'} @ {headCommitId(active)}
+            HEAD: {branch ?? '(detached)'} @ {headCommitIdOrNull(active) ?? '(まだコミットなし)'}
           </p>
           <ShareButton getUrl={() => shareUrl(hash || encodeShare(shared))} />
         </div>

@@ -505,12 +505,23 @@ export function createRepo(): Repo {
 // ---- 参照 ----
 
 export function headCommitId(repo: Repo): CommitId {
-  if (repo.head.type === 'detached') return repo.head.id
-  const id = repo.branches[repo.head.name]
-  if (id === undefined) {
-    throw new GitError(`ブランチ ${repo.head.name} が見つかりません`)
+  const id = headCommitIdOrNull(repo)
+  if (id === null) {
+    // switch --orphan のあと、まだ 1 つもコミットしていないブランチ (Git と同じメッセージ)
+    throw new GitError(`fatal: your current branch '${currentBranch(repo)}' does not have any commits yet`)
   }
   return id
+}
+
+/** HEAD のコミット。まだコミットのないブランチ (--orphan で作った直後) にいれば null。 */
+export function headCommitIdOrNull(repo: Repo): CommitId | null {
+  if (repo.head.type === 'detached') return repo.head.id
+  return repo.branches[repo.head.name] ?? null
+}
+
+/** まだコミットのないブランチにいるか。 */
+export function isUnborn(repo: Repo): boolean {
+  return headCommitIdOrNull(repo) === null
 }
 
 export function currentBranch(repo: Repo): string | null {
@@ -524,7 +535,8 @@ export function getCommit(repo: Repo, id: CommitId): Commit {
 }
 
 export function headTree(repo: Repo): Tree {
-  return getCommit(repo, headCommitId(repo)).tree
+  const id = headCommitIdOrNull(repo)
+  return id === null ? {} : getCommit(repo, id).tree
 }
 
 /** id とその祖先すべて。 */
@@ -570,11 +582,13 @@ export function reachableCommits(repo: Repo): Set<CommitId> {
     ...Object.values(repo.tags).map((tag) => tag.target),
     ...Object.values(repo.remoteBranches),
   ]
-  tips.push(headCommitId(repo))
+  const headId = headCommitIdOrNull(repo)
+  if (headId !== null) tips.push(headId)
   if (repo.operation?.type === 'merge') tips.push(repo.operation.theirs)
   if (repo.bisect) tips.push(...(repo.bisect.bad === null ? [] : [repo.bisect.bad]), ...repo.bisect.good)
   for (const state of [currentWorktreeState(repo), ...Object.values(repo.worktrees)]) {
-    tips.push(state.head.type === 'branch' ? (repo.branches[state.head.name] as CommitId) : state.head.id)
+    const stateHead = state.head.type === 'branch' ? repo.branches[state.head.name] : state.head.id
+    if (stateHead !== undefined) tips.push(stateHead)
     const op = state.operation
     if (op?.type === 'merge') tips.push(op.theirs)
     else if (op?.type === 'am') tips.push(op.origHead)
@@ -755,7 +769,11 @@ export function carryChanges(
   const tracked = dirty.filter((path) => path in head || path in repo.index)
   const untracked = dirty.filter((path) => !tracked.includes(path))
 
-  const overwritten = tracked.filter((path) => nextTree[path] !== head[path])
+  // 変更が切り替え先と同じ内容なら、上書きにはならない (Git と同じ)
+  const overwritten = tracked.filter(
+    (path) =>
+      nextTree[path] !== head[path] && !(repo.index[path] === nextTree[path] && repo.workdir[path] === nextTree[path]),
+  )
   if (overwritten.length > 0) {
     throw new GitError(
       [
@@ -1011,8 +1029,8 @@ export function logRefs(
   const add = (name: string, id: CommitId) => {
     reflogs[name] = [{ id, message }, ...(reflogs[name] ?? [])]
   }
-  const headId = headCommitId(after)
-  if (options.forceHead || headId !== headCommitId(before)) add('HEAD', headId)
+  const headId = headCommitIdOrNull(after)
+  if (headId !== null && (options.forceHead || headId !== headCommitIdOrNull(before))) add('HEAD', headId)
   const current = currentBranch(after)
   for (const [name, id] of Object.entries(after.branches)) {
     if (before.branches[name] !== id || (options.forceBranch && name === current)) add(name, id)
@@ -1065,7 +1083,8 @@ export function subject(message: string): string {
 
 export function commitSummary(commit: Commit, branch: string | null): string {
   const where = branch ?? 'detached HEAD'
-  return `[${where} ${commit.id}] ${subject(commit.message)}`
+  // 親のない最初のコミットには (root-commit) を付ける (Git と同じ)
+  return `[${where}${commit.parents.length === 0 ? ' (root-commit)' : ''} ${commit.id}] ${subject(commit.message)}`
 }
 
 /**
@@ -1165,8 +1184,11 @@ export function commit(repo: Repo, options: CommitOptions = {}): OperationResult
   }
   requireNoConflicts(staged)
 
-  const headId = headCommitId(staged)
-  const head = getCommit(staged, headId)
+  // switch --orphan で作ったばかりのブランチなら、親のない最初のコミット (root commit) になる
+  const unbornHead = headCommitIdOrNull(staged)
+  if (unbornHead === null && options.amend) throw new GitError('fatal: You have nothing to amend.')
+  const headId = unbornHead ?? ''
+  const head: Commit = unbornHead === null ? { id: '', parents: [], message: '', tree: {} } : getCommit(staged, unbornHead)
   // rebase --rebase-merges の merge の行で止まっている場合は、マージコミットを作る
   const sequence = op && op.type !== 'merge' && op.type !== 'am' ? op : null
   const merging = sequence?.current?.action === 'merge' ? sequence.current : null
@@ -1174,6 +1196,7 @@ export function commit(repo: Repo, options: CommitOptions = {}): OperationResult
     options.amend ? head.parents
     : op?.type === 'merge' ? [headId, op.theirs]
     : merging && sequence ? [headId, ...merging.labels.map((label) => mergeTarget(staged, sequence, label))]
+    : unbornHead === null ? []
     : [headId]
   const parentTree = options.amend
     ? (staged.commits[head.parents[0] ?? '']?.tree ?? {})
@@ -1208,6 +1231,7 @@ export function commit(repo: Repo, options: CommitOptions = {}): OperationResult
       options.amend ? 'commit (amend)'
       : op?.type === 'merge' ? 'commit (merge)'
       : (picked || merging) && op ? (op.type === 'rebase' ? 'rebase (continue)' : op.type)
+      : unbornHead === null ? 'commit (initial)'
       : 'commit',
   }
   const defaultMessage =
@@ -1308,7 +1332,7 @@ export function deleteBranch(repo: Repo, name: string, force = false): Operation
   const upstream = repo.upstreams[name]
   const upstreamId = upstream === undefined ? undefined : repo.remoteBranches[upstream]
   const merged =
-    isAncestor(repo, target, headCommitId(repo)) ||
+    (headCommitIdOrNull(repo) !== null && isAncestor(repo, target, headCommitId(repo))) ||
     (upstreamId !== undefined && isAncestor(repo, target, upstreamId))
   if (!force && !merged) {
     throw new GitError(
@@ -1457,6 +1481,24 @@ export function switchBranch(
 }
 
 /** HEAD をブランチから切り離して、コミットを直接指す (detached HEAD)。 */
+/**
+ * git switch --orphan <名前> / git checkout --orphan <名前> [<起点>]: 履歴のない新しいブランチに移る。
+ * ブランチは最初のコミットをしたときにできる。switch はステージと追跡しているファイルを空にし、
+ * checkout は起点 (既定は HEAD) の内容をステージと作業ディレクトリに残す。
+ */
+export function orphanBranch(repo: Repo, name: string, options: { readonly keep?: boolean; readonly startPoint?: string } = {}): OperationResult {
+  requireNoOperation(repo)
+  validateRefName(name)
+  if (name in repo.branches) throw new GitError(`fatal: ブランチ '${name}' はすでに存在します`)
+  requireBranchFree(repo, name)
+  const tree = options.keep ? getCommit(repo, resolveRef(repo, options.startPoint ?? 'HEAD')).tree : {}
+  const { index, workdir } = carryChanges(repo, tree, 'switch')
+  return {
+    repo: { ...repo, head: { type: 'branch', name }, index, workdir },
+    output: `新しいブランチ '${name}' に切り替えました (まだコミットはありません)`,
+  }
+}
+
 export function detachHead(repo: Repo, ref: string): OperationResult {
   requireNoOperation(repo)
   const id = resolveRef(repo, ref)
@@ -1621,8 +1663,9 @@ function statusLines(repo: Repo): string[] {
     lines.push(`HEAD は ${headCommitId(repo)} で切り離されています (detached HEAD)`)
   } else {
     lines.push(`ブランチ ${branch}`)
-    const tracking = trackingLine(repo, branch)
+    const tracking = isUnborn(repo) ? null : trackingLine(repo, branch)
     if (tracking) lines.push(tracking)
+    if (isUnborn(repo)) lines.push('', 'まだコミットはありません')
   }
   if (repo.sparse !== null) {
     const tracked = Object.keys(repo.index)

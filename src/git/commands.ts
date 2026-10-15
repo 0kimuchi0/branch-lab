@@ -24,6 +24,7 @@ import {
   commit,
   createBranch,
   deleteBranch,
+  orphanBranch,
   detachHead,
   gitRemove,
   hasTrackedChanges,
@@ -390,9 +391,14 @@ function runBranch(repo: Repo, args: readonly string[]): OperationResult {
 function runSwitch(repo: Repo, args: readonly string[]): OperationResult {
   const parsed = parseArgs(args, {
     flags: ['--detach'],
-    values: ['-c', '-C'],
+    values: ['-c', '-C', '--orphan'],
     aliases: { '--create': '-c', '-d': '--detach' },
   })
+  const orphan = parsed.values.get('--orphan')
+  if (orphan !== undefined) {
+    atMost(parsed, 0, 'git switch --orphan <新しいブランチ>')
+    return orphanBranch(repo, orphan)
+  }
   const created = parsed.values.get('-c') ?? parsed.values.get('-C')
   if (created !== undefined) {
     atMost(parsed, 1, 'git switch -c <名前> [<起点>]')
@@ -416,7 +422,13 @@ function runSwitch(repo: Repo, args: readonly string[]): OperationResult {
 }
 
 function runCheckout(repo: Repo, args: readonly string[]): OperationResult {
-  const parsed = parseArgs(args, { flags: ['--detach'], values: ['-b', '-B'] })
+  const parsed = parseArgs(args, { flags: ['--detach'], values: ['-b', '-B', '--orphan'] })
+  const orphan = parsed.values.get('--orphan')
+  if (orphan !== undefined) {
+    atMost(parsed, 1, 'git checkout --orphan <新しいブランチ> [<起点>]')
+    const startPoint = parsed.positional[0]
+    return orphanBranch(repo, orphan, { keep: true, ...(startPoint === undefined ? {} : { startPoint }) })
+  }
   if (parsed.paths !== null) {
     if (parsed.positional.length > 0) {
       return restore(repo, parsed.paths, { source: parsed.positional[0] as string })
@@ -1109,7 +1121,7 @@ function runGitCommand(repo: Repo, name: string, args: readonly string[], raw: s
       return runCheckout(repo, args)
     case 'merge': {
       const parsed = parseArgs(args, {
-        flags: ['--ff', '--no-ff', '--ff-only', '--no-edit', ...CONTROL_FLAGS.slice(0, 2)],
+        flags: ['--ff', '--no-ff', '--ff-only', '--no-edit', '--allow-unrelated-histories', ...CONTROL_FLAGS.slice(0, 2)],
         values: ['-m', '-s', '-X'],
         aliases: { '--strategy': '-s', '--strategy-option': '-X' },
       })
@@ -1123,6 +1135,7 @@ function runGitCommand(repo: Repo, name: string, args: readonly string[], raw: s
         ...(message === undefined ? {} : { message }),
         ...strategyOptions(parsed),
         noEdit: parsed.flags.has('--no-edit'),
+        allowUnrelated: parsed.flags.has('--allow-unrelated-histories'),
         noFastForward: parsed.flags.has('--no-ff') || ffConfig === 'false',
         fastForwardOnly: parsed.flags.has('--ff-only') || ffConfig === 'only',
       })

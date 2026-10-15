@@ -139,6 +139,8 @@ export interface MergeOptions {
   readonly strategy?: MergeStrategy
   /** -X ours / -X theirs */
   readonly favor?: 'ours' | 'theirs'
+  /** --allow-unrelated-histories: 共通の祖先のない履歴どうしのマージを許す。 */
+  readonly allowUnrelated?: boolean
 }
 
 /** id と、すでにマージしたコミットたちとの共通の祖先のうち、いちばん新しいもの。 */
@@ -228,6 +230,7 @@ export function merge(repo: Repo, ref: string, options: MergeOptions = {}): Oper
   // -s ours は相手の変更を一切取り込まず、履歴だけをマージする
   const strategy = options.strategy === 'ours' ? 'ours' : 'ort'
   const baseId = mergeBase(repo, ours, theirs)
+  if (baseId === null && !options.allowUnrelated) throw new GitError('fatal: refusing to merge unrelated histories')
   const baseTree = baseId === null ? {} : getCommit(repo, baseId).tree
   const result =
     strategy === 'ours'
