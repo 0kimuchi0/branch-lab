@@ -18,7 +18,7 @@ npm run build    # 型チェックと本番ビルド
 画面上部のタブで 2 つのモードを切り替えられます。
 
 - **自由に試す**: clone 直後のリポジトリで、好きなコマンドを試せます。
-- **お題**: 「マージする」「コンフリクトを解消する」「コミットをまとめる」「作業を退避して急ぎの修正」「バグを入れたコミットを探す」「サブモジュールを最新にする」「チームメイトの立場で push する」「メールで届いたパッチを取り込む」「コミットのルールをフックで守る」など 29 問。
+- **お題**: 「マージする」「コンフリクトを解消する」「コミットをまとめる」「作業を退避して急ぎの修正」「バグを入れたコミットを探す」「サブモジュールを最新にする」「チームメイトの立場で push する」「メールで届いたパッチを取り込む」「コミットのルールをフックで守る」「履歴から秘密のファイルを消す」「消したコミットを本当に消す」など 33 問。
   目標のグラフと同じ履歴を作れたら正解です。コミット ID やメッセージが違っても、
   履歴の形と各コミットの由来 (コピーや revert を含む) が同じなら正解になります。
   クリアした記録はブラウザに保存されます。
@@ -42,8 +42,10 @@ URL のハッシュ (`#s=...`) には状態そのものではなく、モード�
 | コマンド | 内容 |
 | --- | --- |
 | `echo "内容" > ファイル` / `>>` | ファイルを上書き / 追記する |
-| `touch` / `cat` / `ls` / `rm` | ファイルの作成・表示・一覧・削除 (`rm` は作業ディレクトリからだけ消す) |
+| `touch` / `cat` / `ls` / `rm [-r] [-f]` / `mv <元> <先>` / `mkdir` | ファイルの作成・表示・一覧・削除・移動 (`rm` は作業ディレクトリからだけ消す) |
 | `grep [-q] [-v] [-i] [-c] [-E] <パターン> <ファイル>...` | 一致する行を表示する (なければ失敗する。フックで使う) |
+| `sed [-n] [-E] [-i] [-e <スクリプト>] <ファイル>...` | 行ごとに書き換える (`s/前/後/g`・`/パターン/d`・`<行>d`・`p`) |
+| `true` / `false` | 成功する / 失敗するだけ (フックやフィルタで使う) |
 | `chmod +x <ファイル>` | `.git/hooks` のフックを実行できるようにする |
 | `cd <パス>` / `pwd` | worktree・clone したリポジトリ・サブモジュールの中に移動する・今いる場所を表示する |
 
@@ -55,12 +57,15 @@ URL のハッシュ (`#s=...`) には状態そのものではなく、モード�
 | `log [--oneline] [--graph] [--all] [-n <数>] [--format=<書式>] [<範囲>] [-- <パス>]` | 履歴を表示する (下の「log の表示」も参照) |
 | `notes add [-f] [-m "…"] [<コミット>]` / `append` / `edit` / `show` / `list` / `remove` / `copy` | コミットを変えずにメモを付ける (`log` と `show` に表示される) |
 | `reflog [show] [<ブランチ>]` | HEAD (やブランチ) が動いた履歴を表示する |
+| `reflog expire [--expire=<日時>] [--expire-unreachable=<日時>] [--all \| <参照>...]` / `reflog delete <参照>@{<n>}` | reflog のエントリを消す |
+| `gc [--prune=<日時>] [--no-prune] [--aggressive] [--auto]` / `prune [-n] [-v] [--expire <日時>]` | どこからもたどれないコミットを削除する (下の「gc / fsck / prune」も参照) |
+| `fsck [--unreachable] [--no-reflogs] [--no-dangling] [--root] [--lost-found]` | 壊れたリンクと、たどれないコミット (dangling / unreachable) を調べる |
 | `diff [--staged] [<コミット> [<コミット>]] [--stat] [--name-only] [-- <ファイル>]` | 差分を表示する (`A..B` も可) |
 | `show [<コミット>]` | コミットの内容と差分を表示する |
 | `blame [-L <開始>,<終了>] <ファイル> [<コミット>]` | 各行を最後に変えたコミットを表示する |
 | `add <ファイル>...` / `add .` / `add -A` | 変更をステージする |
 | `restore [--staged] [--source=<コミット>] <ファイル>` | 作業ディレクトリ (または ステージ) を戻す |
-| `rm [--cached] [-f] <ファイル>` | ステージと作業ディレクトリから消す |
+| `rm [--cached] [-f] [-r] [--ignore-unmatch] [-q] <ファイル>` | ステージと作業ディレクトリから消す |
 | `commit [-m "…"] [-a] [--allow-empty] [--amend] [--no-edit]` | ステージの内容でコミットする (`-m` がなければエディタが開く) |
 | `commit --fixup=<コミット>` / `--squash=<コミット>` | `rebase --autosquash` でまとめるための `fixup!` / `squash!` のコミットを作る |
 | `branch [<名前> [<起点>]]` / `-d` / `-D` / `-m` / `-u` | ブランチの一覧・作成・削除・名前の変更・upstream の設定 |
@@ -87,10 +92,13 @@ URL のハッシュ (`#s=...`) には状態そのものではなく、モード�
 | `clone [-b <ブランチ>] [--recurse-submodules] [--sparse] <URL> [<ディレクトリ>]` | リモートの URL から別のリポジトリを作る (`cd` で中に入る) |
 | `sparse-checkout init` / `set <ディレクトリ>...` / `add` / `list` / `disable` | 作業ディレクトリに出すディレクトリを絞る (cone モード) |
 | `worktree add [-b <ブランチ>] [--detach] <パス> [<コミット>]` / `worktree list` / `worktree remove [-f] <パス>` | 作業ディレクトリをもう 1 つ作る (`cd` で移る) |
-| `submodule add [-b <ブランチ>] <URL> [<パス>]` / `submodule [status]` / `init` / `update [--init] [--remote]` / `deinit` / `foreach <コマンド>` | サブモジュールを取り込む・記録したコミットにする (`cd` で中に入る) |
+| `submodule add [-b <ブランチ>] <URL> [<パス>]` / `submodule [status]` / `init` / `update [--init] [--remote]` / `deinit` / `foreach <コマンド>` | サブモジュールを取り込む・記録したコミットにする (`cd` で中に入る。`status`・`update`・`foreach` は `--recursive` でサブモジュールの中のサブモジュールにも行う) |
 | `remote [-v]` / `remote add <名前> <URL>` / `remove` / `rename` / `set-url` / `get-url` | リモートの一覧・追加・削除・名前の変更 |
 | `push [-u] [-f] [--tags] [<リモート> [<ブランチ\|タグ>]]` / `push <リモート> --delete <名前>` | リモートに送る・リモートの参照を消す |
 | `fetch [<リモート> \| --all]` / `pull [--rebase \| --no-rebase \| --ff-only] [--no-edit] [<リモート> [<ブランチ>]]` | リモートから取り込む (タグも取り込む) |
+| `replace [-f] <コミット> <置き換え先>` / `replace [-f] --graft <コミット> [<親>...]` / `replace -d <コミット>...` / `replace [-l [<パターン>]] [--format=…]` | コミットを書き換えずに、別のコミットの内容 (や親) で見せる (`git --no-replace-objects <コマンド>` なら元のまま) |
+| `filter-branch [--tree-filter \| --index-filter \| --msg-filter \| --parent-filter <コマンド>] [--subdirectory-filter <ディレクトリ>] [--prune-empty] [--tag-name-filter cat] [-f] [-- <範囲> \| --all]` | 履歴のすべてのコミットをフィルタで作り直す (下の「filter-branch」も参照) |
+| `update-ref [-m "…"] [-d] <参照> [<コミット> [<古い値>]]` / `for-each-ref [--format=…] [<パターン>...]` / `show-ref [--heads] [--tags]` | 参照 (`refs/heads/`・`refs/original/`・`refs/replace/` など) を直接扱う |
 
 ### エディタ
 
@@ -171,6 +179,34 @@ chmod +x .git/hooks/commit-msg
 `commit` / `push` / `rebase` は `--no-verify` でフックを飛ばせます。フックは sh と同じく、最後のコマンドの結果で成否が決まり、
 `exit <数>` と `set -e` が使えます。
 
+### gc / fsck / prune
+
+`gc`・`prune`・`fsck` は、ブランチ・タグ・リモート追跡ブランチ・`refs/original/`・`refs/replace/`・各 worktree の HEAD・stash・
+途中の操作と、reflog の指すコミットからたどれるコミットを残します (`git notes` のメモは、コミットを残す理由になりません)。
+
+- reset や rebase で外したコミットは reflog に残るので、`git gc` では消えません。本当に消すには
+  `git reflog expire --expire=now --all` で reflog を消してから `git gc --prune=now` を実行します。
+- このアプリのコミットには時刻がないので、期限 (`--prune=<日時>`・`--expire=<日時>`・`gc.pruneExpire` など) は
+  `now` (と `all`) のときだけ働きます。既定の 2 週間や 90 日では、何も消えません。
+- `fsck` は、たどれない履歴の先端を `dangling commit`、`--unreachable` ならたどれないコミットすべてを表示します。
+
+### filter-branch
+
+フィルタはシェルスクリプトではなく、このアプリのコマンドです (`&&`・`||`・`;` と、`$GIT_COMMIT` が使えます)。
+書き換えたブランチの元の位置は `refs/original/refs/heads/<ブランチ>` に残るので、2 回目からは `-f` が必要です
+(`git update-ref -d refs/original/refs/heads/main` で消せます)。
+
+| フィルタ | 実行する場所 | 結果 |
+| --- | --- | --- |
+| `--tree-filter` | そのコミットの内容を出した作業ディレクトリ | 作業ディレクトリのファイルすべて (`rm -f secret.txt` など) |
+| `--index-filter` | そのコミットの内容のステージ | ステージ (`git rm --cached --ignore-unmatch secret.txt` など) |
+| `--msg-filter` | 標準入力にメッセージ | 出力が新しいメッセージ (`sed "s/^/[app] /"` など) |
+| `--parent-filter` | 標準入力に `-p <親> -p <親>` | 出力の `-p` の親 |
+| `--tag-name-filter` | 標準入力にタグの名前 | 出力の名前でタグを付け直す (`cat` なら同じ名前) |
+
+内容が変わらないコミットは同じ ID のままです (本物でもハッシュが変わりません)。`git replace` の置き換えは反映して読むので、
+`replace --graft` で付け替えた親は `filter-branch` で本当の履歴にできます。
+
 ### このアプリ独自のコマンド
 
 | コマンド | 内容 |
@@ -185,7 +221,6 @@ chmod +x .git/hooks/commit-msg
 - リモートはブラウザの中で模擬しています。URL には接続せず、`remote add` で追加したリモートは空のリポジトリから始まります
   (`remote remove` するとそのリモートの中身も消えます)。
 - サブモジュールの取得元も模擬で、初めて使う URL なら README.md だけのリポジトリになります。
-  サブモジュールの中のサブモジュール、サブモジュールや clone したリポジトリの中の worktree は未対応です。
 - `clone` できるのは、リモートとサブモジュールの URL だけです。clone 先は worktree の外 (`~/teammate` など) にします。
 - ファイルシステムは模擬で、`cd` で移動できるのは worktree・clone したリポジトリ・サブモジュールだけです。パスは `~/branch-lab` のような形です。
 - `log` に作者と日時はありません (`--format` の `%an` や `%ad` などは使えません)。`--graph` の線は、
@@ -207,7 +242,13 @@ chmod +x .git/hooks/commit-msg
 - `stash` は本物ではコミットとして保存されますが、ここでは別に持ち、グラフには描きません。
 - `diff` には blob の `index` 行がなく、コンフリクト中のファイルは結合差分の代わりに `* Unmerged path` と表示します。
 - `subtree` ストラテジー、ファイルを指定した `stash push`、タグへの署名などは未対応です。
-- reflog は HEAD とローカルブランチだけで、期限切れの削除 (`reflog expire`) はありません。
+- reflog は HEAD とローカルブランチだけです。
+- オブジェクトはコミットだけで、ファイル (blob) や tree のオブジェクトはありません。そのため `fsck` は `dangling blob` を表示せず、
+  `gc` はパックを作りません。期限は上の「gc / fsck / prune」のとおり `now` のときだけ働きます。
+- `replace` で置き換えられるのはコミットだけで、`--edit` と `--convert-graft-file` は未対応です。
+- `filter-branch` の `--env-filter` (コミットに作成者と日時がないため)・`--commit-filter`・`--setup`・`--state-branch` は未対応です。
+  `-- --all` は `refs/original/` と `refs/replace/` を書き換えの対象にしません。
+- `for-each-ref` の `%(objecttype)` は、注釈付きタグでも `commit` です。
 
 ## 設計
 
@@ -236,6 +277,10 @@ src/
     patch.ts       format-patch / apply / am
     compare.ts     cherry / range-diff
     bundle.ts      bundle
+    gc.ts          gc / prune / fsck と reflog expire / delete、notes prune
+    replace.ts     replace と、置き換えを反映して読むための Repo の変換
+    refs.ts        update-ref / for-each-ref / show-ref
+    filterBranch.ts filter-branch
     commands.ts    入力文字列の解析と実行。規則違反は例外にせず結果として返す
   graph/
     layout.ts      コミットグラフの座標を計算する純粋関数 (ローカル・リモートの両方)
@@ -263,6 +308,6 @@ Vite として自動で認識されるので、設定ファイルはありませ
 
 ## 今後の拡張案
 
-- `worktree` と `submodule` の入れ子 (サブモジュールの中のサブモジュールなど)
-- `git gc` / `fsck` / `prune` (どこからもたどれないコミットの掃除)
-- `git replace` と `filter-branch` (履歴の書き換え)
+- `git add -p` / `restore -p` (ハンクごとにステージする)
+- `rebase --onto` と `push --force-with-lease`
+- `git clean` / `git mv` / `describe` / `shortlog` / `git grep`

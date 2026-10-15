@@ -87,7 +87,8 @@ function selectCommits(repo: Repo, options: LogOptions): Set<CommitId> {
   if (options.all || options.branches) include.push(...Object.values(repo.branches))
   if (options.all || options.tags) include.push(...Object.values(repo.tags).map((tag) => tag.target))
   if (options.all || options.remotes) include.push(...Object.values(repo.remoteBranches))
-  if (options.all) include.push(headCommitId(repo))
+  // --all は refs/ の下のすべての参照 (refs/original/ と refs/replace/ も) と HEAD
+  if (options.all) include.push(...Object.values(repo.originalRefs), ...Object.values(repo.replaces), headCommitId(repo))
   if (include.length === 0 && symmetric === null) include.push(resolveRef(repo, 'HEAD'))
 
   const firstParent = options.firstParent ?? false

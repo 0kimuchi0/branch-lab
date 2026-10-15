@@ -135,4 +135,20 @@ describe('isSolved', () => {
     const repo = run(['echo "<h1>Hello</h1>" > index.html', 'git commit -am "typo を修正"'], built.start)
     expect(isSolved(built, repo)).toBe(false)
   })
+
+  it('nested-submodule: --recursive なしの update では不正解', () => {
+    const built = buildPuzzle(puzzle('nested-submodule'))
+    expect(isSolved(built, run(['git submodule update --init'], built.start))).toBe(false)
+  })
+
+  it('gc: reflog を消さずに gc --prune=now しても不正解', () => {
+    const built = buildPuzzle(puzzle('gc'))
+    expect(isSolved(built, run(['git gc --prune=now'], built.start))).toBe(false)
+  })
+
+  it('filter-branch: --prune-empty がなく、空のコミットが残ると不正解', () => {
+    const built = buildPuzzle(puzzle('filter-branch'))
+    const repo = run(["git filter-branch --index-filter 'git rm --cached --ignore-unmatch secret.txt'"], built.start)
+    expect(isSolved(built, repo)).toBe(false)
+  })
 })

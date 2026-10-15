@@ -86,7 +86,8 @@ export interface WorktreeRow {
 /** worktree の一覧 (メインが先頭)。git worktree add をしていなければ 1 行だけ。 */
 export function worktreeRows(repo: Repo): WorktreeRow[] {
   const states = { ...repo.worktrees, [repo.worktree]: { head: repo.head } }
-  const paths = Object.keys(states).sort((a, b) => Number(b === MAIN_WORKTREE) - Number(a === MAIN_WORKTREE) || a.localeCompare(b))
+  const main = repo.home ?? MAIN_WORKTREE
+  const paths = Object.keys(states).sort((a, b) => Number(b === main) - Number(a === main) || a.localeCompare(b))
   return paths.map((path) => {
     const head = (states[path] as { head: Repo['head'] }).head
     return {

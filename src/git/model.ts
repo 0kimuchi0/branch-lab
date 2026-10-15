@@ -342,6 +342,13 @@ export interface Repo {
   readonly fetchHead: { readonly id: CommitId; readonly description: string } | null
   /** git notes: コミット → そのコミットに付けたメモ。 */
   readonly notes: Readonly<Record<CommitId, string>>
+  /**
+   * git replace: 置き換えるコミット → 置き換え先 (refs/replace/<コミット>)。
+   * コマンドは置き換えたあとの内容でコミットを読む (replace.ts の withReplacements)。
+   */
+  readonly replaces: Readonly<Record<CommitId, CommitId>>
+  /** git filter-branch が残す元の参照 (refs/original/refs/heads/main など)。キーは refs/ から始まる名前。 */
+  readonly originalRefs: Readonly<Record<string, CommitId>>
 }
 
 /**
@@ -536,6 +543,8 @@ export function createRepo(): Repo {
     clone: null,
     gitFiles: {},
     fetchHead: null,
+    replaces: {},
+    originalRefs: {},
     reflogs: {
       HEAD: [{ id: root.id, message: `clone: from ${REMOTE_NAME}` }],
       [DEFAULT_BRANCH]: [{ id: root.id, message: `clone: from ${REMOTE_NAME}` }],
@@ -634,6 +643,8 @@ export function reachableCommits(repo: Repo): Set<CommitId> {
     ...Object.values(repo.branches),
     ...Object.values(repo.tags).map((tag) => tag.target),
     ...Object.values(repo.remoteBranches),
+    ...Object.values(repo.originalRefs),
+    ...Object.values(repo.replaces),
   ]
   const headId = headCommitIdOrNull(repo)
   if (headId !== null) tips.push(headId)
@@ -703,6 +714,7 @@ export function resolveRef(repo: Repo, ref: string): CommitId {
     if (repo.fetchHead === null) throw new GitError("fatal: ambiguous argument 'FETCH_HEAD': unknown revision")
     id = repo.fetchHead.id
   }
+  else if (base.startsWith('refs/')) id = resolveFullRef(repo, base)
   else if (base in repo.tags) id = (repo.tags[base] as Tag).target
   else if (base in repo.branches) id = repo.branches[base] as CommitId
   else if (base in repo.remoteBranches) id = repo.remoteBranches[base] as CommitId
@@ -718,6 +730,44 @@ export function resolveRef(repo: Repo, ref: string): CommitId {
     }
   }
   return id
+}
+
+/** refs/ から始まる参照の名前 (refs/heads/main・refs/original/refs/heads/main・refs/replace/C3 など) の指すコミット。 */
+export function fullRefTarget(repo: Repo, name: string): CommitId | undefined {
+  const rest = (prefix: string) => (name.startsWith(prefix) ? name.slice(prefix.length) : undefined)
+  const branch = rest('refs/heads/')
+  if (branch !== undefined) return repo.branches[branch]
+  const tag = rest('refs/tags/')
+  if (tag !== undefined) return repo.tags[tag]?.target
+  const remote = rest('refs/remotes/')
+  if (remote !== undefined) return repo.remoteBranches[remote]
+  const replaced = rest('refs/replace/')
+  if (replaced !== undefined) return repo.replaces[replaced]
+  return repo.originalRefs[name]
+}
+
+function resolveFullRef(repo: Repo, name: string): CommitId {
+  const id = fullRefTarget(repo, name)
+  if (id === undefined) throw new GitError(`fatal: ambiguous argument '${name}': unknown revision or path not in the working tree.`)
+  return id
+}
+
+/** すべての参照 (refs/ から始まる名前 → コミット)。名前の順に並べる。 */
+export function allRefs(repo: Repo): Array<[string, CommitId]> {
+  const refs: Array<[string, CommitId]> = [
+    ...Object.entries(repo.branches).map(([name, id]): [string, CommitId] => [`refs/heads/${name}`, id]),
+    ...Object.entries(repo.tags).map(([name, tag]): [string, CommitId] => [`refs/tags/${name}`, tag.target]),
+    ...Object.entries(repo.remoteBranches).map(([name, id]): [string, CommitId] => [`refs/remotes/${name}`, id]),
+    ...Object.entries(repo.originalRefs),
+    ...Object.entries(repo.replaces).map(([name, id]): [string, CommitId] => [`refs/replace/${name}`, id]),
+  ]
+  return refs.sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))
+}
+
+/** コミットを作って保存する (HEAD やブランチは動かさない)。 */
+export function storeCommit(repo: Repo, fields: Omit<Commit, 'id'>): { repo: Repo; id: CommitId } {
+  const id = `${repo.idPrefix ?? 'C'}${repo.nextId}`
+  return { repo: { ...repo, commits: { ...repo.commits, [id]: { ...fields, id } }, nextId: repo.nextId + 1 }, id }
 }
 
 /** n 個前に checkout していたブランチ (git switch - や @{-1})。 */
@@ -781,6 +831,11 @@ export function refNames(repo: Repo, id: CommitId): string[] {
   for (const [name, target] of Object.entries(repo.remoteBranches)) {
     if (target === id) names.push(name)
   }
+  for (const [name, target] of Object.entries(repo.originalRefs)) {
+    if (target === id) names.push(name)
+  }
+  // git replace で置き換えたコミットには replaced と付ける
+  if (id in repo.replaces) names.push('replaced')
   return names
 }
 
@@ -1030,7 +1085,7 @@ export function add(repo: Repo, specs: readonly string[]): OperationResult {
 export function gitRemove(
   repo: Repo,
   specs: readonly string[],
-  options: { readonly cached?: boolean; readonly force?: boolean } = {},
+  options: { readonly cached?: boolean; readonly force?: boolean; readonly ignoreUnmatch?: boolean } = {},
 ): OperationResult {
   if (specs.length === 0) throw new GitError('削除するファイルを指定してください')
   const head = headTree(repo)
@@ -1038,6 +1093,8 @@ export function gitRemove(
   for (const spec of specs) {
     const matched = matchPaths(Object.keys(repo.index), spec)
     if (matched.length === 0) {
+      // --ignore-unmatch: 一致するファイルがなくても失敗にしない
+      if (options.ignoreUnmatch) continue
       throw new GitError(`fatal: pathspec '${spec}' に一致するファイルはありません`)
     }
     paths.push(...matched)

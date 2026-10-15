@@ -10,6 +10,7 @@ import {
   detachHead,
   hasTrackedChanges,
   headCommitId,
+  headCommitIdOrNull,
   requireNoOperation,
   type Commit,
   type CommitId,
@@ -220,7 +221,8 @@ export function syncSubmodules(root: Repo): Repo {
   for (const path of paths) {
     const nested = root.submodules[path]
     const staged = root.index[path]
-    const value = nested ? gitlink(headCommitId(nested)) : parseGitlink(staged) !== null ? staged : undefined
+    const head = nested ? checkedOut(nested) : null
+    const value = head !== null ? gitlink(head) : parseGitlink(staged) !== null ? staged : undefined
     if (workdir[path] !== value) workdir = withFile(workdir, path, value)
   }
   return workdir === root.workdir ? root : { ...root, workdir }
@@ -230,13 +232,25 @@ export function syncSubmodules(root: Repo): Repo {
 export function activeRepo(root: Repo): Repo {
   const clone = root.clone === null ? undefined : root.clones[root.clone]
   if (clone) return activeRepo(clone)
-  return root.submodule === null ? root : (root.submodules[root.submodule] ?? root)
+  const nested = root.submodule === null ? undefined : root.submodules[root.submodule]
+  return nested ? activeRepo(nested) : root
+}
+
+/**
+ * サブモジュールの、親のリポジトリの中の場所 (メインの worktree) でチェックアウトしているコミット。
+ * サブモジュールの別の worktree に cd していても、親の gitlink はこちらに合わせる。
+ */
+function checkedOut(nested: Repo): CommitId | null {
+  const main = nested.home ?? nested.worktree
+  if (nested.worktree === main) return headCommitIdOrNull(nested)
+  const state = nested.worktrees[main]
+  if (state === undefined) return headCommitIdOrNull(nested)
+  return state.head.type === 'branch' ? (nested.branches[state.head.name] ?? null) : state.head.id
 }
 
 /** git submodule add [-b <ブランチ>] <URL> [<パス>] */
 export function submoduleAdd(repo: Repo, url: string, rawPath?: string, branch?: string): OperationResult {
   requireNoOperation(repo)
-  if (repo.idPrefix !== undefined) throw new GitError('サブモジュールの中にサブモジュールを入れることは、このアプリでは未対応です')
   const path = (rawPath ?? nameFromUrl(url)).replace(/\/$/, '')
   if (path in repo.index) throw new GitError(`fatal: '${path}' already exists in the index`)
   if (path in repo.workdir || Object.keys(repo.workdir).some((file) => file.startsWith(`${path}/`))) {
@@ -268,16 +282,19 @@ export function submoduleAdd(repo: Repo, url: string, rawPath?: string, branch?:
   }
 }
 
-/** git submodule [status] [<パス>...] */
-export function submoduleStatus(repo: Repo, paths: readonly string[]): OperationResult {
-  const lines = select(repo, paths).map((entry) => {
+/** git submodule [status] [--recursive] [<パス>...] (prefix は入れ子のサブモジュールのパスの前に付ける) */
+export function submoduleStatus(repo: Repo, paths: readonly string[], recursive = false, prefix = ''): OperationResult {
+  const lines = select(repo, paths).flatMap((entry) => {
     const recorded = parseGitlink(repo.index[entry.path]) as string
     const nested = repo.submodules[entry.path]
-    if (!nested) return `-${recorded} ${entry.path}`
+    if (!nested) return [`-${recorded} ${prefix}${entry.path}`]
     const head = headCommitId(nested)
     const conflicted = repo.conflicts.some((conflict) => conflict.path === entry.path)
     const mark = conflicted ? 'U' : head === recorded ? ' ' : '+'
-    return `${mark}${head} ${entry.path}${describe(nested, head)}`
+    const line = `${mark}${head} ${prefix}${entry.path}${describe(nested, head)}`
+    if (!recursive) return [line]
+    const inner = submoduleStatus(nested, [], true, `${prefix}${entry.path}/`).output
+    return inner === '' ? [line] : [line, inner]
   })
   return { repo, output: lines.join('\n') }
 }
@@ -294,14 +311,14 @@ function describe(nested: Repo, id: CommitId): string {
 }
 
 /** git submodule init [<パス>...]: .gitmodules の URL を設定に登録する。 */
-export function submoduleInit(repo: Repo, paths: readonly string[]): OperationResult {
+export function submoduleInit(repo: Repo, paths: readonly string[], prefix = ''): OperationResult {
   let config = repo.config
   const lines: string[] = []
   for (const entry of select(repo, paths)) {
     const key = `submodule.${entry.name}.url`
     if (key in config || entry.url === '') continue
     config = { ...config, [key]: entry.url }
-    lines.push(`Submodule '${entry.name}' (${entry.url}) registered for path '${entry.path}'`)
+    lines.push(`Submodule '${entry.name}' (${entry.url}) registered for path '${prefix}${entry.path}'`)
   }
   return { repo: { ...repo, config }, output: lines.join('\n') }
 }
@@ -310,19 +327,25 @@ export interface SubmoduleUpdateOptions {
   readonly init?: boolean
   /** --remote: 記録したコミットではなく、取得元のブランチの最新にする。 */
   readonly remote?: boolean
+  /** --recursive: サブモジュールの中のサブモジュールも同じように更新する。 */
+  readonly recursive?: boolean
 }
 
-/** git submodule update [--init] [--remote] [<パス>...]: サブモジュールを記録したコミット (detached HEAD) にする。 */
+/**
+ * git submodule update [--init] [--remote] [--recursive] [<パス>...]: サブモジュールを記録したコミット (detached HEAD) にする。
+ * prefix は、入れ子のサブモジュールを表示するときにパスの前に付ける (lib/ など)。
+ */
 export function submoduleUpdate(
   repo: Repo,
   paths: readonly string[],
   options: SubmoduleUpdateOptions = {},
+  prefix = '',
 ): OperationResult {
   requireNoOperation(repo)
   const lines: string[] = []
   let current = repo
   if (options.init) {
-    const initialized = submoduleInit(current, paths)
+    const initialized = submoduleInit(current, paths, prefix)
     current = initialized.repo
     if (initialized.output) lines.push(initialized.output)
   }
@@ -351,7 +374,7 @@ export function submoduleUpdate(
     }
     if (!(target in nested.commits)) {
       throw new GitError(
-        `fatal: Fetched in submodule path '${entry.path}', but it did not contain ${target}. ` +
+        `fatal: Fetched in submodule path '${prefix}${entry.path}', but it did not contain ${target}. ` +
           'Direct fetching of that commit failed.',
       )
     }
@@ -360,11 +383,16 @@ export function submoduleUpdate(
         nested = detachHead(nested, target).repo
       } catch (error) {
         if (!(error instanceof GitError)) throw error
-        throw new GitError(`${error.message}\nfatal: Unable to checkout '${target}' in submodule path '${entry.path}'`)
+        throw new GitError(`${error.message}\nfatal: Unable to checkout '${target}' in submodule path '${prefix}${entry.path}'`)
       }
-      lines.push(`Submodule path '${entry.path}': checked out '${target}'`)
+      lines.push(`Submodule path '${prefix}${entry.path}': checked out '${target}'`)
     }
-    current = { ...current, submodules: { ...current.submodules, [entry.path]: nested } }
+    if (options.recursive) {
+      const inner = submoduleUpdate(nested, [], options, `${prefix}${entry.path}/`)
+      nested = inner.repo
+      if (inner.output) lines.push(inner.output)
+    }
+    current = syncServersOut({ ...current, submodules: { ...current.submodules, [entry.path]: nested } }, nested)
   }
   return { repo: syncSubmodules(current), output: lines.join('\n') }
 }

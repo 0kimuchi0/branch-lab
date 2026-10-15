@@ -10,7 +10,6 @@ import {
   currentWorktreeState,
   enterWorktree,
   getCommit,
-  isSubmodulePath,
   requireBranchFree,
   resolveRef,
   subject,
@@ -20,6 +19,7 @@ import {
   type Repo,
   type WorktreeState,
 } from './model'
+import { parseGitlink } from './tree'
 
 /** base から見た path を、~ から始まる正規化したパスにする。 */
 export function resolvePath(base: string, path: string): string {
@@ -36,11 +36,17 @@ export function resolvePath(base: string, path: string): string {
   return ['~', ...parts.filter((part) => part !== '~')].join('/')
 }
 
+/** リポジトリのメインの worktree のパス (一番外側なら ~/branch-lab、clone やサブモジュールならその場所)。 */
+export function mainWorktree(repo: Repo): string {
+  return repo.home ?? MAIN_WORKTREE
+}
+
 /** すべての worktree のパス (メインが先頭、残りは名前順)。 */
 export function worktreePaths(repo: Repo): string[] {
+  const main = mainWorktree(repo)
   const paths = new Set([repo.worktree, ...Object.keys(repo.worktrees)])
-  paths.delete(MAIN_WORKTREE)
-  return [MAIN_WORKTREE, ...[...paths].sort()]
+  paths.delete(main)
+  return [main, ...[...paths].sort()]
 }
 
 function stateOf(repo: Repo, path: string): WorktreeState {
@@ -51,34 +57,98 @@ function stateOf(repo: Repo, path: string): WorktreeState {
 export function currentDirectory(root: Repo): string {
   const clone = root.clone === null ? undefined : root.clones[root.clone]
   if (clone) return currentDirectory(clone)
-  return root.submodule === null ? root.worktree : `${root.worktree}/${root.submodule}`
+  const nested = root.submodule === null ? undefined : root.submodules[root.submodule]
+  return nested ? currentDirectory(nested) : root.worktree
+}
+
+/** cd で移れる場所に入るための手順 (clone したリポジトリ・worktree・サブモジュールの順にたどる)。 */
+type Step =
+  | { readonly kind: 'clone'; readonly path: string }
+  | { readonly kind: 'worktree'; readonly path: string }
+  | { readonly kind: 'submodule'; readonly path: string }
+
+interface Location {
+  readonly path: string
+  readonly steps: readonly Step[]
+  /** その worktree の状態 (チェックアウトしていないサブモジュールを見分けるのに使う)。 */
+  readonly state: WorktreeState
+}
+
+function locationsOf(repo: Repo, prefix: readonly Step[]): Location[] {
+  const result: Location[] = []
+  for (const path of worktreePaths(repo)) {
+    const steps: Step[] = [...prefix, { kind: 'worktree', path }]
+    const state = stateOf(repo, path)
+    result.push({ path, steps, state })
+    for (const [sub, nested] of Object.entries(state.submodules)) {
+      result.push(...locationsOf(nested, [...steps, { kind: 'submodule', path: sub }]))
+    }
+  }
+  return result
+}
+
+/** cd で移れるすべての場所 (一番外側のリポジトリ・clone したリポジトリの worktree と、その中のサブモジュール)。 */
+export function allLocations(root: Repo): Location[] {
+  return [
+    ...locationsOf(root, []),
+    ...Object.entries(root.clones).flatMap(([path, cloned]) => locationsOf(cloned, [{ kind: 'clone', path }])),
+  ]
+}
+
+/** サブモジュールを、メインの worktree (親のリポジトリの中の場所) にいる状態に戻す (中のサブモジュールも)。 */
+function resetSubmodules(repo: Repo): Repo {
+  const entries = Object.entries(repo.submodules)
+  if (entries.length === 0 && repo.submodule === null) return repo
+  const submodules = Object.fromEntries(
+    entries.map(([path, nested]) => [path, resetSubmodules(enterWorktree({ ...nested, submodule: null }, mainWorktree(nested)))]),
+  )
+  return { ...repo, submodules, submodule: null }
+}
+
+function enter(repo: Repo, steps: readonly Step[]): Repo {
+  const [step, ...rest] = steps
+  if (step === undefined) return repo
+  switch (step.kind) {
+    case 'clone':
+      return { ...repo, submodule: null, clone: step.path, clones: { ...repo.clones, [step.path]: enter(repo.clones[step.path] as Repo, rest) } }
+    case 'worktree':
+      return enter(enterWorktree({ ...repo, clone: null, submodule: null }, step.path), rest)
+    case 'submodule':
+      return { ...repo, submodule: step.path, submodules: { ...repo.submodules, [step.path]: enter(repo.submodules[step.path] as Repo, rest) } }
+  }
 }
 
 /**
- * cd <パス>: 別の worktree や、チェックアウトしたサブモジュールの中に移る (root は一番外側のリポジトリ)。
+ * cd <パス>: 別の worktree や、チェックアウトしたサブモジュール、clone したリポジトリの中に移る (root は一番外側のリポジトリ)。
+ * サブモジュールの中のサブモジュールや、clone したリポジトリ・サブモジュールの worktree にも入れる。
  * 引数がなければメインの worktree に戻る。
  */
 export function changeDirectory(root: Repo, path: string | undefined): OperationResult {
   const target = resolvePath(currentDirectory(root), path ?? MAIN_WORKTREE)
-  const outside: Repo = { ...root, submodule: null, clone: null }
-  // clone したリポジトリ (とその中のサブモジュール) に入る
-  for (const [clonePath, cloned] of Object.entries(root.clones)) {
-    if (target !== clonePath && !target.startsWith(`${clonePath}/`)) continue
-    const inner = changeDirectory({ ...cloned, submodule: null }, target)
-    return { repo: { ...outside, clones: { ...root.clones, [clonePath]: inner.repo }, clone: clonePath }, output: '' }
+  // 出ていくサブモジュールは、親の中の場所 (メインの worktree) に戻しておく
+  const base: Repo = {
+    ...resetSubmodules(root),
+    clone: null,
+    clones: Object.fromEntries(Object.entries(root.clones).map(([where, cloned]) => [where, resetSubmodules(cloned)])),
   }
-  const paths = worktreePaths(outside)
-  if (paths.includes(target)) return { repo: enterWorktree(outside, target), output: '' }
-  const worktree = paths.filter((wt) => target.startsWith(`${wt}/`)).sort((a, b) => b.length - a.length)[0]
-  if (worktree !== undefined) {
-    const entered = enterWorktree(outside, worktree)
-    const sub = target.slice(worktree.length + 1)
-    if (sub in entered.submodules) return { repo: { ...entered, submodule: sub }, output: '' }
-    if (isSubmodulePath(entered, sub)) {
-      throw new GitError(`cd: ${path}: サブモジュールの中身がありません (git submodule update --init で取得します)`)
-    }
+  const locations = allLocations(base)
+  const exact = locations.find((location) => location.path === target)
+  if (exact !== undefined) return { repo: enter(base, exact.steps), output: '' }
+  const parent = locations.filter((location) => target.startsWith(`${location.path}/`)).sort((a, b) => b.path.length - a.path.length)[0]
+  if (parent !== undefined && parseGitlink(parent.state.index[target.slice(parent.path.length + 1)]) !== null) {
+    throw new GitError(`cd: ${path}: サブモジュールの中身がありません (git submodule update --init で取得します)`)
   }
-  throw new GitError(`cd: ${path}: そのようなディレクトリはありません (移動できるのは worktree とサブモジュールだけです)`)
+  throw new GitError(`cd: ${path}: そのようなディレクトリはありません (移動できるのは worktree とサブモジュールと clone したリポジトリだけです)`)
+}
+
+/** 同じ場所に 2 つのリポジトリや worktree があれば、その場所。 */
+export function duplicateLocation(root: Repo): string | null {
+  const seen = new Set<string>()
+  for (const location of allLocations(root)) {
+    if (seen.has(location.path)) return location.path
+    seen.add(location.path)
+  }
+  return null
 }
 
 export interface WorktreeAddOptions {
@@ -164,7 +234,7 @@ export function worktreeList(repo: Repo): OperationResult {
 /** git worktree remove [-f] <パス> */
 export function worktreeRemove(repo: Repo, rawPath: string, force = false): OperationResult {
   const path = resolvePath(repo.worktree, rawPath)
-  if (path === MAIN_WORKTREE) throw new GitError(`fatal: '${path}' is a main working tree`)
+  if (path === mainWorktree(repo)) throw new GitError(`fatal: '${path}' is a main working tree`)
   if (path === repo.worktree) {
     throw new GitError('fatal: 今いる worktree は削除できません (cd で別の worktree に移動してください)')
   }

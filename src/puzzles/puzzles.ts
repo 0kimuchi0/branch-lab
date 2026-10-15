@@ -1,6 +1,7 @@
 /** お題の一覧と、お題から初期状態・目標の Repo を作る関数。 */
 import { editorSaveCommand, executeCommand } from '../git/commands'
-import { MAIN_WORKTREE, createRepo, headTree, type Repo } from '../git/model'
+import { MAIN_WORKTREE, ancestors, createRepo, headTree, type Repo } from '../git/model'
+import { withReplacements } from '../git/replace'
 import { parseGitlink } from '../git/tree'
 import { matchesGoal } from './match'
 
@@ -504,6 +505,92 @@ export const PUZZLES: readonly Puzzle[] = [
     check: (repo) => {
       const offline = repo.clones['~/offline']
       return (repo.workdir['repo.bundle'] ?? '').startsWith('# v2 git bundle') && offline?.branches['main'] === repo.branches['main']
+    },
+  },
+  {
+    id: 'nested-submodule',
+    title: 'サブモジュールの中のサブモジュール',
+    description:
+      'lib はサブモジュールで、その中にさらに util というサブモジュールがあります。~/fresh に clone したばかりのリポジトリで、lib と、その中の util の両方を取ってきましょう。',
+    hint: 'git submodule update --init だけでは lib しか取ってきません。--recursive を付けると、サブモジュールの中のサブモジュールまで取ってきます。',
+    setup: [
+      'git submodule add https://example.com/lib.git',
+      'cd lib',
+      'git submodule add https://example.com/util.git',
+      'git commit -m "util を追加"',
+      'git push',
+      'cd ~/branch-lab',
+      'git add lib',
+      'git commit -m "lib を追加"',
+      'git push',
+      'git clone https://example.com/branch-lab.git ../fresh',
+      'cd ../fresh',
+    ],
+    solutions: [
+      ['git submodule update --init --recursive'],
+      ['git submodule update --init', 'cd lib', 'git submodule update --init'],
+    ],
+    check: (repo) => repo.clones['~/fresh']?.submodules['lib']?.submodules['util'] !== undefined,
+  },
+  {
+    id: 'gc',
+    title: '消したコミットを本当に消す',
+    description:
+      'パスワードを書いたコミットを git reset --hard で取り消しましたが、reflog に残っているので、まだリポジトリの中にあります。reflog を消して、どこからもたどれなくなったコミットを gc で削除しましょう。',
+    hint: 'git reflog expire --expire=now --all で reflog のエントリを消し、git gc --prune=now で、たどれないコミットを今すぐ削除します。git fsck で、たどれないコミットが残っていないかを確かめられます。',
+    setup: [...change('app.txt', '機能 A', '機能 A'), ...change('password.txt', 'secret123', 'パスワードを保存'), 'git reset --hard HEAD~1'],
+    solutions: [['git reflog expire --expire=now --all', 'git gc --prune=now']],
+    check: (repo) => Object.values(repo.commits).every((commit) => !('password.txt' in commit.tree)),
+  },
+  {
+    id: 'filter-branch',
+    title: '履歴から秘密のファイルを消す',
+    description:
+      '途中のコミットで secret.txt をコミットしてしまいました。main のすべてのコミットから secret.txt を取り除き、secret.txt を足しただけのコミットは履歴からなくしましょう。',
+    hint: "git filter-branch --index-filter 'git rm --cached --ignore-unmatch secret.txt' --prune-empty で、各コミットから secret.txt を取り除きます。--prune-empty は、変更がなくなったコミットを取り除きます (--tree-filter 'rm -f secret.txt' でも同じです)。",
+    setup: [
+      ...change('app.txt', '機能 A', '機能 A'),
+      ...change('secret.txt', 'password=secret123', '設定を追加'),
+      ...change('app.txt', '機能 B', '機能 B'),
+    ],
+    solutions: [
+      ["git filter-branch --index-filter 'git rm --cached --ignore-unmatch secret.txt' --prune-empty"],
+      ["git filter-branch --tree-filter 'rm -f secret.txt' --prune-empty"],
+    ],
+    check: (repo) => {
+      const main = repo.branches['main']
+      if (main === undefined) return false
+      const seen = new Set<string>()
+      const stack = [main]
+      while (stack.length > 0) {
+        const id = stack.pop() as string
+        const commit = repo.commits[id]
+        if (commit === undefined || seen.has(id)) continue
+        seen.add(id)
+        if ('secret.txt' in commit.tree) return false
+        stack.push(...commit.parents)
+      }
+      return true
+    },
+  },
+  {
+    id: 'replace',
+    title: '古い履歴をつなげて見せる',
+    description:
+      'old ブランチには、移行する前の古いシステムの履歴があります。main の最初のコミット C0 の親が old の先端であるように見せましょう。コミットは書き換えず、git log で古い履歴まで続けて見えるようにします。',
+    hint: 'git replace --graft C0 old で、親を old にした C0 の代わりのコミットを作り、C0 をそれに置き換えます。git log で old の履歴まで見えるようになります (git --no-replace-objects log なら元のまま)。',
+    setup: [
+      'git switch --orphan old',
+      ...change('legacy.txt', '旧システムの機能 1', '旧システム 1'),
+      ...change('legacy.txt', '旧システムの機能 2', '旧システム 2'),
+      'git switch main',
+      ...change('app.txt', '新しい機能', '新しい機能'),
+    ],
+    solutions: [['git replace --graft C0 old']],
+    check: (repo) => {
+      const main = repo.branches['main']
+      const old = repo.branches['old']
+      return main !== undefined && old !== undefined && ancestors(withReplacements(repo).commits, main).has(old)
     },
   },
 ]

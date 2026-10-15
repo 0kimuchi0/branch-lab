@@ -49,6 +49,14 @@ React + TypeScript + Vite、テストは Vitest。UI の文言は日本語。
   親の tree には gitlink (`tree.ts` の `gitlink`) を入れる。`cd` で中にいる間 (`Repo.submodule`) は、
   `executeCommand` がサブモジュールでコマンドを実行し、`syncServersIn` / `syncServersOut` で取得元 (`Repo.libraries`) と、
   `syncSubmodules` で親の gitlink と同期する。画面に出すのは `activeRepo`。
+  サブモジュールの中のサブモジュールも、clone やサブモジュールの中の worktree も入れ子の `Repo` で表し、`cd` の行き先は
+  `worktree.ts` の `allLocations` でたどる (サブモジュールの元の場所は `Repo.home`、親から出るときに `resetSubmodules` で戻す)。
+- `src/git/gc.ts`: gc / prune / fsck / reflog expire。残すコミットは `liveCommits` (参照・HEAD・stash・途中の操作・reflog)。
+  コミットに時刻がないので、期限は now (all) のときだけ働く。
+- `src/git/replace.ts`: replace (`Repo.replaces`)。`commands.ts` の `executeLocal` が、置き換えを反映した Repo
+  (`withReplacements`) でコマンドを実行し、結果のコミットを元に戻す (`restoreOriginals`)。gc・push などの `RAW_COMMANDS` は元のまま。
+- `src/git/filterBranch.ts`: filter-branch。フィルタは `commands.ts` の `runFilter` で実行し、`--msg-filter` などの標準入力は
+  `stdinText` で cat・sed・grep に渡す。元の参照は `Repo.originalRefs` (`refs/original/...`)。`src/git/refs.ts`: update-ref / for-each-ref / show-ref。
 - `src/git/clone.ts`: clone。clone したリポジトリは一番外側の `Repo.clones` に持ち、`cd` で中にいる間 (`Repo.clone`) は
   `executeCommand` がそのリポジトリで実行する。リモートとサブモジュールの取得元は URL ごとの模擬のサーバーとして扱い、
   `syncServersIn` / `syncServersOut` で中身とコミットの採番を共有する。
@@ -82,6 +90,6 @@ main に push すると https://branch-lab-dun.vercel.app にデプロイされ�
 
 ## 今後の予定
 
-- worktree と submodule の入れ子
-- `gc` / `fsck` / `prune`
-- `replace` と `filter-branch`
+- `add -p` / `restore -p`
+- `rebase --onto` と `push --force-with-lease`
+- `clean` / `mv` / `describe` / `shortlog` / `grep`
