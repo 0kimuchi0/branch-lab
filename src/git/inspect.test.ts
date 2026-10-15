@@ -45,7 +45,7 @@ describe('git show', () => {
     const repo = run(commitFile('a.txt', 'hello', 'a を追加'))
     expect(out(repo, 'git show')).toBe(
       [
-        'commit C1 (HEAD -> main)', '', '    a を追加', '',
+        'commit C1 (HEAD -> main)', 'Author: あなた', '', '    a を追加', '',
         'diff --git a/a.txt b/a.txt', 'new file mode 100644', '--- /dev/null', '+++ b/a.txt', '@@ -0,0 +1 @@', '+hello',
       ].join('\n'),
     )

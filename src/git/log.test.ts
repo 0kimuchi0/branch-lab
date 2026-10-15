@@ -54,7 +54,7 @@ describe('git log --graph', () => {
       'git merge --no-edit a b',
     ])
     const lines = out(repo, 'git log --graph -1').split('\n')
-    expect(lines.slice(0, 4)).toEqual(['*-.   commit C4 (HEAD -> main)', '|\\ \\  Merge: C3 C1 C2', '| | |', "| | |     Merge branches 'a' and 'b'"])
+    expect(lines.slice(0, 5)).toEqual(['*-.   commit C4 (HEAD -> main)', '|\\ \\  Merge: C3 C1 C2', '| | | Author: あなた', '| | |', "| | |     Merge branches 'a' and 'b'"])
   })
 })
 

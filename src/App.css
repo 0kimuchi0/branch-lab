@@ -766,6 +766,10 @@ button.link {
   color: var(--lane-2);
 }
 
+.file-ignored .file-path {
+  color: var(--text-muted);
+}
+
 .file-modified .file-badge {
   background: color-mix(in srgb, var(--lane-1) 22%, transparent);
   color: var(--lane-1);

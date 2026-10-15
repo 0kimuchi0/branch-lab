@@ -11,6 +11,7 @@ const GIT = [
   'branch', 'switch', 'checkout', 'merge', 'rebase', 'cherry-pick', 'tag', 'reset', 'revert', 'filter-branch', 'replace',
   'clone', 'remote', 'push', 'fetch', 'pull', 'stash', 'bisect', 'worktree', 'submodule', 'sparse-checkout', 'format-patch',
   'am', 'apply', 'bundle', 'config', 'rerere', 'gc', 'prune', 'fsck', 'update-ref', 'for-each-ref', 'show-ref',
+  'clean', 'mv', 'grep', 'describe', 'shortlog', 'check-ignore',
 ]
 
 describe('コマンドのヘルプ', () => {
@@ -19,6 +20,9 @@ describe('コマンドのヘルプ', () => {
     for (const name of GIT) expect(findHelp(`git ${name}`)?.git, name).toBe(true)
     expect(findHelp('git rm')?.name).toBe('git-rm')
     expect(findHelp('rm')?.name).toBe('rm')
+    expect(findHelp('git mv')?.name).toBe('git-mv')
+    expect(findHelp('git grep')?.name).toBe('git-grep')
+    expect(findHelp('grep')?.name).toBe('grep')
   })
 
   it('関連のコマンドはすべてある', () => {

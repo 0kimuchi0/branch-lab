@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useState } from 'react'
 import './App.css'
 import { EditorPanel } from './components/EditorPanel'
 import { HelpDialog } from './components/HelpDialog'
+import { PromptPanel } from './components/PromptPanel'
 import { PuzzlePanel } from './components/PuzzlePanel'
 import { TutorialPanel } from './components/TutorialPanel'
 import { ShareButton } from './components/ShareButton'
@@ -311,6 +312,7 @@ export default function App() {
               onSelect={selectPuzzle}
             />
           )}
+          {active.prompt && <PromptPanel prompt={active.prompt} onAnswer={run} />}
           {active.editor && (
             <EditorPanel
               key={`${nextLogId}:${active.editor.text}`}
@@ -327,6 +329,7 @@ export default function App() {
           onReset={reset}
           resetLabel={mode === 'free' ? 'リセット' : 'やり直す'}
           editorOpen={active.editor !== null}
+          promptOpen={active.prompt !== null}
           draft={draft}
           {...(mode === 'free' ? { emptyHint: 'はじめての方は、上の「チュートリアル」から始めましょう。コマンドを入力するか、下のボタンを押しても試せます。' } : {})}
         />

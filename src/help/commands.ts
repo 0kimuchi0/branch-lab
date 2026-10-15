@@ -212,13 +212,18 @@ export const COMMAND_HELP: readonly CommandHelp[] = [
     git: true,
     category: 'basic',
     summary: '変更をステージする (次のコミットに入れる)',
-    usage: ['git add <ファイル>...', 'git add .', 'git add -A'],
+    usage: ['git add <ファイル>...', 'git add .', 'git add -A', 'git add -p [<ファイル>...]', 'git add -f <ファイル>...'],
     description:
-      '作業ディレクトリの変更を「ステージ」に入れます。ステージは次のコミットの下書きで、`git commit` はステージの内容をそのまま記録します。\n\n新しいファイル・変更したファイル・消したファイルのどれも、`git add` でステージできます。`.` は今のディレクトリの下のすべてです。',
-    options: [['-A', 'すべての変更 (削除も含む) をステージする']],
+      '作業ディレクトリの変更を「ステージ」に入れます。ステージは次のコミットの下書きで、`git commit` はステージの内容をそのまま記録します。\n\n新しいファイル・変更したファイル・消したファイルのどれも、`git add` でステージできます。`.` は今のディレクトリの下のすべてです。`.gitignore` で無視しているファイルは、`-f` を付けなければステージしません。\n\n`-p` を付けると、変更をハンク (まとまり) ごとに見せて、ステージするかを 1 つずつ尋ねます。`y` (する)・`n` (しない)・`a` (このファイルの残りをすべてする)・`d` (このファイルの残りをすべてしない)・`s` (小さく分ける)・`q` (終わる)・`?` (ヘルプ) で答えます。',
+    options: [
+      ['-A', 'すべての変更 (削除も含む) をステージする'],
+      ['-p', 'ハンクごとに尋ねて、一部だけをステージする'],
+      ['-f', '.gitignore で無視しているファイルもステージする'],
+    ],
     examples: [
       ['git add index.html', 'index.html の変更をステージする'],
       ['git add .', 'すべての変更をステージする'],
+      ['git add -p', '変更をハンクごとに選んでステージする'],
     ],
     related: ['commit', 'status', 'restore'],
   },
@@ -271,23 +276,70 @@ export const COMMAND_HELP: readonly CommandHelp[] = [
     related: ['rm', 'add'],
   },
   {
+    name: 'git-mv',
+    git: true,
+    category: 'basic',
+    summary: 'ファイルの名前を変える・移して、そのことをステージする',
+    usage: ['git mv [-f] [-k] [-n] [-v] <元> <先>', 'git mv <元>... <ディレクトリ>'],
+    description:
+      '追跡しているファイル (やディレクトリ) の名前を変えたり、別のディレクトリに移したりして、そのことをステージします。シェルの `mv` で動かしてから `git add` するのと同じ結果になります。\n\n(ターミナルでは `git mv` と入力します。`git` を付けない `mv` はシェルのコマンドです。)',
+    options: [
+      ['-f', '移す先にファイルがあっても上書きする'],
+      ['-k', '動かせないファイルは飛ばす'],
+      ['-n', '何が起きるかを表示するだけ'],
+    ],
+    examples: [
+      ['git mv index.html home.html', 'index.html の名前を home.html に変える'],
+      ['git mv home.html docs/', 'home.html を docs ディレクトリに移す'],
+    ],
+    related: ['mv', 'git-rm'],
+  },
+  {
     name: 'restore',
     git: true,
     category: 'basic',
     summary: 'ファイルを元に戻す・ステージから外す',
-    usage: ['git restore <ファイル>...', 'git restore --staged <ファイル>...', 'git restore --source=<コミット> <ファイル>...'],
+    usage: [
+      'git restore <ファイル>...',
+      'git restore --staged <ファイル>...',
+      'git restore --source=<コミット> <ファイル>...',
+      'git restore -p [--staged] [<ファイル>...]',
+    ],
     description:
-      '`git restore <ファイル>` は、作業ディレクトリの変更を捨てて、ステージの内容に戻します (元に戻せないので注意してください)。\n\n`--staged` を付けると、ステージした変更を取り消します (作業ディレクトリの変更は残ります)。',
+      '`git restore <ファイル>` は、作業ディレクトリの変更を捨てて、ステージの内容に戻します (元に戻せないので注意してください)。\n\n`--staged` を付けると、ステージした変更を取り消します (作業ディレクトリの変更は残ります)。\n\n`-p` を付けると、変更をハンクごとに見せて、捨てるか (`--staged` ならステージを取り消すか) を 1 つずつ尋ねます。',
     options: [
       ['--staged', 'ステージを HEAD の内容に戻す (git add の取り消し)'],
       ['--worktree', '作業ディレクトリを戻す (--staged と一緒に使うと両方)'],
       ['--source=<コミット>', '指定したコミットの内容に戻す'],
+      ['-p', 'ハンクごとに尋ねて、一部だけを戻す'],
     ],
     examples: [
       ['git restore index.html', 'index.html の変更を捨てる'],
       ['git restore --staged index.html', 'index.html をステージから外す'],
+      ['git restore -p', '作業ディレクトリの変更を、ハンクごとに選んで捨てる'],
     ],
     related: ['add', 'reset', 'checkout'],
+  },
+  {
+    name: 'clean',
+    git: true,
+    category: 'basic',
+    summary: '追跡していないファイルを消す',
+    usage: ['git clean -n [-d] [-x | -X] [<パス>...]', 'git clean -f [-d] [-x | -X] [<パス>...]'],
+    description:
+      '作業ディレクトリから、追跡していない (一度も git add していない) ファイルを消します。消したファイルは戻せないので、まず `-n` で何が消えるかを確かめてから `-f` で消します (`-f` がないと、本物と同じく拒否します)。\n\n`.gitignore` で無視しているファイルは、`-x` を付けたときだけ消します。',
+    options: [
+      ['-n', '消すものを表示するだけ'],
+      ['-f', '本当に消す'],
+      ['-d', '追跡していないディレクトリも消す'],
+      ['-x', '.gitignore で無視しているファイルも消す'],
+      ['-X', '.gitignore で無視しているファイルだけを消す'],
+    ],
+    examples: [
+      ['git clean -n', '消える追跡していないファイルを表示する'],
+      ['git clean -fd', '追跡していないファイルとディレクトリを消す'],
+    ],
+    related: ['status', 'check-ignore', 'restore'],
   },
 
   // ---- 状態と履歴を見る ----
@@ -296,10 +348,13 @@ export const COMMAND_HELP: readonly CommandHelp[] = [
     git: true,
     category: 'inspect',
     summary: '今の状態を表示する',
-    usage: ['git status'],
+    usage: ['git status [--ignored]'],
     description:
-      '今いるブランチ、ステージした変更 (コミット予定の変更)、ステージしていない変更、追跡していないファイル、途中で止まっている操作 (マージなど) を表示します。\n\n迷ったら、まず `git status` を実行しましょう。次に何をすればよいかのヒントも出ます。',
-    examples: [['git status', '今の状態を表示する']],
+      '今いるブランチ、ステージした変更 (コミット予定の変更)、ステージしていない変更、追跡していないファイル、途中で止まっている操作 (マージなど) を表示します。\n\n迷ったら、まず `git status` を実行しましょう。次に何をすればよいかのヒントも出ます。`.gitignore` で無視しているファイルは出しません (`--ignored` なら出します)。',
+    examples: [
+      ['git status', '今の状態を表示する'],
+      ['git status --ignored', '無視しているファイルも表示する'],
+    ],
     related: ['diff', 'log'],
   },
   {
@@ -319,8 +374,9 @@ export const COMMAND_HELP: readonly CommandHelp[] = [
       ['--all', 'すべてのブランチ・タグなどの履歴を表示する'],
       ['-n <数> / -<数>', '表示する数を絞る'],
       ['-p / --stat', '各コミットの差分 / 変更したファイルの一覧を表示する'],
-      ['--format=<書式>', '%h (ID)・%s (件名)・%d (ブランチ名など) で表示の形を決める'],
+      ['--format=<書式>', '%h (ID)・%s (件名)・%an (作者)・%d (ブランチ名など) で表示の形を決める'],
       ['--grep=<語>', 'メッセージで絞り込む'],
+      ['--author=<名前>', '作者で絞り込む (作者は git config user.name)'],
       ['-- <パス>', 'そのファイルを変えたコミットだけを表示する'],
     ],
     examples: [
@@ -423,6 +479,64 @@ export const COMMAND_HELP: readonly CommandHelp[] = [
     related: ['range-diff', 'cherry-pick'],
   },
   {
+    name: 'describe',
+    git: true,
+    category: 'inspect',
+    summary: '近いタグからの位置でコミットに名前を付ける',
+    usage: ['git describe [--tags] [--all] [--always] [--long] [--abbrev=0] [--dirty] [<コミット>...]'],
+    description:
+      'コミットから一番近い (注釈付きの) タグを探し、`v1.0-2-gC5` (v1.0 から 2 コミット進んだ C5) のような名前を表示します。タグちょうどならタグの名前だけです。ビルドしたものの版の名前によく使います。',
+    options: [
+      ['--tags', '軽量タグも使う'],
+      ['--abbrev=0', 'タグの名前だけを表示する'],
+      ['--always', '使えるタグがなければコミット ID を表示する'],
+      ['--dirty', 'コミットしていない変更があれば -dirty を付ける'],
+    ],
+    examples: [
+      ['git describe --tags', '今のコミットを近いタグからの位置で表す'],
+      ['git describe --tags --abbrev=0', '一番近いタグの名前を表示する'],
+    ],
+    related: ['tag', 'log'],
+  },
+  {
+    name: 'shortlog',
+    git: true,
+    category: 'inspect',
+    summary: '作者ごとにコミットをまとめる',
+    usage: ['git shortlog [-s] [-n] [--all] [<範囲>]'],
+    description: 'コミットを作者ごとにまとめて、件名を古い順に並べます。リリースノートを作るときや、誰がどれだけコミットしたかを見るときに使います。作者は `git config user.name` で設定します (設定していなければ「あなた」です)。',
+    options: [
+      ['-s', '作者ごとの数だけを表示する'],
+      ['-n', '数の多い順に並べる'],
+    ],
+    examples: [
+      ['git shortlog', '作者ごとにコミットの件名を表示する'],
+      ['git shortlog -sn', '作者ごとのコミットの数を、多い順に表示する'],
+    ],
+    related: ['log', 'config'],
+  },
+  {
+    name: 'git-grep',
+    git: true,
+    category: 'inspect',
+    summary: '追跡しているファイルから文字列を探す',
+    usage: ['git grep [-i] [-n] [-c] [-l] [-v] [-w] [-F] [--cached] (-e <パターン> | <パターン>) [<コミット>] [-- <パス>...]'],
+    description:
+      '追跡しているファイルの中から、パターン (正規表現) に一致する行を探します。コミットを指定すると、そのコミットの時点のファイルを探します。追跡していないファイルや、`.gitignore` で無視しているファイルは探しません。\n\n(ターミナルでは `git grep` と入力します。`git` を付けない `grep` はシェルのコマンドです。)',
+    options: [
+      ['-n', '行番号も表示する'],
+      ['-i', '大文字と小文字を区別しない'],
+      ['-l', '一致したファイルの名前だけを表示する'],
+      ['-c', 'ファイルごとの一致した行の数を表示する'],
+      ['<コミット>', 'そのコミットの時点のファイルを探す'],
+    ],
+    examples: [
+      ['git grep -n Hello', '追跡しているファイルから Hello を探す'],
+      ['git grep Hello HEAD~1', '1 つ前のコミットのファイルから探す'],
+    ],
+    related: ['grep', 'log'],
+  },
+  {
     name: 'range-diff',
     git: true,
     category: 'inspect',
@@ -492,11 +606,12 @@ export const COMMAND_HELP: readonly CommandHelp[] = [
     git: true,
     category: 'branch',
     summary: 'ブランチの切り替えとファイルの復元 (昔からのコマンド)',
-    usage: ['git checkout <ブランチ | コミット>', 'git checkout -b <新しいブランチ> [<起点>]', 'git checkout [<コミット>] -- <ファイル>...'],
+    usage: ['git checkout <ブランチ | コミット>', 'git checkout -b <新しいブランチ> [<起点>]', 'git checkout [<コミット>] -- <ファイル>...', 'git checkout -p [-- <ファイル>...]'],
     description: '`switch` (ブランチの切り替え) と `restore` (ファイルの復元) を兼ねる、昔からのコマンドです。今は `switch` と `restore` を使うのがおすすめです。',
     options: [
       ['-b <名前>', 'ブランチを作って切り替える (switch -c と同じ)'],
       ['-- <ファイル>', 'ファイルを元に戻す (restore と同じ)'],
+      ['-p', '変更をハンクごとに選んで捨てる (restore -p と同じ)'],
     ],
     examples: [
       ['git checkout -b feature', 'feature ブランチを作って切り替える'],
@@ -536,14 +651,16 @@ export const COMMAND_HELP: readonly CommandHelp[] = [
     category: 'branch',
     summary: 'コミットを別の土台の上に付け替える',
     usage: [
-      'git rebase <ブランチ>',
+      'git rebase [<上流> [<ブランチ>]]',
+      'git rebase --onto <新しい土台> <上流> [<ブランチ>]',
       'git rebase -i [--autosquash] <コミット>',
       'git rebase -r [-x <コマンド>] [-X ours | theirs] <ブランチ>',
       'git rebase --continue / --skip / --abort',
     ],
     description:
-      '今のブランチにだけあるコミットを、指定したブランチの先端の上に 1 つずつ作り直して並べ直します。マージコミットを作らずに、まっすぐな履歴にできます。\n\n`-i` では todo を書いたエディタが開き、各行の `pick` を `reword`・`edit`・`squash`・`fixup`・`drop` に書き換えたり、並べ替えたりして履歴を整理できます。\n\nコミットを作り直すので ID が変わります。すでに push して他の人が使っているコミットを rebase するのは避けましょう。',
+      '今のブランチにだけあるコミットを、指定したブランチの先端の上に 1 つずつ作り直して並べ直します。マージコミットを作らずに、まっすぐな履歴にできます。\n\n`-i` では todo を書いたエディタが開き、各行の `pick` を `reword`・`edit`・`squash`・`fixup`・`drop` に書き換えたり、並べ替えたりして履歴を整理できます。\n\nコミットを作り直すので ID が変わります。すでに push して他の人が使っているコミットを rebase するのは避けましょう。\n\n`--onto <新しい土台> <上流>` は、`<上流>..HEAD` のコミット (上流にないコミット) だけを、`<新しい土台>` の上に付け替えます。別のブランチから分けたブランチを main に付け替えるときなどに使います。`<ブランチ>` を書くと、先にそのブランチに切り替えます。`<上流>` を省くと、今のブランチの upstream です。',
     options: [
+      ['--onto <コミット>', '<上流> からではなく、このコミットの上に付け替える'],
       ['-i', 'todo を編集して、コミットをまとめる・並べ替える・直す'],
       ['--autosquash', 'fixup! / squash! のコミットを対象のコミットの直後に並べる'],
       ['-r', 'マージの形を保ったまま付け替える'],
@@ -553,6 +670,7 @@ export const COMMAND_HELP: readonly CommandHelp[] = [
     examples: [
       ['git rebase main', '今のブランチを main の先端の上に付け替える'],
       ['git rebase -i HEAD~3', '直近 3 つのコミットを整理する'],
+      ['git rebase --onto main feature topic', 'feature から分けた topic のコミットだけを main の上に付け替える'],
       ['git rebase --abort', 'rebase を取りやめて元に戻す'],
     ],
     related: ['merge', 'cherry-pick', 'reflog'],
@@ -599,13 +717,14 @@ export const COMMAND_HELP: readonly CommandHelp[] = [
     git: true,
     category: 'undo',
     summary: 'ブランチを別のコミットに動かす / ステージを戻す',
-    usage: ['git reset [--soft | --mixed | --hard] [<コミット>]', 'git reset <ファイル>...'],
+    usage: ['git reset [--soft | --mixed | --hard] [<コミット>]', 'git reset <ファイル>...', 'git reset -p [<ファイル>...]'],
     description:
       '今のブランチの先端を、指定したコミットに動かします。`--soft` はステージと作業ディレクトリをそのままに、`--mixed` (既定) はステージも戻し、`--hard` は作業ディレクトリまで戻します。\n\n`--hard` はコミットしていない変更を消すので注意してください。外れたコミットは reflog から戻せます。',
     options: [
       ['--soft', 'ブランチだけを動かす (変更はステージに残る)'],
       ['--mixed', 'ブランチとステージを戻す (変更は作業ディレクトリに残る)'],
       ['--hard', 'ブランチ・ステージ・作業ディレクトリをすべて戻す'],
+      ['-p', 'ステージした変更を、ハンクごとに選んで取り消す (restore -p --staged と同じ)'],
     ],
     examples: [
       ['git reset --soft HEAD~1', '直前のコミットを取り消して、変更をステージに戻す'],
@@ -717,10 +836,11 @@ export const COMMAND_HELP: readonly CommandHelp[] = [
     summary: 'コミットをリモートに送る',
     usage: ['git push [-u] [-f] [--tags] [<リモート> [<ブランチ | タグ>]]', 'git push <リモート> --delete <名前>'],
     description:
-      '手元のブランチのコミットをリモートに送り、リモートのブランチを進めます。リモートに手元にないコミットがあると拒否されます (先に `git pull` で取り込みます)。\n\n`-u` を付けると、そのリモートのブランチを上流 (upstream) として覚え、次から `git push` だけで送れます。',
+      '手元のブランチのコミットをリモートに送り、リモートのブランチを進めます。リモートに手元にないコミットがあると拒否されます (先に `git pull` で取り込みます)。\n\n`-u` を付けると、そのリモートのブランチを上流 (upstream) として覚え、次から `git push` だけで送れます。\n\nrebase したあとなどで履歴を上書きするなら、`-f` より `--force-with-lease` が安全です。最後に fetch したときからリモートのブランチが動いていない (他の人が push していない) ときだけ上書きします。',
     options: [
       ['-u', '上流を設定する'],
       ['-f', 'リモートの履歴を上書きする (他の人のコミットを消すおそれがあります)'],
+      ['--force-with-lease', 'リモートが最後に fetch したときのままなら上書きする (=<ブランチ>:<コミット> で期待する位置も指定できる)'],
       ['--tags', 'タグも送る'],
       ['--delete <名前>', 'リモートのブランチやタグを消す'],
       ['--no-verify', 'pre-push フックを飛ばす'],
@@ -728,6 +848,7 @@ export const COMMAND_HELP: readonly CommandHelp[] = [
     examples: [
       ['git push', '今のブランチを上流に送る'],
       ['git push -u origin feature', 'feature を origin に送り、上流に設定する'],
+      ['git push --force-with-lease', 'rebase した今のブランチで、リモートを安全に上書きする'],
     ],
     related: ['pull', 'fetch', 'teammate'],
   },
@@ -773,7 +894,7 @@ export const COMMAND_HELP: readonly CommandHelp[] = [
     category: 'save',
     summary: 'コミットしていない変更を一時的に退避する',
     usage: [
-      'git stash [push [-m "…"] [-u] [-k]]',
+      'git stash [push [-m "…"] [-u | -a] [-k]]',
       'git stash list / show [-p] [<stash>]',
       'git stash apply / pop [--index] [<stash>]',
       'git stash drop [<stash>] / clear / branch <名前>',
@@ -781,7 +902,8 @@ export const COMMAND_HELP: readonly CommandHelp[] = [
     description:
       '作業途中の変更を退避して、作業ディレクトリをきれいな状態に戻します。急ぎの修正のためにブランチを切り替えたいときに使い、終わったら `git stash pop` で戻します。',
     options: [
-      ['-u', '追跡していないファイルも退避する'],
+      ['-u', '追跡していないファイルも退避する (.gitignore で無視しているものは除く)'],
+      ['-a', '無視しているファイルも含めて、追跡していないファイルをすべて退避する'],
       ['-m "…"', '退避に説明を付ける'],
       ['pop', '退避した変更を戻して、退避の記録を消す'],
       ['apply', '退避した変更を戻す (記録は残す)'],
@@ -936,7 +1058,7 @@ export const COMMAND_HELP: readonly CommandHelp[] = [
     category: 'maintenance',
     summary: '設定を読み書きする',
     usage: ['git config <キー> [<値>]', 'git config --unset <キー>', 'git config --list'],
-    description: '設定を読み書きします。このアプリで働く設定は `rerere.enabled`・`pull.rebase`・`pull.ff`・`merge.ff`・`rebase.autoSquash`・`submodule.recurse`・`gc.pruneExpire` などです。',
+    description: '設定を読み書きします。このアプリで働く設定は `rerere.enabled`・`pull.rebase`・`pull.ff`・`merge.ff`・`rebase.autoSquash`・`submodule.recurse`・`gc.pruneExpire`・`clean.requireForce`、コミットの作者になる `user.name` などです。',
     examples: [
       ['git config pull.rebase true', 'pull を rebase で行うようにする'],
       ['git config --list', '設定の一覧を表示する'],
@@ -1020,6 +1142,17 @@ export const COMMAND_HELP: readonly CommandHelp[] = [
     examples: [['git show-ref --heads', 'ブランチの一覧を表示する']],
     related: ['for-each-ref'],
   },
+  {
+    name: 'check-ignore',
+    git: true,
+    category: 'maintenance',
+    summary: '.gitignore で無視しているかを調べる',
+    usage: ['git check-ignore [-v] <パス>...'],
+    description: '指定したパスのうち、`.gitignore` で無視しているものを表示します。`-v` なら、どの .gitignore の何行目のパターンで無視したかも表示します。どれも無視していなければ失敗します。',
+    options: [['-v', '決めたパターンも表示する']],
+    examples: [['git check-ignore -v debug.log', 'debug.log を無視しているパターンを表示する']],
+    related: ['clean', 'status'],
+  },
 
   // ---- このアプリの操作 ----
   {
@@ -1052,13 +1185,20 @@ export const COMMAND_HELP: readonly CommandHelp[] = [
 /** 名前でヘルプを探す (git rm は git-rm、先頭の git は無視する)。 */
 export function findHelp(rawName: string): CommandHelp | undefined {
   const words = rawName.trim().split(/\s+/)
-  const name = words[0] === 'git' && words.length > 1 ? (words[1] === 'rm' ? 'git-rm' : words[1]) : words[0]
-  return COMMAND_HELP.find((entry) => entry.name === name)
+  if (words[0] === 'git' && words.length > 1) {
+    // git rm・git mv・git grep は、シェルの同じ名前のコマンドと別の項目 (git-rm など)
+    return (
+      COMMAND_HELP.find((entry) => entry.name === `git-${words[1]}`) ??
+      COMMAND_HELP.find((entry) => entry.name === words[1] && entry.git) ??
+      COMMAND_HELP.find((entry) => entry.name === words[1])
+    )
+  }
+  return COMMAND_HELP.find((entry) => entry.name === words[0])
 }
 
 /** 画面とターミナルに出す、コマンドの表示名 (git commit・echo など)。 */
 export function displayName(entry: CommandHelp): string {
-  return entry.git ? `git ${entry.name === 'git-rm' ? 'rm' : entry.name}` : entry.name
+  return entry.git ? `git ${entry.name.replace(/^git-/, '')}` : entry.name
 }
 
 /** 等幅フォントでの表示幅 (日本語などの全角文字は 2)。 */

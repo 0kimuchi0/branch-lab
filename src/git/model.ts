@@ -2,6 +2,7 @@
  * Git の内部モデル (コミットの DAG・ブランチ・HEAD・ステージ・作業ディレクトリ・リモート)。
  * UI には一切依存せず、すべての操作は新しい Repo を返す純粋関数として実装する。
  */
+import { isIgnored } from './ignore'
 import {
   changedPaths,
   conflictKey,
@@ -25,6 +26,15 @@ export interface Commit {
   readonly source?: CommitId
   /** revert で打ち消したコミット。 */
   readonly reverts?: CommitId
+  /** 作者 (git config user.name)。なければ DEFAULT_AUTHOR。cherry-pick や rebase でコピーしても元の作者のまま。 */
+  readonly author?: string
+}
+
+/** user.name を設定していないときの作者の名前。 */
+export const DEFAULT_AUTHOR = 'あなた'
+
+export function authorOf(commit: Commit): string {
+  return commit.author ?? DEFAULT_AUTHOR
 }
 
 export type Head =
@@ -172,6 +182,11 @@ export interface PendingCommit {
   readonly tree: Tree
   readonly source?: CommitId
   readonly reverts?: CommitId
+  /**
+   * 作者。省略すると、コピー (source) なら元のコミットの作者、そうでなければ user.name の設定。
+   * null は「既定の作者 (DEFAULT_AUTHOR) のまま」(--amend で元のコミットの作者を保つとき)。
+   */
+  readonly author?: string | null
   /** reflog に書く操作の名前 (既定は commit)。"<操作>: <件名>" の形で記録する。 */
   readonly reflogAction?: string
   /** reflog に書くメッセージ (件名の代わりにこれをそのまま記録する。マージなど)。 */
@@ -232,6 +247,33 @@ export interface Editor {
   readonly after: AfterEdit
 }
 
+/** git add -p などで、何をするか (ステージする・ステージを取り消す・作業ディレクトリの変更を捨てる)。 */
+export type PatchMode = 'stage' | 'unstage' | 'discard'
+
+/** git add -p などで扱う 1 つのファイル。from → to の変更をハンクに分けて尋ねる。 */
+export interface PatchFile {
+  readonly path: string
+  /** 変更前 (stage と discard はステージ、unstage は HEAD)。undefined ならファイルがない。 */
+  readonly from: string | undefined
+  /** 変更後 (stage と discard は作業ディレクトリ、unstage はステージ)。 */
+  readonly to: string | undefined
+  /** 尋ねる順のハンク。それぞれ、変更のかたまり (ブロック) の番号の並び。 */
+  readonly hunks: ReadonlyArray<readonly number[]>
+  /** ブロックごとの答え (true なら「する」)。 */
+  readonly answers: Readonly<Record<number, boolean>>
+}
+
+/** git add -p / restore -p / reset -p / checkout -p で、ハンクごとの答えを待っている状態。 */
+export interface PatchPrompt {
+  readonly mode: PatchMode
+  /** 表示に使うコマンドの名前 (git add -p など)。 */
+  readonly command: string
+  readonly files: readonly PatchFile[]
+  /** 今尋ねているファイルとハンクの位置。 */
+  readonly file: number
+  readonly hunk: number
+}
+
 /** git stash で退避した変更。 */
 export interface StashEntry {
   /** 退避したときの HEAD。 */
@@ -284,6 +326,8 @@ export interface Repo {
   readonly conflicts: readonly Conflict[]
   /** 開いているエディタ。開いている間は、保存して閉じる以外の操作はできない。 */
   readonly editor: Editor | null
+  /** git add -p などの質問。答えるまで、入力はすべてその答えになる。 */
+  readonly prompt: PatchPrompt | null
   /** git stash のスタック。先頭が stash@{0} (最新)。 */
   readonly stash: readonly StashEntry[]
   readonly tags: Readonly<Record<string, Tag>>
@@ -527,6 +571,7 @@ export function createRepo(): Repo {
     operation: null,
     conflicts: [],
     editor: null,
+    prompt: null,
     stash: [],
     tags: {},
     bisect: null,
@@ -1060,18 +1105,32 @@ function withoutConflicts(repo: Repo, paths: readonly string[]): readonly Confli
 }
 
 /** git add。pathspec に当てはまる作業ディレクトリの内容をステージする。 */
-export function add(repo: Repo, specs: readonly string[]): OperationResult {
+export function add(repo: Repo, specs: readonly string[], options: { readonly force?: boolean } = {}): OperationResult {
   if (specs.length === 0) {
     throw new GitError('ステージするファイルを指定してください (例: git add README.md, git add .)')
   }
   const known = new Set([...Object.keys(repo.workdir), ...Object.keys(repo.index)])
   const paths = new Set<string>()
+  const ignored: string[] = []
   for (const spec of specs) {
-    const matched = matchPaths(known, spec === '-A' || spec === '--all' ? '.' : spec)
-    if (matched.length === 0 && spec !== '.' && spec !== '-A' && spec !== '--all') {
+    const all = spec === '.' || spec === '-A' || spec === '--all'
+    const matched = matchPaths(known, all ? '.' : spec)
+    if (matched.length === 0 && !all) {
       throw new GitError(`fatal: pathspec '${spec}' に一致するファイルはありません`)
     }
-    for (const path of matched) paths.add(path)
+    // .gitignore で無視しているファイルは、-f を付けなければステージしない
+    const kept = matched.filter((path) => options.force || !isIgnored(repo.workdir, repo.index, path))
+    if (kept.length === 0 && matched.length > 0 && !all) ignored.push(spec)
+    for (const path of kept) paths.add(path)
+  }
+  if (ignored.length > 0) {
+    throw new GitError(
+      [
+        'The following paths are ignored by one of your .gitignore files:',
+        ...ignored,
+        'hint: Use -f if you really want to add them.',
+      ].join('\n'),
+    )
   }
   let index = repo.index
   for (const path of paths) index = withFile(index, path, repo.workdir[path])
@@ -1294,9 +1353,14 @@ export interface CommitOptions {
 
 /** コミットを作る。output は git commit の 1 行目と同じ形。 */
 export function createCommit(repo: Repo, pending: PendingCommit, message: string): { repo: Repo; output: string } {
-  const { reflogAction, reflogMessage, ...fields } = pending
+  const { reflogAction, reflogMessage, author: givenAuthor, ...fields } = pending
+  const author =
+    givenAuthor === null ? undefined
+    : givenAuthor !== undefined ? givenAuthor
+    : fields.source !== undefined ? repo.commits[fields.source]?.author
+    : repo.config['user.name']
   const recorded = recordResolutions(repo, fields.tree)
-  const { repo: next, commit: created } = addCommit(recorded.repo, { ...fields, message })
+  const { repo: next, commit: created } = addCommit(recorded.repo, { ...fields, message, ...(author === undefined ? {} : { author }) })
   const entry = reflogMessage ?? `${reflogAction ?? 'commit'}: ${subject(message)}`
   return {
     repo: logRefs(recorded.repo, next, entry),
@@ -1378,6 +1442,8 @@ export function commit(repo: Repo, options: CommitOptions = {}): OperationResult
     ...(picked && op?.type !== 'revert' ? { source: picked.source ?? picked.id } : {}),
     ...(picked && op?.type === 'revert' ? { reverts: picked.id } : {}),
     ...(merging && merging.id !== null ? { source: getCommit(repo, merging.id).source ?? merging.id } : {}),
+    // --amend は元のコミットの作者のまま
+    ...(options.amend ? { author: head.author ?? null } : {}),
     reflogAction:
       options.amend ? 'commit (amend)'
       : op?.type === 'merge' ? 'commit (merge)'
@@ -1752,10 +1818,10 @@ function diffEntries(from: Tree, to: Tree, skip: ReadonlySet<string>): FileEntry
 
 export function workspaceStatus(repo: Repo): WorkspaceStatus {
   const conflicted = new Set(repo.conflicts.map((conflict) => conflict.path))
-  const untracked = Object.keys(repo.workdir)
-    .filter((path) => !(path in repo.index) && !conflicted.has(path))
-    .sort()
-  const untrackedSet = new Set(untracked)
+  const notTracked = Object.keys(repo.workdir).filter((path) => !(path in repo.index) && !conflicted.has(path))
+  // .gitignore で無視しているファイルは、追跡していないファイルとしても出さない
+  const untracked = notTracked.filter((path) => !isIgnored(repo.workdir, repo.index, path)).sort()
+  const untrackedSet = new Set(notTracked)
   return {
     staged: diffEntries(headTree(repo), repo.index, conflicted),
     unstaged: diffEntries(repo.index, repo.workdir, new Set([...conflicted, ...untrackedSet])),
@@ -1804,7 +1870,7 @@ export function trackingLine(repo: Repo, branch: string): string | null {
   return `このブランチと '${name}' は分岐しており、それぞれ ${ahead} と ${behind} の異なるコミットがあります。`
 }
 
-function statusLines(repo: Repo): string[] {
+function statusLines(repo: Repo, showIgnored = false): string[] {
   const lines: string[] = []
   const branch = currentBranch(repo)
   const op = repo.operation
@@ -1872,6 +1938,13 @@ function statusLines(repo: Repo): string[] {
     lines.push('', '追跡されていないファイル:')
     for (const path of status.untracked) lines.push(`\t${path}`)
   }
+  if (showIgnored) {
+    const ignored = Object.keys(repo.workdir).filter((path) => isIgnored(repo.workdir, repo.index, path)).sort()
+    if (ignored.length > 0) {
+      lines.push('', '無視したファイル (.gitignore):', '  (コミットに含めるなら "git add -f <ファイル>...")')
+      for (const path of ignored) lines.push(`\t${path}`)
+    }
+  }
   if (
     status.staged.length + unstaged.length + status.untracked.length +
       status.conflicts.length ===
@@ -1893,7 +1966,8 @@ function submoduleNote(repo: Repo, path: string): string {
   return notes.length === 0 ? '' : ` (${notes.join(', ')})`
 }
 
-export function status(repo: Repo): OperationResult {
-  return { repo, output: statusLines(repo).join('\n') }
+/** git status [--ignored] */
+export function status(repo: Repo, options: { readonly ignored?: boolean } = {}): OperationResult {
+  return { repo, output: statusLines(repo, options.ignored ?? false).join('\n') }
 }
 

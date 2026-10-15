@@ -12,6 +12,7 @@ import {
   resolveRef,
   subject,
   type Commit,
+  authorOf,
   type CommitId,
   type OperationResult,
   type Repo,
@@ -34,6 +35,8 @@ export interface LogOptions {
   readonly merges?: boolean
   readonly grep?: string
   readonly invertGrep?: boolean
+  /** --author=<パターン>: 作者で絞り込む。 */
+  readonly author?: string
   readonly paths?: readonly string[]
   readonly patch?: boolean
   readonly stat?: boolean
@@ -172,11 +175,12 @@ function applyFormat(template: string, commit: Commit, decoration: string[], not
     D: decoration.join(', '),
     P: commit.parents.join(' '),
     p: commit.parents.join(' '),
+    an: authorOf(commit),
     N: notes === undefined ? '' : `${notes}\n`,
     n: '\n',
     '%': '%',
   }
-  return template.replace(/%([HhsbBdDPpNn%])/g, (_, key: string) => values[key] ?? '')
+  return template.replace(/%(an|[HhsbBdDPpNn%])/g, (_, key: string) => values[key] ?? '')
 }
 
 /** 1 つのコミットの表示 (行の配列)。 */
@@ -193,6 +197,7 @@ function entryLines(repo: Repo, commit: Commit, options: LogOptions, format: str
   } else {
     lines = [`commit ${commit.id}${deco}`]
     if (commit.parents.length > 1) lines.push(`Merge: ${commit.parents.join(' ')}`)
+    lines.push(`Author: ${authorOf(commit)}`)
     const message = format === 'short' ? [subject(commit.message)] : commit.message.split('\n')
     lines.push('', ...message.map((line) => (line === '' ? '' : `    ${line}`)))
     if (notes !== undefined && format !== 'short') {
@@ -223,6 +228,7 @@ export function log(repo: Repo, options: LogOptions = {}): OperationResult {
       if (options.merges === true && commit.parents.length < 2) return false
       if (options.merges === false && commit.parents.length > 1) return false
       if (options.grep !== undefined && matchesGrep(commit.message, options.grep) === Boolean(options.invertGrep)) return false
+      if (options.author !== undefined && !matchesGrep(authorOf(commit), options.author)) return false
       if (options.paths && options.paths.length > 0 && !changesPath(repo, commit, options.paths)) return false
       return true
     }),

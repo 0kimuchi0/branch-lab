@@ -3,6 +3,7 @@
  * 他の人がリモートに push したことを再現する補助操作 (teammate)。
  */
 import {
+  tryResolveRef,
   GitError,
   REMOTE_NAME,
   ancestors,
@@ -113,6 +114,11 @@ export interface PushOptions {
   /** 指定しなければ現在のブランチ。 */
   readonly branch?: string
   readonly force?: boolean
+  /**
+   * --force-with-lease[=<参照>[:<期待する値>]]: リモートのブランチが期待どおり (既定はリモート追跡ブランチの位置) の
+   * ときだけ強制的に push する。expect が null なら、リモートにそのブランチがないことを期待する。
+   */
+  readonly lease?: { readonly ref?: string; readonly expect?: string | null }
   /** -u: upstream (追跡ブランチ) を設定する。 */
   readonly setUpstream?: boolean
 }
@@ -223,7 +229,27 @@ export function push(repo: Repo, options: PushOptions = {}): OperationResult {
     return { repo: { ...repo, upstreams }, output: 'Everything up-to-date' }
   }
   const fastForward = remoteId === undefined || isRemoteAncestor(repo, remoteId, localId)
-  if (!fastForward && !options.force) {
+  if (options.lease !== undefined && !options.force) {
+    // 最後に fetch したときから、リモートのブランチが他の人に動かされていなければ上書きしてよい
+    const lease = options.lease
+    const expected =
+      lease.expect === null ? undefined
+      // 期待する値は、手元にないコミット (他の人が push したもの) の ID でもよい
+      : lease.expect !== undefined ? (tryResolveRef(repo, lease.expect) ?? lease.expect)
+      : repo.remoteBranches[lease.ref === undefined ? trackingRef : (splitRemoteRef(repo, lease.ref) ? lease.ref : `${remoteName}/${lease.ref}`)]
+    if (remoteId !== expected) {
+      throw new GitError(
+        [
+          `To ${remote.url}`,
+          ` ! [rejected]        ${ref} (stale info)`,
+          `error: failed to push some refs to '${remote.url}'`,
+          'ヒント: 最後に fetch したあとで、リモートのブランチが更新されています (他の人の push を上書きしないように拒否しました)。',
+          'ヒント: git fetch で確かめてから、もう一度 push してください。',
+        ].join('\n'),
+      )
+    }
+  }
+  if (!fastForward && !options.force && options.lease === undefined) {
     throw new GitError(
       [
         `To ${remote.url}`,
@@ -403,6 +429,9 @@ export function pull(repo: Repo, options: PullOptions = {}): OperationResult {
  * 他の人がリモートの branch にコミットを push したことにする (このアプリ独自の補助コマンド)。
  * team.txt に 1 行追記するコミットを、手元には取り込まずにリモートにだけ作る。
  */
+/** teammate で作るコミットの作者。 */
+export const TEAMMATE = 'チームメイト'
+
 export function teammateCommit(repo: Repo, branch = 'main', remoteName = REMOTE_NAME): OperationResult {
   const remote = getRemote(repo, remoteName)
   const tipId = remote.branches[branch]
@@ -412,7 +441,7 @@ export function teammateCommit(repo: Repo, branch = 'main', remoteName = REMOTE_
   const tip = remote.commits[tipId] ?? getCommit(repo, tipId)
   const id = `${repo.idPrefix ?? 'C'}${repo.nextId}`
   const tree = { ...tip.tree, 'team.txt': `${tip.tree['team.txt'] ?? ''}他の人の変更 (${id})\n` }
-  const created: Commit = { id, parents: [tipId], message: `他の人の変更 (${id})`, tree }
+  const created: Commit = { id, parents: [tipId], message: `他の人の変更 (${id})`, tree, author: TEAMMATE }
   return {
     repo: {
       ...withRemote(repo, {

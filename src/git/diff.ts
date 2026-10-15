@@ -4,11 +4,12 @@
  */
 import { changedPaths, displayContent, lcsPairs, splitLines, type Tree } from './tree'
 
-const CONTEXT = 3
+export const CONTEXT = 3
 
-type Op = { readonly type: ' ' | '-' | '+'; readonly line: string }
+export type Op = { readonly type: ' ' | '-' | '+'; readonly line: string }
 
-function editScript(a: readonly string[], b: readonly string[]): Op[] {
+/** 行の編集手順 (同じ行・消す行・足す行の並び)。 */
+export function editScript(a: readonly string[], b: readonly string[]): Op[] {
   const ops: Op[] = []
   let i = 0
   let j = 0
@@ -37,6 +38,20 @@ function range(start: number, count: number): string {
   return count === 1 ? `${first}` : `${first},${count}`
 }
 
+/** ops の start から end まで (両端を含む) を、@@ の見出し付きの 1 つのハンクにする。 */
+export function hunkLines(ops: readonly Op[], start: number, end: number): string[] {
+  let oldLine = 1
+  let newLine = 1
+  for (const op of ops.slice(0, start)) {
+    if (op.type !== '+') oldLine++
+    if (op.type !== '-') newLine++
+  }
+  const hunk = ops.slice(start, end + 1)
+  const oldCount = hunk.filter((op) => op.type !== '+').length
+  const newCount = hunk.filter((op) => op.type !== '-').length
+  return [`@@ -${range(oldLine, oldCount)} +${range(newLine, newCount)} @@`, ...hunk.flatMap(formatLine)]
+}
+
 /** 2 つの内容の差分のハンク (@@ から始まる部分) を作る。 */
 export function diffHunks(oldText: string, newText: string): string[] {
   const ops = editScript(splitLines(oldText), splitLines(newText))
@@ -50,24 +65,7 @@ export function diffHunks(oldText: string, newText: string): string[] {
     if (last && index - last[1] <= CONTEXT * 2) last[1] = index
     else groups.push([index, index])
   }
-
-  const out: string[] = []
-  for (const [first, last] of groups) {
-    const start = Math.max(0, first - CONTEXT)
-    const end = Math.min(ops.length - 1, last + CONTEXT)
-    let oldLine = 1
-    let newLine = 1
-    for (const op of ops.slice(0, start)) {
-      if (op.type !== '+') oldLine++
-      if (op.type !== '-') newLine++
-    }
-    const hunk = ops.slice(start, end + 1)
-    const oldCount = hunk.filter((op) => op.type !== '+').length
-    const newCount = hunk.filter((op) => op.type !== '-').length
-    out.push(`@@ -${range(oldLine, oldCount)} +${range(newLine, newCount)} @@`)
-    for (const op of hunk) out.push(...formatLine(op))
-  }
-  return out
+  return groups.flatMap(([first, last]) => hunkLines(ops, Math.max(0, first - CONTEXT), Math.min(ops.length - 1, last + CONTEXT)))
 }
 
 /** 1 つのファイルの差分。old / new が undefined ならそのファイルは存在しない。 */

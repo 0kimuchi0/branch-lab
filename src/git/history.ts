@@ -922,6 +922,15 @@ export interface RebaseOptions {
   readonly favor?: 'ours' | 'theirs'
   /** --autosquash: fixup! / squash! で始まるコミットを、対象のコミットの直後に fixup / squash として並べる。 */
   readonly autosquash?: boolean
+  /** --onto <コミット>: <upstream>..HEAD のコミットを、upstream ではなくこのコミットの上に付け替える。 */
+  readonly onto?: string
+}
+
+/** --onto で、付け替えるコミットがすでに onto のすぐ上に並んでいるか。 */
+function alreadyOnto(repo: Repo, head: CommitId, upstream: CommitId, onto: CommitId): boolean {
+  const commits = commitsToReplay(repo, head, upstream)
+  if (commits.length === 0) return head === onto
+  return commits.every((id, index) => getCommit(repo, id).parents.length === 1 && getCommit(repo, id).parents[0] === (index === 0 ? onto : commits[index - 1]))
 }
 
 const AUTOSQUASH_PREFIX = /^(fixup|squash|amend)! /
@@ -991,6 +1000,16 @@ export function rebase(repo: Repo, upstreamRef: string, options: RebaseOptions =
   const head = headCommitId(repo)
   const branch = currentBranch(repo)
 
+  if (options.onto !== undefined) {
+    // --onto: upstream..HEAD のコミットを onto の上に付け替える
+    const onto = resolveRef(repo, options.onto)
+    if (options.exec === undefined && !options.autosquash && alreadyOnto(repo, head, upstream, onto)) {
+      return { repo, output: `Current branch ${branch ?? 'HEAD'} is up to date.` }
+    }
+    const items = parseTodo(repo, rebaseTodoLines(repo, head, upstream, options).join('\n'))
+    return startRebase(repo, onto, head, branch, items, options.favor)
+  }
+
   const reorders =
     options.autosquash === true &&
     commitsToReplay(repo, head, upstream).some((id) => AUTOSQUASH_PREFIX.test(subject(getCommit(repo, id).message)))
@@ -1042,10 +1061,11 @@ export function rebaseInteractive(
 ): OperationResult {
   requireNoOperation(repo)
   requireCleanForRebase(repo)
-  const onto = resolveRef(repo, upstreamRef)
+  const upstream = resolveRef(repo, upstreamRef)
+  const onto = options.onto === undefined ? upstream : resolveRef(repo, options.onto)
   const head = headCommitId(repo)
-  const commits = commitsToReplay(repo, head, onto)
-  const todo = rebaseTodoLines(repo, head, onto, options)
+  const commits = commitsToReplay(repo, head, upstream)
+  const todo = rebaseTodoLines(repo, head, upstream, options)
   const lines = todo.length === 0 ? ['noop'] : todo
   const count = todo.filter((line) => line !== '' && !line.startsWith('#')).length
   const editor: Editor = {
@@ -1053,7 +1073,7 @@ export function rebaseInteractive(
     text: [
       ...lines,
       '',
-      `# ${onto}..${head} を ${onto} の上にリベースします (${count} 個のコマンド)`,
+      `# ${upstream}..${head} を ${onto} の上にリベースします (${count} 個のコマンド)`,
       '#',
       ...TODO_HELP,
       '',
