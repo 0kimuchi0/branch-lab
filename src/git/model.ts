@@ -1072,6 +1072,8 @@ export interface CommitOptions {
   readonly amend?: boolean
   /** --no-edit: エディタを開かず、既定のメッセージ (amend なら元のメッセージ) を使う。 */
   readonly noEdit?: boolean
+  /** エディタに最初から入れておくメッセージ (git commit --squash の "squash! 件名")。 */
+  readonly template?: string
 }
 
 /** コミットを作る。output は git commit の 1 行目と同じ形。 */
@@ -1163,7 +1165,8 @@ export function commit(repo: Repo, options: CommitOptions = {}): OperationResult
       : 'commit',
   }
   const defaultMessage =
-    options.amend ? head.message
+    options.template !== undefined ? options.template
+    : options.amend ? head.message
     : op?.type === 'merge' ? op.message
     : merging ? mergeItemMessage(repo, merging)
     : picked && op?.type === 'revert' ? revertMessage(picked, op.mainline)

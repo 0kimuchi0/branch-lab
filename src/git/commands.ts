@@ -16,7 +16,10 @@ import {
   GitError,
   configBool,
   isSubmodulePath,
+  getCommit,
   getRemote,
+  resolveRef,
+  subject,
   add,
   commit,
   createBranch,
@@ -303,18 +306,35 @@ function runCommit(repo: Repo, args: readonly string[]): OperationResult {
   const expanded = args.flatMap((arg) => (/^-[a-z]{2,}$/.test(arg) ? [...arg.slice(1)].map((c) => `-${c}`) : [arg]))
   const parsed = parseArgs(expanded, {
     flags: ['-a', '--allow-empty', '--amend', '--no-edit'],
-    values: ['-m'],
+    values: ['-m', '--fixup', '--squash'],
     aliases: { '--all': '-a', '--message': '-m' },
   })
-  atMost(parsed, 0, 'git commit [-a] [-m "メッセージ"] [--allow-empty] [--amend] [--no-edit]')
+  atMost(parsed, 0, 'git commit [-a] [-m "メッセージ"] [--allow-empty] [--amend] [--no-edit] [--fixup=<コミット>] [--squash=<コミット>]')
   // -m を複数書くと、それぞれが段落になる
   const messages = parsed.allValues.get('-m')
-  const message = messages?.map((part) => part.trim()).join('\n\n')
+  let message = messages?.map((part) => part.trim()).join('\n\n')
   if (message !== undefined && message.trim() === '') {
     throw new GitError('メッセージが空のため、コミットを中止しました')
   }
+  // --fixup / --squash: rebase --autosquash でまとめる相手を件名に書いたコミットを作る
+  const fixup = parsed.values.get('--fixup')
+  const squash = parsed.values.get('--squash')
+  let template: string | undefined
+  if (fixup !== undefined || squash !== undefined) {
+    if (fixup !== undefined && squash !== undefined) throw new GitError('fatal: --fixup と --squash は同時に指定できません')
+    if (parsed.flags.has('--amend')) throw new GitError('fatal: --fixup / --squash と --amend は同時に指定できません')
+    if (fixup !== undefined && /^(amend|reword):/.test(fixup)) {
+      throw new GitError('--fixup=amend: と --fixup=reword: は、このアプリでは未対応です')
+    }
+    const target = getCommit(repo, resolveRef(repo, (fixup ?? squash) as string))
+    const title = `${fixup !== undefined ? 'fixup' : 'squash'}! ${subject(target.message)}`
+    if (fixup !== undefined) message = message === undefined ? title : `${title}\n\n${message}`
+    else if (message !== undefined) message = `${title}\n\n${message}`
+    else template = title
+  }
   return commit(repo, {
     ...(message === undefined ? {} : { message }),
+    ...(template === undefined ? {} : { template }),
     all: parsed.flags.has('-a'),
     allowEmpty: parsed.flags.has('--allow-empty'),
     amend: parsed.flags.has('--amend'),
@@ -1048,7 +1068,7 @@ function runGitCommand(repo: Repo, name: string, args: readonly string[], raw: s
     }
     case 'rebase': {
       const parsed = parseArgs(args, {
-        flags: [...CONTROL_FLAGS, '-i', '-r'],
+        flags: [...CONTROL_FLAGS, '-i', '-r', '--autosquash', '--no-autosquash'],
         values: ['-x', '-X'],
         aliases: { '--interactive': '-i', '--exec': '-x', '--rebase-merges': '-r', '--strategy-option': '-X' },
       })
@@ -1061,6 +1081,10 @@ function runGitCommand(repo: Repo, name: string, args: readonly string[], raw: s
         ...(exec === undefined ? {} : { exec }),
         ...strategyOptions(parsed),
         rebaseMerges: parsed.flags.has('-r'),
+        // rebase.autoSquash の設定は、本物と同じく -i のときだけ既定になる
+        autosquash:
+          parsed.flags.has('--autosquash') ||
+          (!parsed.flags.has('--no-autosquash') && parsed.flags.has('-i') && configBool(repo, 'rebase.autosquash') === true),
       }
       return parsed.flags.has('-i')
         ? rebaseInteractive(repo, upstream, options)

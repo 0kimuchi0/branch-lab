@@ -911,6 +911,50 @@ export interface RebaseOptions {
   readonly rebaseMerges?: boolean
   /** -X ours / -X theirs (rebase では ours が付け替え先、theirs が付け替えるコミット)。 */
   readonly favor?: 'ours' | 'theirs'
+  /** --autosquash: fixup! / squash! で始まるコミットを、対象のコミットの直後に fixup / squash として並べる。 */
+  readonly autosquash?: boolean
+}
+
+const AUTOSQUASH_PREFIX = /^(fixup|squash|amend)! /
+
+/**
+ * --autosquash の並べ替え。件名が "fixup! <件名>" のコミットを、その件名 (または ID) のコミットの直後に
+ * fixup として移し、"squash! " なら squash にする。対象は todo でそれより前にあるコミットだけ。
+ */
+export function autosquashLines(repo: Repo, lines: readonly string[]): string[] {
+  const picks = lines.map((line) => /^pick (\S+) /.exec(line)?.[1] ?? null)
+  const subjects = picks.map((id) => (id === null ? '' : subject(getCommit(repo, id).message)))
+  const followers = new Map<number, number[]>()
+  const moved = new Set<number>()
+  picks.forEach((id, index) => {
+    const own = subjects[index] ?? ''
+    if (id === null || !AUTOSQUASH_PREFIX.test(own)) return
+    let target = own
+    while (AUTOSQUASH_PREFIX.test(target)) target = target.replace(AUTOSQUASH_PREFIX, '')
+    const candidates = picks.slice(0, index).map((other, i) => ({ other, i })).filter(({ other, i }) => other !== null && !moved.has(i))
+    const found =
+      candidates.find(({ i }) => subjects[i] === target) ??
+      candidates.find(({ other }) => other === target) ??
+      candidates.find(({ i }) => (subjects[i] ?? '').startsWith(target))
+    if (!found) return
+    moved.add(index)
+    followers.set(found.i, [...(followers.get(found.i) ?? []), index])
+  })
+  const out: string[] = []
+  // fixup! fixup! のように、移したコミットにさらに付くものも続けて並べる
+  const emitFollowers = (index: number) => {
+    for (const follower of followers.get(index) ?? []) {
+      const action = (subjects[follower] ?? '').startsWith('squash! ') ? 'squash' : 'fixup'
+      out.push((lines[follower] as string).replace(/^pick /, `${action} `))
+      emitFollowers(follower)
+    }
+  }
+  lines.forEach((line, index) => {
+    if (moved.has(index)) return
+    out.push(line)
+    emitFollowers(index)
+  })
+  return out
 }
 
 /** rebase で実行する todo の行 (-i ではエディタに出す内容)。 */
@@ -920,10 +964,14 @@ function rebaseTodoLines(repo: Repo, head: CommitId, onto: CommitId, options: Re
     if (options.exec === undefined) return lines
     return lines.flatMap((line) => (/^(pick|merge) /.test(line) ? [line, `exec ${options.exec}`] : [line]))
   }
-  return commitsToReplay(repo, head, onto).flatMap((id) => [
-    `pick ${id} ${subject(getCommit(repo, id).message)}`,
-    ...(options.exec === undefined ? [] : [`exec ${options.exec}`]),
-  ])
+  const picks = commitsToReplay(repo, head, onto).map((id) => `pick ${id} ${subject(getCommit(repo, id).message)}`)
+  const ordered = options.autosquash ? autosquashLines(repo, picks) : picks
+  // exec は、fixup / squash でまとめるコミットの最後のあとに入れる
+  return ordered.flatMap((line, index) => {
+    const next = ordered[index + 1]
+    const grouped = next !== undefined && /^(fixup|squash) /.test(next)
+    return [line, ...(options.exec === undefined || grouped ? [] : [`exec ${options.exec}`])]
+  })
 }
 
 /** git rebase <upstream>: 現在のブランチのコミットを upstream の先に付け替える。 */
@@ -934,7 +982,10 @@ export function rebase(repo: Repo, upstreamRef: string, options: RebaseOptions =
   const head = headCommitId(repo)
   const branch = currentBranch(repo)
 
-  if (isAncestor(repo, upstream, head) && options.exec === undefined) {
+  const reorders =
+    options.autosquash === true &&
+    commitsToReplay(repo, head, upstream).some((id) => AUTOSQUASH_PREFIX.test(subject(getCommit(repo, id).message)))
+  if (isAncestor(repo, upstream, head) && options.exec === undefined && !reorders) {
     return { repo, output: `Current branch ${branch ?? 'HEAD'} is up to date.` }
   }
   if (isAncestor(repo, head, upstream) && head !== upstream) {
