@@ -237,6 +237,7 @@ export function filterBranch(raw: Repo, args: readonly string[], options: Filter
       tree,
       source: commit.source ?? id,
       ...(commit.reverts === undefined ? {} : { reverts: commit.reverts }),
+      ...(commit.author === undefined ? {} : { author: commit.author }),
     })
     current = stored.repo
     mapped.set(id, [stored.id])

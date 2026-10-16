@@ -2,6 +2,7 @@
  * git stash。コミットしていない変更をスタックに退避し、あとで戻す。
  * 本物の Git は退避した内容を特別なコミットとして保存するが、ここでは Repo.stash に持ち、グラフには描かない。
  */
+import { isIgnored } from './ignore'
 import { diffTrees } from './diff'
 import {
   GitError,
@@ -48,6 +49,8 @@ export interface StashPushOptions {
   readonly message?: string
   /** -u: 追跡していないファイルも退避する。 */
   readonly includeUntracked?: boolean
+  /** -a: .gitignore で無視しているファイルも含めて、追跡していないファイルをすべて退避する。 */
+  readonly includeIgnored?: boolean
   /** -k: ステージした変更は残す。 */
   readonly keepIndex?: boolean
 }
@@ -59,9 +62,14 @@ export function stashPush(repo: Repo, options: StashPushOptions = {}): Operation
   const head = headTree(repo)
   const headId = headCommitId(repo)
   const tracked = new Set([...Object.keys(head), ...Object.keys(repo.index)])
-  const untrackedPaths = Object.keys(repo.workdir).filter((path) => !tracked.has(path))
+  // -u は無視していないファイルだけ、-a は無視しているファイルも退避する
+  const untrackedPaths = Object.keys(repo.workdir).filter(
+    (path) => !tracked.has(path) && (options.includeIgnored || !isIgnored(repo.workdir, repo.index, path)),
+  )
+  const keptPaths = Object.keys(repo.workdir).filter((path) => !tracked.has(path) && !untrackedPaths.includes(path))
   const workdir = pick(repo.workdir, tracked)
-  const untracked = options.includeUntracked ? pick(repo.workdir, untrackedPaths) : {}
+  const saving = options.includeUntracked || options.includeIgnored
+  const untracked = saving ? pick(repo.workdir, untrackedPaths) : {}
 
   if (treesEqual(head, repo.index) && treesEqual(repo.index, workdir) && Object.keys(untracked).length === 0) {
     throw new GitError('No local changes to save')
@@ -74,9 +82,7 @@ export function stashPush(repo: Repo, options: StashPushOptions = {}): Operation
 
   const nextIndex = options.keepIndex ? repo.index : head
   let nextWorkdir: Tree = nextIndex
-  if (!options.includeUntracked) {
-    for (const path of untrackedPaths) nextWorkdir = withFile(nextWorkdir, path, repo.workdir[path])
-  }
+  for (const path of saving ? keptPaths : [...untrackedPaths, ...keptPaths]) nextWorkdir = withFile(nextWorkdir, path, repo.workdir[path])
   return {
     repo: { ...repo, index: nextIndex, workdir: nextWorkdir, stash: [entry, ...repo.stash] },
     output: `Saved working directory and index state ${description}`,

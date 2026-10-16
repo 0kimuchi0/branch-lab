@@ -152,3 +152,20 @@ describe('isSolved', () => {
     expect(isSolved(built, repo)).toBe(false)
   })
 })
+
+describe('isSolved (追加のお題)', () => {
+  it('add-patch: 両方のハンクをステージすると不正解', () => {
+    const built = buildPuzzle(puzzle('add-patch'))
+    expect(isSolved(built, run(['git add -p', 'y', 'y', 'git commit -m "バグを修正"'], built.start))).toBe(false)
+  })
+
+  it('rebase-onto: --onto なしで main に rebase すると F も入って不正解', () => {
+    const built = buildPuzzle(puzzle('rebase-onto'))
+    expect(isSolved(built, run(['git rebase main'], built.start))).toBe(false)
+  })
+
+  it('clean: -x で無視しているファイルまで消すと不正解', () => {
+    const built = buildPuzzle(puzzle('clean'))
+    expect(isSolved(built, run(['git clean -fdx'], built.start))).toBe(false)
+  })
+})

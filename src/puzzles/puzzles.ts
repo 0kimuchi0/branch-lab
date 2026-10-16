@@ -593,6 +593,75 @@ export const PUZZLES: readonly Puzzle[] = [
       return main !== undefined && old !== undefined && ancestors(withReplacements(repo).commits, main).has(old)
     },
   },
+  {
+    id: 'add-patch',
+    title: '一部だけステージする',
+    description:
+      'app.txt の 1 行目のバグを直し、12 行目には確かめるための DEBUG の行を足しました。バグの修正だけを「バグを修正」としてコミットし、DEBUG の行はコミットせずに作業ディレクトリに残しましょう。',
+    hint: 'git add -p で、変更をハンクごとに尋ねてもらえます。1 つ目のハンク (1 行目の修正) は y、2 つ目のハンク (DEBUG の行) は n と答えてから、git commit します。',
+    setup: [
+      ...Array.from({ length: 12 }, (_, i) => `echo "行 ${i + 1}" ${i === 0 ? '>' : '>>'} app.txt`),
+      'git add app.txt',
+      'git commit -m "app.txt を追加"',
+      "sed -i 's/^行 1$/行 1 (バグを修正)/' app.txt",
+      'echo "DEBUG: 確認用" >> app.txt',
+    ],
+    solutions: [['git add -p', 'y', 'n', 'git commit -m "バグを修正"']],
+    check: (repo) => {
+      const committed = headTree(repo)['app.txt'] ?? ''
+      return committed.includes('バグを修正') && !committed.includes('DEBUG') && (repo.workdir['app.txt'] ?? '').includes('DEBUG')
+    },
+  },
+  {
+    id: 'rebase-onto',
+    title: '付け替え先を変える',
+    description:
+      'topic は feature から分けたブランチですが、feature はやめることになりました。topic にだけあるコミット (T1 と T2) を、main の上に付け替えましょう。feature の F は topic に入れません。',
+    hint: 'git rebase --onto main feature topic は、feature..topic のコミット (topic にあって feature にないもの) だけを main の上に付け替えます。',
+    setup: [
+      ...change('main.txt', 'main の変更', 'M'),
+      'git switch -c feature',
+      ...change('feature.txt', 'やめる機能', 'F'),
+      'git switch -c topic',
+      ...change('topic.txt', 'T1 の変更', 'T1'),
+      ...change('topic.txt', 'T2 の変更', 'T2'),
+    ],
+    solutions: [['git rebase --onto main feature topic'], ['git rebase --onto main feature']],
+    check: (repo) => {
+      const topic = repo.branches['topic']
+      const tree = topic === undefined ? {} : (repo.commits[topic]?.tree ?? {})
+      return 'main.txt' in tree && !('feature.txt' in tree) && 'topic.txt' in tree
+    },
+  },
+  {
+    id: 'force-with-lease',
+    title: '直したコミットを安全に push する',
+    description:
+      'push したあとで、直前のコミットのメッセージを --amend で直しました。履歴が分かれたので普通の push は拒否されます。他の人の push を消してしまわないように、--force-with-lease で origin の main を上書きしましょう。',
+    hint: 'git push --force-with-lease は、最後に fetch したときから origin の main が動いていないときだけ上書きします (-f は他の人のコミットも消してしまいます)。',
+    setup: [...change('app.txt', '機能 A', '機能を追加'), 'git push', 'git commit --amend -m "機能 A を追加"'],
+    solutions: [['git push --force-with-lease']],
+    checkRemote: true,
+    check: (repo) => repo.remotes['origin']?.branches['main'] === repo.branches['main'],
+  },
+  {
+    id: 'clean',
+    title: '追跡していないファイルを片付ける',
+    description:
+      'ビルドで作られた out ディレクトリと、メモの tmp.txt が残っています。追跡していないファイルとディレクトリを消しましょう。ただし、.gitignore で無視している debug.log は残します。',
+    hint: 'git clean -n で消えるものを確かめてから、git clean -fd で消します。-d がないと、追跡していないディレクトリ (out) は消えません。-x を付けると、無視しているファイルまで消えます。',
+    setup: [
+      'echo "*.log" > .gitignore',
+      'git add .gitignore',
+      'git commit -m ".gitignore を追加"',
+      'echo "build" > out/app.js',
+      'echo "メモ" > tmp.txt',
+      'echo "ログ" > debug.log',
+    ],
+    solutions: [['git clean -fd'], ['git clean -n', 'git clean -f -d']],
+    check: (repo) =>
+      repo.workdir['debug.log'] !== undefined && Object.keys(repo.workdir).every((path) => path in repo.index || path === 'debug.log'),
+  },
 ]
 
 function runAll(repo: Repo, lines: readonly string[]): Repo {

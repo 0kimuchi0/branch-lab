@@ -1,6 +1,7 @@
 /** git diff と git show。リポジトリの状態から比べる 2 つの Tree を選ぶ。 */
 import { diffTrees, type DiffOptions } from './diff'
 import {
+  authorOf,
   GitError,
   getCommit,
   headCommitId,
@@ -63,6 +64,7 @@ export function show(repo: Repo, ref = 'HEAD', options: Omit<DiffOptions, 'only'
   const names = refNames(repo, id)
   const lines = [...tagHeader(repo, ref), `commit ${id}${names.length > 0 ? ` (${names.join(', ')})` : ''}`]
   if (commit.parents.length > 1) lines.push(`Merge: ${commit.parents.join(' ')}`)
+  lines.push(`Author: ${authorOf(commit)}`)
   lines.push('', ...commit.message.split('\n').map((line) => (line === '' ? '' : `    ${line}`)))
   const note = repo.notes[id]
   if (note !== undefined) lines.push('', 'Notes:', ...note.split('\n').map((line) => `    ${line}`))

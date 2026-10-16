@@ -64,6 +64,9 @@ import { amAbort, amContinue, amShowCurrentPatch, amSkip, gitAm, gitApply, gitFo
 import { sparseAdd, sparseDisable, sparseInit, sparseList, sparseSet } from './sparse'
 import { notesAdd, notesAppend, notesCopy, notesEdit, notesList, notesRemove, notesShow } from './notes'
 import { rerereCommand } from './rerere'
+import { answerPatch, startPatch } from './hunks'
+import { checkIgnore, clean, gitMove } from './clean'
+import { describe, gitGrep, grepTree, shortlog } from './describe'
 import { findHelp, formatHelp, formatHelpIndex } from '../help/commands'
 import { filterBranch, type FilterBranchOptions, type FilterRunner } from './filterBranch'
 import { fsck, gc, notesPrune, prune, reflogDelete, reflogExpire } from './gc'
@@ -477,7 +480,11 @@ function runSwitch(repo: Repo, args: readonly string[]): OperationResult {
 }
 
 function runCheckout(repo: Repo, args: readonly string[]): OperationResult {
-  const parsed = parseArgs(args, { flags: ['--detach'], values: ['-b', '-B', '--orphan'] })
+  const parsed = parseArgs(args, { flags: ['--detach', '-p'], values: ['-b', '-B', '--orphan'], aliases: { '--patch': '-p' } })
+  if (parsed.flags.has('-p')) {
+    if (parsed.positional.length > 0) throw new GitError('コミットを指定した git checkout -p は、このアプリでは未対応です')
+    return startPatch(repo, 'discard', 'git checkout -p', parsed.paths ?? [])
+  }
   const orphan = parsed.values.get('--orphan')
   if (orphan !== undefined) {
     atMost(parsed, 1, 'git checkout --orphan <新しいブランチ> [<起点>]')
@@ -511,7 +518,11 @@ function runCheckout(repo: Repo, args: readonly string[]): OperationResult {
 }
 
 function runReset(repo: Repo, args: readonly string[]): OperationResult {
-  const parsed = parseArgs(args, { flags: ['--soft', '--mixed', '--hard'] })
+  const parsed = parseArgs(args, { flags: ['--soft', '--mixed', '--hard', '-p'], aliases: { '--patch': '-p' } })
+  if (parsed.flags.has('-p')) {
+    const paths = [...parsed.positional.filter((arg) => arg !== 'HEAD'), ...(parsed.paths ?? [])]
+    return startPatch(repo, 'unstage', 'git reset -p', paths)
+  }
   const modes = (['soft', 'mixed', 'hard'] as const).filter((mode) => parsed.flags.has(`--${mode}`))
   if (modes.length > 1) throw new GitError('fatal: reset のモードは 1 つだけ指定できます')
   const mode: ResetMode | undefined = modes[0]
@@ -535,13 +546,18 @@ function runReset(repo: Repo, args: readonly string[]): OperationResult {
 
 function runRestore(repo: Repo, args: readonly string[]): OperationResult {
   const parsed = parseArgs(args, {
-    flags: ['--staged', '--worktree'],
+    flags: ['--staged', '--worktree', '-p'],
     values: ['--source'],
-    aliases: { '-S': '--staged', '-W': '--worktree', '-s': '--source' },
+    aliases: { '-S': '--staged', '-W': '--worktree', '-s': '--source', '--patch': '-p' },
   })
   const paths = [...parsed.positional, ...(parsed.paths ?? [])]
   const source = parsed.values.get('--source')
   const staged = parsed.flags.has('--staged')
+  if (parsed.flags.has('-p')) {
+    if (source !== undefined) throw new GitError('--source を付けた git restore -p は、このアプリでは未対応です')
+    if (staged && parsed.flags.has('--worktree')) throw new GitError('--staged と --worktree を両方付けた git restore -p は、このアプリでは未対応です')
+    return startPatch(repo, staged ? 'unstage' : 'discard', 'git restore -p', paths)
+  }
   if (staged && parsed.flags.has('--worktree')) {
     const first = restore(repo, paths, { staged: true, ...(source === undefined ? {} : { source }) })
     return restore(first.repo, paths, { source: source ?? 'HEAD' })
@@ -634,9 +650,9 @@ function runStash(repo: Repo, args: readonly string[]): OperationResult {
     case 'push':
     case 'save': {
       const parsed = parseArgs(rest, {
-        flags: ['-u', '-k'],
+        flags: ['-u', '-k', '-a'],
         values: ['-m'],
-        aliases: { '--include-untracked': '-u', '--keep-index': '-k', '--message': '-m' },
+        aliases: { '--include-untracked': '-u', '--keep-index': '-k', '--message': '-m', '--all': '-a' },
       })
       if (parsed.paths !== null || (sub === 'push' && parsed.positional.length > 0)) {
         throw new GitError('ファイルを指定した git stash push はこのアプリでは未対応です')
@@ -645,6 +661,7 @@ function runStash(repo: Repo, args: readonly string[]): OperationResult {
       return stashPush(repo, {
         ...(message ? { message } : {}),
         includeUntracked: parsed.flags.has('-u'),
+        includeIgnored: parsed.flags.has('-a'),
         keepIndex: parsed.flags.has('-k'),
       })
     }
@@ -702,6 +719,17 @@ function parseRemoteArgs(
 }
 
 function runPush(repo: Repo, args: readonly string[]): OperationResult {
+  // --force-with-lease は値を省けるので、ほかのオプションとは別に読む
+  const leaseArg = args.find((arg) => arg === '--force-with-lease' || arg.startsWith('--force-with-lease='))
+  const leaseValue = leaseArg === undefined || leaseArg === '--force-with-lease' ? undefined : leaseArg.slice('--force-with-lease='.length)
+  const [leaseRef, leaseExpect] = leaseValue === undefined ? [] : leaseValue.split(':')
+  const lease =
+    leaseArg === undefined ? undefined
+    : {
+        ...(leaseRef ? { ref: leaseRef } : {}),
+        ...(leaseExpect === undefined ? {} : { expect: leaseExpect === '' ? null : leaseExpect }),
+      }
+  args = args.filter((arg) => arg !== leaseArg)
   const parsed = parseArgs(args, {
     flags: ['-u', '-f', '--tags', '-d'],
     aliases: { '--set-upstream': '-u', '--force': '-f', '--delete': '-d' },
@@ -721,6 +749,7 @@ function runPush(repo: Repo, args: readonly string[]): OperationResult {
     ...(remote === undefined ? {} : { remote }),
     ...(branch === undefined ? {} : { branch }),
     force,
+    ...(lease === undefined ? {} : { lease }),
     setUpstream: parsed.flags.has('-u'),
   })
 }
@@ -904,7 +933,7 @@ function runLog(repo: Repo, args: readonly string[]): OperationResult {
       '--merges', '--no-merges', '--decorate', '--no-decorate', '-p', '--stat', '--name-only', '--invert-grep',
       '--topo-order', '--date-order', '--abbrev-commit', '--no-notes', '--notes',
     ],
-    values: ['-n', '--format', '--pretty', '--grep'],
+    values: ['-n', '--format', '--pretty', '--grep', '--author'],
     aliases: { '--max-count': '-n', '--patch': '-p', '-u': '-p' },
   })
   const count = parsed.values.get('-n')
@@ -930,6 +959,7 @@ function runLog(repo: Repo, args: readonly string[]): OperationResult {
     firstParent: parsed.flags.has('--first-parent'),
     ...(parsed.flags.has('--merges') ? { merges: true } : parsed.flags.has('--no-merges') ? { merges: false } : {}),
     ...(grep === undefined ? {} : { grep }),
+    ...(parsed.values.has('--author') ? { author: parsed.values.get('--author') as string } : {}),
     invertGrep: parsed.flags.has('--invert-grep'),
     paths,
     patch: parsed.flags.has('-p'),
@@ -1224,8 +1254,7 @@ function runGitWithSubmodules(repo: Repo, name: string, args: readonly string[],
 function runGitCommand(repo: Repo, name: string, args: readonly string[], raw: string): OperationResult {
   switch (name) {
     case 'status':
-      parseArgs(args, { flags: [] })
-      return status(repo)
+      return status(repo, { ignored: parseArgs(args, { flags: ['--ignored'] }).flags.has('--ignored') })
     case 'log':
       return runLog(repo, args)
     case 'notes':
@@ -1370,9 +1399,10 @@ function runGitCommand(repo: Repo, name: string, args: readonly string[], raw: s
       })
     }
     case 'add': {
-      const parsed = parseArgs(args, { flags: ['-A'], aliases: { '--all': '-A' } })
+      const parsed = parseArgs(args, { flags: ['-A', '-f', '-p'], aliases: { '--all': '-A', '--force': '-f', '--patch': '-p' } })
       const specs = [...parsed.positional, ...(parsed.paths ?? [])]
-      return add(repo, parsed.flags.has('-A') ? [...specs, '.'] : specs)
+      if (parsed.flags.has('-p')) return startPatch(repo, 'stage', 'git add -p', specs)
+      return add(repo, parsed.flags.has('-A') ? [...specs, '.'] : specs, { force: parsed.flags.has('-f') })
     }
     case 'rm': {
       const parsed = parseArgs(args, {
@@ -1437,16 +1467,27 @@ function runGitCommand(repo: Repo, name: string, args: readonly string[], raw: s
     case 'rebase': {
       const parsed = parseArgs(args, {
         flags: [...CONTROL_FLAGS, '-i', '-r', '--autosquash', '--no-autosquash'],
-        values: ['-x', '-X'],
+        values: ['-x', '-X', '--onto'],
         aliases: { '--interactive': '-i', '--exec': '-x', '--rebase-merges': '-r', '--strategy-option': '-X' },
       })
       const control = sequencerControl(repo, 'rebase', parsed)
       if (control) return control
-      if (parsed.positional.length !== 1) usage('git rebase [-i] [-r] [-x <コマンド>] <ブランチ>')
-      const upstream = parsed.positional[0] as string
+      const text = 'git rebase [-i] [-r] [-x <コマンド>] [--onto <新しい土台>] [<上流> [<ブランチ>]]'
+      if (parsed.positional.length > 2) usage(text)
+      // <ブランチ> を書いたら、先にそのブランチに切り替える (本物と同じ)
+      const [first, target] = parsed.positional
+      const current = target === undefined ? repo : switchBranch(repo, target).repo
+      // <上流> を省くと、今のブランチの upstream
+      const branchName = currentBranch(current)
+      const upstream = first ?? (branchName === null ? undefined : current.upstreams[branchName])
+      if (upstream === undefined) {
+        throw new GitError('There is no tracking information for the current branch.\nPlease specify which branch you want to rebase against.')
+      }
       const exec = parsed.values.get('-x')
+      const onto = parsed.values.get('--onto')
       const options = {
         ...(exec === undefined ? {} : { exec }),
+        ...(onto === undefined ? {} : { onto }),
         ...strategyOptions(parsed),
         rebaseMerges: parsed.flags.has('-r'),
         // rebase.autoSquash の設定は、本物と同じく -i のときだけ既定になる
@@ -1454,9 +1495,7 @@ function runGitCommand(repo: Repo, name: string, args: readonly string[], raw: s
           parsed.flags.has('--autosquash') ||
           (!parsed.flags.has('--no-autosquash') && parsed.flags.has('-i') && configBool(repo, 'rebase.autosquash') === true),
       }
-      return parsed.flags.has('-i')
-        ? rebaseInteractive(repo, upstream, options)
-        : rebase(repo, upstream, options)
+      return parsed.flags.has('-i') ? rebaseInteractive(current, upstream, options) : rebase(current, upstream, options)
     }
     case 'cherry-pick': {
       const parsed = parseArgs(args, {
@@ -1575,6 +1614,97 @@ function runGitCommand(repo: Repo, name: string, args: readonly string[], raw: s
         head: parsed.flags.has('--head'),
       })
       return parsed.flags.has('-q') ? { repo, output: '' } : result
+    }
+    case 'clean': {
+      const parsed = parseArgs(
+        args.flatMap((arg) => (/^-[a-zA-Z]{2,}$/.test(arg) ? [...arg.slice(1)].map((c) => `-${c}`) : [arg])),
+        { flags: ['-f', '-n', '-d', '-x', '-X', '-q', '-i'], aliases: { '--force': '-f', '--dry-run': '-n', '--quiet': '-q', '--interactive': '-i' } },
+      )
+      if (parsed.flags.has('-i')) throw new GitError('git clean -i (対話モード) は、このアプリでは未対応です (-n で確かめてから -f で消してください)')
+      if (parsed.flags.has('-x') && parsed.flags.has('-X')) throw new GitError("fatal: options '-x' and '-X' cannot be used together")
+      return clean(repo, [...parsed.positional, ...(parsed.paths ?? [])], {
+        force: parsed.flags.has('-f'),
+        dryRun: parsed.flags.has('-n'),
+        directories: parsed.flags.has('-d'),
+        ignored: parsed.flags.has('-x'),
+        onlyIgnored: parsed.flags.has('-X'),
+        quiet: parsed.flags.has('-q'),
+      })
+    }
+    case 'mv': {
+      const parsed = parseArgs(args, { flags: ['-f', '-k', '-n', '-v'], aliases: { '--force': '-f', '--dry-run': '-n', '--verbose': '-v' } })
+      return gitMove(repo, [...parsed.positional, ...(parsed.paths ?? [])], {
+        force: parsed.flags.has('-f'),
+        skipErrors: parsed.flags.has('-k'),
+        dryRun: parsed.flags.has('-n'),
+        verbose: parsed.flags.has('-v'),
+      })
+    }
+    case 'check-ignore': {
+      const parsed = parseArgs(args, { flags: ['-v', '-q'], aliases: { '--verbose': '-v', '--quiet': '-q' } })
+      const result = checkIgnore(repo, [...parsed.positional, ...(parsed.paths ?? [])], parsed.flags.has('-v'))
+      return parsed.flags.has('-q') ? { repo, output: '' } : result
+    }
+    case 'describe': {
+      const dirtyArg = args.find((arg) => arg === '--dirty' || arg.startsWith('--dirty='))
+      const parsed = parseArgs(
+        args.filter((arg) => arg !== dirtyArg),
+        { flags: ['--tags', '--all', '--always', '--long', '--exact-match'], values: ['--abbrev'] },
+      )
+      const abbrev = parsed.values.get('--abbrev')
+      return describe(repo, parsed.positional, {
+        tags: parsed.flags.has('--tags'),
+        all: parsed.flags.has('--all'),
+        always: parsed.flags.has('--always'),
+        long: parsed.flags.has('--long'),
+        exactMatch: parsed.flags.has('--exact-match'),
+        abbrevZero: abbrev === '0',
+        ...(dirtyArg === undefined ? {} : { dirty: dirtyArg === '--dirty' ? '-dirty' : dirtyArg.slice('--dirty='.length) }),
+      })
+    }
+    case 'shortlog': {
+      const expanded = args.flatMap((arg) => (/^-[sne]{2,}$/.test(arg) ? [...arg.slice(1)].map((c) => `-${c}`) : [arg]))
+      const parsed = parseArgs(expanded, {
+        flags: ['-s', '-n', '-e', '--all', '--no-merges', '--merges'],
+        aliases: { '--summary': '-s', '--numbered': '-n', '--email': '-e' },
+      })
+      return shortlog(repo, {
+        revisions: parsed.positional,
+        all: parsed.flags.has('--all'),
+        ...(parsed.flags.has('--merges') ? { merges: true } : parsed.flags.has('--no-merges') ? { merges: false } : {}),
+        paths: parsed.paths ?? [],
+        summary: parsed.flags.has('-s'),
+        numbered: parsed.flags.has('-n'),
+      })
+    }
+    case 'grep': {
+      const expanded = args.flatMap((arg) => (/^-[a-zA-Z]{2,}$/.test(arg) ? [...arg.slice(1)].map((c) => `-${c}`) : [arg]))
+      const parsed = parseArgs(expanded, {
+        flags: ['-i', '-n', '-c', '-l', '-v', '-w', '-F', '-E', '-G', '--cached'],
+        values: ['-e'],
+        aliases: { '--ignore-case': '-i', '--line-number': '-n', '--count': '-c', '--files-with-matches': '-l', '--invert-match': '-v', '--word-regexp': '-w', '--fixed-strings': '-F', '--extended-regexp': '-E' },
+      })
+      const patterns = [...(parsed.allValues.get('-e') ?? [])]
+      const rest = [...parsed.positional]
+      if (patterns.length === 0) {
+        const pattern = rest.shift()
+        if (pattern === undefined) usage('git grep [-i] [-n] [-c] [-l] [-v] [-w] [-F] [--cached] (-e <パターン> | <パターン>) [<コミット>] [-- <パス>...]')
+        patterns.push(pattern)
+      }
+      const tree = rest[0] !== undefined && grepTree(repo, rest[0]) ? rest.shift() : undefined
+      return gitGrep(repo, {
+        patterns,
+        ignoreCase: parsed.flags.has('-i'),
+        lineNumber: parsed.flags.has('-n'),
+        count: parsed.flags.has('-c'),
+        filesWithMatches: parsed.flags.has('-l'),
+        invert: parsed.flags.has('-v'),
+        word: parsed.flags.has('-w'),
+        fixed: parsed.flags.has('-F'),
+        cached: parsed.flags.has('--cached'),
+        ...(tree === undefined ? {} : { tree }),
+        paths: [...rest, ...(parsed.paths ?? [])],
+      })
     }
     case 'filter-branch':
       return runFilterBranch(repo, args, commandEnv['FILTER_BRANCH_SQUELCH_WARNING'] === '1')
@@ -2111,7 +2241,7 @@ function executeRouted(repo: Repo, input: string): CommandResult {
   // git clone は今いる場所に新しいリポジトリを作るので、一番外側のリポジトリで扱う
   const words = tokens.map((token) => token.value)
   const cloneArgs = words[0] === 'clone' ? words.slice(1) : words[0] === 'git' && words[1] === 'clone' ? words.slice(2) : null
-  if (cloneArgs !== null && !activeRepo(repo).editor) return runClone(repo, cloneArgs)
+  if (cloneArgs !== null && !activeRepo(repo).editor && activeRepo(repo).prompt === null) return runClone(repo, cloneArgs)
   // clone したリポジトリの中にいれば、そのリポジトリで実行する (その中のサブモジュールも同じように扱う)
   const clone = repo.clone === null ? undefined : repo.clones[repo.clone]
   if (repo.clone !== null && clone !== undefined) {
@@ -2206,6 +2336,9 @@ function runCd(root: Repo, args: readonly Token[]): CommandResult {
   if (editor) {
     return { repo: root, output: `エディタで ${editor.file} を開いています。先に「保存して閉じる」を押してください`, ok: false }
   }
+  if (activeRepo(root).prompt !== null) {
+    return { repo: root, output: '質問に答えてください (y / n / q / a / d / s / ?)', ok: false }
+  }
   try {
     if (args.length > 1) usage('cd <ディレクトリ>')
     return { ...changeDirectory(root, args[0]?.value), ok: true }
@@ -2284,6 +2417,15 @@ function runRedirected(repo: Repo, input: string, tokens: readonly Token[], redi
 }
 
 function executeOnce(repo: Repo, input: string): CommandResult {
+  // git add -p などの質問に答えている間は、入力をすべて答えとして読む
+  if (repo.prompt !== null) {
+    try {
+      return { ...answerPatch(repo, input), ok: true }
+    } catch (error) {
+      if (error instanceof GitError) return { repo, output: error.message, ok: false }
+      throw error
+    }
+  }
   if (input.startsWith(EDITOR_SAVE)) return runEditorSave(repo, input)
   if (repo.editor && input.trim() !== '') {
     return {

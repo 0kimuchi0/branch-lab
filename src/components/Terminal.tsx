@@ -15,6 +15,8 @@ interface TerminalProps {
   readonly resetLabel: string
   /** エディタが開いている間は入力できない (Git がエディタを待っているため)。 */
   readonly editorOpen: boolean
+  /** git add -p などの質問に答えている間 (入力は答えになる)。 */
+  readonly promptOpen?: boolean
   /** 入力欄に入れるコマンド (チュートリアルやヘルプの「入力欄に入れる」)。id が変わるたびに入れる。 */
   readonly draft?: { readonly text: string; readonly id: number } | null
   /** ログが空のときに出す案内。 */
@@ -37,7 +39,9 @@ function diffLineClass(line: string): string | undefined {
 
 function Output({ entry }: { readonly entry: LogEntry }) {
   const className = entry.ok ? 'log-output' : 'log-output log-error'
-  if (!entry.ok || !showsDiff(entry.command)) {
+  // git add -p などの答えにも差分 (@@ のハンク) が出るので、色を付ける
+  const hasHunk = /^@@ /m.test(entry.output)
+  if (!entry.ok || (!showsDiff(entry.command) && !hasHunk)) {
     return <pre className={className}>{entry.output}</pre>
   }
   return (
@@ -87,7 +91,7 @@ const EXAMPLES = [
   'git diff',
 ] as const
 
-export function Terminal({ log, onRun, onReset, resetLabel, editorOpen, draft, emptyHint }: TerminalProps) {
+export function Terminal({ log, onRun, onReset, resetLabel, editorOpen, promptOpen = false, draft, emptyHint }: TerminalProps) {
   const [value, setValue] = useState('')
   const [cursor, setCursor] = useState<number | null>(null)
   const logRef = useRef<HTMLDivElement>(null)
@@ -166,7 +170,7 @@ export function Terminal({ log, onRun, onReset, resetLabel, editorOpen, draft, e
             type="button"
             className="chip"
             onClick={() => onRun(example)}
-            disabled={editorOpen}
+            disabled={editorOpen || promptOpen}
           >
             {example}
           </button>
@@ -186,7 +190,11 @@ export function Terminal({ log, onRun, onReset, resetLabel, editorOpen, draft, e
             setCursor(null)
           }}
           onKeyDown={handleKeyDown}
-          placeholder={editorOpen ? 'エディタを閉じるまで入力できません' : 'git commit -m "メッセージ"'}
+          placeholder={
+            editorOpen ? 'エディタを閉じるまで入力できません'
+            : promptOpen ? '質問に答える (y / n / q / a / d / s / ?)'
+            : 'git commit -m "メッセージ"'
+          }
           disabled={editorOpen}
           aria-label="Git コマンド"
           autoFocus

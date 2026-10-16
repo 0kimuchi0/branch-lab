@@ -57,6 +57,11 @@ React + TypeScript + Vite、テストは Vitest。UI の文言は日本語。
   (`withReplacements`) でコマンドを実行し、結果のコミットを元に戻す (`restoreOriginals`)。gc・push などの `RAW_COMMANDS` は元のまま。
 - `src/git/filterBranch.ts`: filter-branch。フィルタは `commands.ts` の `runFilter` で実行し、`--msg-filter` などの標準入力は
   `stdinText` で cat・sed・grep に渡す。元の参照は `Repo.originalRefs` (`refs/original/...`)。`src/git/refs.ts`: update-ref / for-each-ref / show-ref。
+- `src/git/hunks.ts`: add -p / restore -p / reset -p / checkout -p。質問の状態は `Repo.prompt` (`PatchPrompt`) で、
+  開いている間は `executeOnce` が入力をすべて答えとして `answerPatch` に渡す (エディタと同じく、ログと共有 URL で再現できる)。
+- `src/git/ignore.ts`: .gitignore (`isIgnored`)。status・add・stash・clean・画面のファイル一覧が使う。
+  `src/git/clean.ts`: clean / mv / check-ignore。`src/git/describe.ts`: describe / shortlog / git grep。
+- コミットの作者は `Commit.author` (`git config user.name`、なければ `DEFAULT_AUTHOR`)。コピー (`source` のあるコミット) と --amend は元の作者のまま (`createCommit`)。
 - `src/git/clone.ts`: clone。clone したリポジトリは一番外側の `Repo.clones` に持ち、`cd` で中にいる間 (`Repo.clone`) は
   `executeCommand` がそのリポジトリで実行する。リモートとサブモジュールの取得元は URL ごとの模擬のサーバーとして扱い、
   `syncServersIn` / `syncServersOut` で中身とコミットの採番を共有する。
@@ -75,7 +80,7 @@ React + TypeScript + Vite、テストは Vitest。UI の文言は日本語。
   形式を変えるときは `VERSION` を上げる。コマンドから `Repo` が決定的に作られることが前提なので、
   モデルに乱数や時刻を持ち込まない。
 - `src/components/`: `GraphView` (SVG 描画とアニメーション)、`FileArea`、`Workspace` (4 領域と stash)、
-  `EditorPanel`、`PuzzlePanel`、`TutorialPanel`、`HelpDialog`、`ShareButton`、`Terminal` (入力欄とログ)。
+  `EditorPanel`、`PromptPanel` (-p の質問)、`PuzzlePanel`、`TutorialPanel`、`HelpDialog`、`ShareButton`、`Terminal` (入力欄とログ)。
 - `src/App.tsx`: モード (自由に試す / チュートリアル / お題)・`Repo`・実行ログの状態管理。
 - テストでコマンドを順に実行するときは `src/test/run.ts` の `run` を使う。
 
@@ -94,6 +99,6 @@ main に push すると https://branch-lab-dun.vercel.app にデプロイされ�
 
 ## 今後の予定
 
-- `add -p` / `restore -p`
-- `rebase --onto` と `push --force-with-lease`
-- `clean` / `mv` / `describe` / `shortlog` / `grep`
+- `commit -p` / `stash -p` と、`-p` の質問の `e` (ハンクを手で直す)
+- `log -S` / `-G` (変更の中身でコミットを探す)
+- `branch --merged` / `--contains` と `tag --contains`

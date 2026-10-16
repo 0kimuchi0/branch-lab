@@ -3,6 +3,7 @@
  * 作業ディレクトリはステージと、ステージは HEAD と比べた状態を付ける。
  */
 import { MAIN_WORKTREE, headTree, isSparseHidden, REMOTE_NAME, type Repo } from '../git/model'
+import { isIgnored } from '../git/ignore'
 import { changedPaths, displayContent } from '../git/tree'
 
 /** 画面に出すファイルの内容 (サブモジュールは Subproject commit、バンドルは見出しとコミットの数)。 */
@@ -13,7 +14,7 @@ function fileContent(content: string): string {
   return `${header.replace(/\n+$/, '')}\n(バンドルの中身: コミット ${count} 個)\n`
 }
 
-export type FileState = 'clean' | 'untracked' | 'added' | 'modified' | 'deleted' | 'conflict'
+export type FileState = 'clean' | 'untracked' | 'ignored' | 'added' | 'modified' | 'deleted' | 'conflict'
 
 export interface AreaFile {
   readonly path: string
@@ -25,6 +26,7 @@ export interface AreaFile {
 export const FILE_STATE_LABELS: Readonly<Record<FileState, string>> = {
   clean: '',
   untracked: '未追跡',
+  ignored: '無視',
   added: '新規',
   modified: '変更',
   deleted: '削除',
@@ -45,7 +47,7 @@ export function workdirFiles(repo: Repo): AreaFile[] {
     const state: FileState =
       conflicted.has(path) ? 'conflict'
       : !changed.has(path) ? 'clean'
-      : !(path in repo.index) ? 'untracked'
+      : !(path in repo.index) ? (isIgnored(repo.workdir, repo.index, path) ? 'ignored' : 'untracked')
       : content === undefined ? 'deleted'
       : 'modified'
     return { path, state, content: content === undefined ? undefined : fileContent(content) }
