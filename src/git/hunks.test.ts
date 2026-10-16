@@ -43,7 +43,7 @@ describe('git add -p', () => {
         ' l2',
         ' l3',
         ' l4',
-        '(1/2) このハンクをステージしますか [y,n,q,a,d,?]? ',
+        '(1/2) このハンクをステージしますか [y,n,q,a,d,e,?]? ',
       ].join('\n'),
     )
     expect(first.repo.prompt?.command).toBe('git add -p')
@@ -68,10 +68,10 @@ describe('git add -p', () => {
   it('s で、近くにある変更を小さなハンクに分ける', () => {
     const repo = run([...write('c.txt', ['x1', 'x2', 'x3', 'x4']), 'git add c.txt', 'git commit -m c', "sed -i 's/x1/X1/' c.txt", "sed -i 's/x4/X4/' c.txt"])
     const started = executeCommand(repo, 'git add -p')
-    expect(started.output.endsWith('(1/1) このハンクをステージしますか [y,n,q,a,d,s,?]? ')).toBe(true)
+    expect(started.output.endsWith('(1/1) このハンクをステージしますか [y,n,q,a,d,s,e,?]? ')).toBe(true)
     const split = executeCommand(started.repo, 's')
     expect(split.output.split('\n')[0]).toBe('Split into 2 hunks.')
-    expect(split.output.endsWith('(1/2) このハンクをステージしますか [y,n,q,a,d,?]? ')).toBe(true)
+    expect(split.output.endsWith('(1/2) このハンクをステージしますか [y,n,q,a,d,e,?]? ')).toBe(true)
     expect(run(['n', 'y'], split.repo).index['c.txt']).toBe('x1\nx2\nx3\nX4\n')
   })
 
@@ -108,5 +108,75 @@ describe('git restore -p / reset -p / checkout -p', () => {
     expect(repo.workdir['a.txt']).toBe(staged.workdir['a.txt'])
     expect(run(['git reset -p', 'a'], staged).index['b.txt']).toBe(staged.index['b.txt'])
     expect(run(['git reset -p', 'd', 'y'], staged).index['b.txt']).toBe('b\n')
+  })
+})
+
+/** a.txt の b を B に変え、d を足した状態 (1 つのハンク)。 */
+function small(): Repo {
+  return run([...write('a.txt', ['a', 'b', 'c']), 'git add .', 'git commit -m base', "sed -i 's/b/B/' a.txt", 'echo d >> a.txt'])
+}
+
+describe('-p の e (ハンクを手で直す)', () => {
+  it('直したハンクをステージし、作業ディレクトリはそのまま', () => {
+    const editing = run(['git add -p', 'e'], small())
+    expect(editing.editor?.file).toBe('ADD_EDIT.patch')
+    expect(editing.editor?.text.split('\n').slice(1, 7)).toEqual(['@@ -1,3 +1,4 @@', ' a', '-b', '+B', ' c', '+d'])
+    const repo = run([`:wq ${JSON.stringify(' a\n-b\n+X\n c\n')}`], editing)
+    expect(repo.prompt).toBeNull()
+    expect(repo.index['a.txt']).toBe('a\nX\nc\n')
+    expect(repo.workdir['a.txt']).toBe('a\nB\nc\nd\n')
+  })
+
+  it('当てられない形なら同じ質問に戻り、空にすると直すのをやめる', () => {
+    const editing = run(['git add -p', 'e'], small())
+    const bad = executeCommand(editing, `:wq ${JSON.stringify(' a\n-q\n+X\n c\n')}`)
+    expect(bad.output.split('\n')[0]).toContain('当てられません')
+    expect(bad.repo.prompt).not.toBeNull()
+    const empty = executeCommand(editing, ':wq ""')
+    expect(empty.repo.prompt).not.toBeNull()
+    expect(empty.repo.index['a.txt']).toBe('a\nb\nc\n')
+  })
+
+  it('ファイルごとのハンク (削除など) と restore -p では使えない', () => {
+    const started = executeCommand(run(['git restore -p'], small()), 'e')
+    expect(started.output.split('\n')[0]).toBe('git restore -p では e は使えません')
+  })
+})
+
+describe('git commit -p', () => {
+  it('選んだハンクだけをコミットする', () => {
+    const repo = run(['git commit -p -m part', 'e', `:wq ${JSON.stringify(' a\n-b\n+B\n c\n')}`], small())
+    expect(headTree(repo)['a.txt']).toBe('a\nB\nc\n')
+    expect(repo.workdir['a.txt']).toBe('a\nB\nc\nd\n')
+    expect(output(repo, 'git log -1 --format=%s')).toBe('part')
+  })
+
+  it('-m がなければ、選び終えたあとにエディタを開く', () => {
+    const repo = run(['git commit -p', 'y'], small())
+    expect(repo.editor?.file).toBe('COMMIT_EDITMSG')
+    expect(output(run([':wq "msg"'], repo), 'git log -1 --format=%s')).toBe('msg')
+  })
+
+  it('何も選ばなければコミットせず、-a とは一緒に使えない', () => {
+    const repo = run(['git commit -p -m m'], small())
+    expect(executeCommand(repo, 'n').ok).toBe(false)
+    expect(executeCommand(small(), 'git commit -p -a').output).toBe("fatal: options '-a' and '-p' cannot be used together")
+  })
+})
+
+describe('git stash -p', () => {
+  it('選んだハンクだけを退避し、ほかの変更は作業ディレクトリに残す', () => {
+    const repo = run(['git stash -p', 'y', 'n', 'n'], changed())
+    expect(repo.workdir['a.txt']).toBe(`${LINES.slice(0, 11).join('\n')}\nL12\n`)
+    expect(repo.workdir['b.txt']).toBe('b\nb2\n')
+    expect(repo.stash).toHaveLength(1)
+    const popped = run(['git checkout -- .', 'git stash pop'], repo)
+    expect(popped.workdir['a.txt']).toBe(`L1\n${LINES.slice(1).join('\n')}\n`)
+  })
+
+  it('何も選ばなければ退避しない', () => {
+    const result = executeCommand(run(['git stash -p'], small()), 'n')
+    expect(result.output).toBe('No changes selected')
+    expect(result.repo.stash).toHaveLength(0)
   })
 })

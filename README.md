@@ -79,7 +79,7 @@ URL のハッシュ (`#s=...`) には状態そのものではなく、モード�
 | `show [<コミット>]` | コミットの内容と差分を表示する |
 | `blame [-L <開始>,<終了>] <ファイル> [<コミット>]` | 各行を最後に変えたコミットを表示する |
 | `add <ファイル>...` / `add .` / `add -A` / `add -f <ファイル>` | 変更をステージする (`.gitignore` で無視しているファイルは `-f` のときだけ) |
-| `add -p` / `restore -p [--staged]` / `reset -p` / `checkout -p` `[<ファイル>...]` | 変更をハンクごとに見せて、ステージする・捨てる・ステージを取り消すかを 1 つずつ尋ねる (下の「-p の質問」も参照) |
+| `add -p` / `commit -p` / `stash -p` / `restore -p [--staged]` / `reset -p` / `checkout -p` `[<ファイル>...]` | 変更をハンクごとに見せて、ステージする・捨てる・ステージを取り消すかを 1 つずつ尋ねる (下の「-p の質問」も参照) |
 | `restore [--staged] [--source=<コミット>] <ファイル>` | 作業ディレクトリ (または ステージ) を戻す |
 | `rm [--cached] [-f] [-r] [--ignore-unmatch] [-q] <ファイル>` | ステージと作業ディレクトリから消す |
 | `mv [-f] [-k] [-n] [-v] <元>... <先>` | 追跡しているファイルの名前を変える・移して、そのことをステージする (`git mv`) |
@@ -88,6 +88,7 @@ URL のハッシュ (`#s=...`) には状態そのものではなく、モード�
 | `commit [-m "…"] [-a] [--allow-empty] [--amend] [--no-edit]` | ステージの内容でコミットする (`-m` がなければエディタが開く) |
 | `commit --fixup=<コミット>` / `--squash=<コミット>` | `rebase --autosquash` でまとめるための `fixup!` / `squash!` のコミットを作る |
 | `branch [<名前> [<起点>]]` / `-d` / `-D` / `-m` / `-u` | ブランチの一覧・作成・削除・名前の変更・upstream の設定 |
+| `branch [-a \| -r] [-v \| -vv] [--merged \| --no-merged \| --contains \| --no-contains [<コミット>]] [--points-at <コミット>] [--list <パターン>...]` | ブランチの一覧を、マージ済みか・コミットを含むかで絞り込む (コミットを省くと HEAD) |
 | `switch --orphan <名前>` / `checkout --orphan <名前>` | 履歴のない新しいブランチに移る (最初のコミットが root commit になる) |
 | `switch <名前>` / `-c <名前> [<起点>]` / `--detach <コミット>` / `switch -` | ブランチを切り替える (リモートにだけあるブランチは追跡ブランチを作る、`-` は直前のブランチ) |
 | `checkout <名前\|コミット>` / `-b <名前>` / `-- <ファイル>` | switch と restore を兼ねる昔からのコマンド |
@@ -95,9 +96,10 @@ URL のハッシュ (`#s=...`) には状態そのものではなく、モード�
 | `rebase [-i] [-r] [-x <コマンド>] [-X ours\|theirs] [--autosquash] [--onto <新しい土台>] [<上流> [<ブランチ>]]` | 現在のブランチのコミットを付け替える (`-i` は todo をエディタで編集する、`-r` / `--rebase-merges` はマージの形を保つ、`--autosquash` は `fixup!` / `squash!` のコミットをまとめる、`--onto` は `<上流>..HEAD` を新しい土台の上に付け替える。`<上流>` を省くと upstream) |
 | `cherry-pick [-e] [-m <親>] [-X …] [--allow-empty] <コミット>...` | コミットの変更を複製する (`-m` でマージコミットも) |
 | `revert [--no-edit] [-m <親>] [-X …] <コミット>...` | コミットの変更を打ち消すコミットを作る |
-| `tag [-a] [-m "…"] [-f] <タグ> [<コミット>]` / `tag -l [<パターン>]` / `tag -d <タグ>` | タグを付ける・一覧を見る・消す |
+| `tag [-a] [-m "…"] [-f] <タグ> [<コミット>]` / `tag -l [<パターン>...] [-n[<数>]]` / `tag -d <タグ>` | タグを付ける・一覧を見る (`-n` で注釈も)・消す |
+| `tag [--contains \| --no-contains \| --merged \| --no-merged [<コミット>]] [--points-at <コミット>]` | タグの一覧を、コミットを含むか・たどれるかで絞り込む |
 | `reset [--soft \| --mixed \| --hard] [<コミット>]` / `reset <ファイル>` | ブランチを移動する / ステージを戻す |
-| `stash [push] [-m "…"] [-u \| -a] [-k]` / `stash list` / `stash show [-p]` | 変更を退避する・一覧を見る (`-a` は無視しているファイルも) |
+| `stash [push] [-m "…"] [-u \| -a] [-k]` / `stash -p` / `stash list` / `stash show [-p]` | 変更を退避する・一覧を見る (`-a` は無視しているファイルも) |
 | `stash apply [--index]` / `stash pop [--index]` / `stash drop` / `stash clear` / `stash branch <名前>` | 退避した変更を戻す・消す |
 | `bisect start [<bad> [<good>...]]` / `good` / `bad` / `skip` / `reset` / `log` / `run <コマンド>` | 二分探索でバグを入れたコミットを探す (`new` / `old` も可) |
 | `config <キー> [<値>]` / `config --unset <キー>` / `config --list` | 設定を読み書きする (`rerere.enabled`・`rerere.autoUpdate`・`pull.rebase`・`pull.ff`・`merge.ff` が働く) |
@@ -153,7 +155,8 @@ URL のハッシュ (`#s=...`) には状態そのものではなく、モード�
 `log` は次のオプションに対応しています。`--graph` は本物と同じく topo-order で並べ、`*`・`|\`・`|/`・octopus の `*-.` で線を描きます。
 
 - 範囲: `A..B`・`A...B`・`^A`、`--all`・`--branches`・`--tags`・`--remotes`
-- 絞り込み: `-n <数>` / `-<数>`、`--first-parent`、`--merges` / `--no-merges`、`--grep=<パターン>` (`--invert-grep`)、`--author=<パターン>`、`-- <パス>`
+- 絞り込み: `-n <数>` / `-<数>`、`--first-parent`、`--merges` / `--no-merges`、`--grep=<パターン>` (`--invert-grep`)、`--author=<パターン>`、`-i`、
+  `-S<文字列>` (`--pickaxe-regex`) / `-G<正規表現>` (変更の中身で探す。`-p` では一致したファイルの差分だけを出し、`--pickaxe-all` ならすべて)、`-- <パス>`
 - 表示: `--oneline`、`--pretty=oneline|short|medium|full`、`--format=<書式>` (`%h` `%H` `%s` `%an` `%b` `%B` `%d` `%D` `%p` `%P` `%N` `%n`)、
   `-p`・`--stat`・`--name-only`、`--reverse`、`--no-decorate`、`--no-notes`
 
@@ -211,10 +214,12 @@ chmod +x .git/hooks/commit-msg
 | `y` / `n` | このハンクをする / しない |
 | `a` / `d` | このハンクと、このファイルの残りのハンクをすべてする / しない |
 | `s` | このハンクを小さなハンクに分ける (近くにある変更どうしをまとめたハンクのとき) |
+| `e` | このハンクをエディタで手で直す (`add -p` と `commit -p` のとき)。`-` の行を残すなら先頭を空白に、`+` の行を足さないならその行を消す |
 | `q` | 終わる (残りのハンクはすべて「しない」) |
 | `?` | ヘルプを表示する |
 
 `add -p` は y のハンクをステージし、`restore -p` は y のハンクを作業ディレクトリから捨て、`restore -p --staged` と `reset -p` は y のハンクのステージを取り消します。
+`commit -p` は y のハンクをステージしてからコミットし、`stash -p` は y のハンクだけを退避して、ほかの変更は作業ディレクトリに残します。
 追跡していないファイルは尋ねません。
 
 ### .gitignore
@@ -283,7 +288,8 @@ chmod +x .git/hooks/commit-msg
 - `config` は 1 つだけで、`--global` と `--local` を区別しません。
 - `rerere` は、本物はコンフリクトの箇所 (hunk) ごとに解決を覚えますが、ここではファイル全体の内容で覚えます。
 - `blame` には作者と日時がなく、コミット ID と件名を表示します。
-- `-p` の質問の `e` (ハンクを手で直す)・`j` / `k` / `g` / `/` (移動と検索) と、`clean -i`・`stash -p`・`commit -p` は未対応です。質問の文は日本語です。
+- `-p` の質問の `j` / `k` / `g` / `/` (移動と検索) と、`clean -i` は未対応です。`e` は `add -p` と `commit -p` のときだけ使えます。質問の文は日本語です。
+- `commit -p` は、選んだ変更を本当のステージに入れます (本物は一時的なステージを使うので、コミットを中止するとステージは元のままです)。
 - `.gitignore` は作業ディレクトリのものだけで、`.git/info/exclude` と `core.excludesFile` は読みません。`bisect run` のコマンドはこのアプリのコマンドで、成功なら good、失敗なら bad です
   (先頭に `!` を付けると逆になります)。
 - `stash` は本物ではコミットとして保存されますが、ここでは別に持ち、グラフには描きません。
@@ -312,6 +318,7 @@ src/
     bisect.ts      bisect
     stash.ts       stash
     tag.ts         tag
+    refFilter.ts   branch / tag の --merged / --contains
     remote.ts      remote / push / fetch / pull と teammate
     config.ts      config
     rerere.ts      rerere
@@ -328,7 +335,7 @@ src/
     replace.ts     replace と、置き換えを反映して読むための Repo の変換
     refs.ts        update-ref / for-each-ref / show-ref
     filterBranch.ts filter-branch
-    hunks.ts       add -p / restore -p / reset -p / checkout -p の質問 (Repo.prompt)
+    hunks.ts       add -p / commit -p / stash -p / restore -p / reset -p / checkout -p の質問 (Repo.prompt)
     ignore.ts      .gitignore
     clean.ts       clean / mv / check-ignore
     describe.ts    describe / shortlog / git grep
@@ -364,6 +371,6 @@ Vite として自動で認識されるので、設定ファイルはありませ
 
 ## 今後の拡張案
 
-- `commit -p` / `stash -p` と、`-p` の質問の `e` (ハンクを手で直す)
-- `log -S` / `-G` (変更の中身でコミットを探す)
-- `branch --merged` / `--contains` と `tag --contains`
+- `rebase --update-refs` / `--autostash` (`pull --autostash` も)
+- `merge.conflictStyle = diff3` / `zdiff3` と `checkout --conflict=diff3`
+- `log -L` (行の範囲の履歴) と `diff --word-diff`
