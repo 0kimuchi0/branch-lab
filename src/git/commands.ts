@@ -71,7 +71,7 @@ import { findHelp, formatHelp, formatHelpIndex } from '../help/commands'
 import { filterBranch, type FilterBranchOptions, type FilterRunner } from './filterBranch'
 import { fsck, gc, notesPrune, prune, reflogDelete, reflogExpire } from './gc'
 import { forEachRef, showRef, updateRef } from './refs'
-import { replaceAdd, replaceDelete, replaceGraft, replaceList, restoreOriginals, withReplacements } from './replace'
+import { replaceAdd, replaceDelete, replaceGraft, replaceList, globToRegExp, restoreOriginals, withReplacements } from './replace'
 import {
   activeRepo,
   removeSubmodule,
@@ -90,6 +90,7 @@ import { changeDirectory, duplicateLocation, worktreeAdd, worktreeList, worktree
 import { bisectLog, bisectMark, bisectReset, bisectRunning, bisectStart } from './bisect'
 import { blame, gitDiff, show } from './inspect'
 import { createTag, deleteTags, listTags } from './tag'
+import { hasFilter, refMatcher, type RefFilter } from './refFilter'
 import {
   addRemote,
   fetch,
@@ -345,10 +346,16 @@ function runCommit(repo: Repo, args: readonly string[]): OperationResult {
   // -am "msg" は -a -m "msg" と同じ
   const expanded = args.flatMap((arg) => (/^-[a-z]{2,}$/.test(arg) ? [...arg.slice(1)].map((c) => `-${c}`) : [arg]))
   const parsed = parseArgs(expanded, {
-    flags: ['-a', '--allow-empty', '--amend', '--no-edit', '--no-verify'],
+    flags: ['-a', '--allow-empty', '--amend', '--no-edit', '--no-verify', '-p'],
     values: ['-m', '--fixup', '--squash'],
-    aliases: { '--all': '-a', '--message': '-m', '-n': '--no-verify' },
+    aliases: { '--all': '-a', '--message': '-m', '-n': '--no-verify', '--patch': '-p' },
   })
+  // -p: 変更をハンクごとに選んでステージしてから、その内容でコミットする
+  if (parsed.flags.has('-p')) {
+    if (parsed.flags.has('-a')) throw new GitError("fatal: options '-a' and '-p' cannot be used together")
+    const rest = expanded.filter((arg) => arg !== '-p' && arg !== '--patch')
+    return startPatch(repo, 'stage', 'git commit -p', [], { kind: 'commit', args: rest })
+  }
   atMost(parsed, 0, 'git commit [-a] [-m "メッセージ"] [--allow-empty] [--amend] [--no-edit] [--fixup=<コミット>] [--squash=<コミット>]')
   // -m を複数書くと、それぞれが段落になる
   const messages = parsed.allValues.get('-m')
@@ -406,12 +413,57 @@ function runCommit(repo: Repo, args: readonly string[]): OperationResult {
   return { repo: post.repo, output: [...lines, result.output, ...post.lines].filter(Boolean).join('\n') }
 }
 
+/**
+ * --merged などの、値を省略できるオプション (省略すると HEAD)。本物と同じく、後ろに引数があればそれを値にする。
+ */
+function optionalCommitValues(args: readonly string[], names: readonly string[]): string[] {
+  const result: string[] = []
+  for (let i = 0; i < args.length; i++) {
+    const arg = args[i] as string
+    if (arg === '--') {
+      result.push(...args.slice(i))
+      break
+    }
+    if (names.includes(arg)) {
+      const next = args[i + 1]
+      result.push(`${arg}=${next ?? 'HEAD'}`)
+      if (next !== undefined) i++
+    } else result.push(arg)
+  }
+  return result
+}
+
+const REF_FILTERS = ['--merged', '--no-merged', '--contains', '--no-contains', '--points-at'] as const
+
+function refFilterOf(parsed: ParsedArgs): RefFilter {
+  const get = (name: string) => parsed.allValues.get(name) ?? []
+  return {
+    merged: get('--merged'),
+    noMerged: get('--no-merged'),
+    contains: get('--contains'),
+    noContains: get('--no-contains'),
+    pointsAt: get('--points-at'),
+  }
+}
+
+function globMatcher(patterns: readonly string[]): ((name: string) => boolean) | undefined {
+  if (patterns.length === 0) return undefined
+  const regexes = patterns.map((pattern) => globToRegExp(pattern))
+  return (name) => regexes.some((regex) => regex.test(name))
+}
+
 function runBranch(repo: Repo, args: readonly string[]): OperationResult {
-  const parsed = parseArgs(args, {
-    flags: ['-d', '-D', '-m', '-a', '-r', '--list'],
-    values: ['-u'],
-    aliases: { '--delete': '-d', '--move': '-m', '--all': '-a', '--remotes': '-r', '--set-upstream-to': '-u' },
-  })
+  // -vv は -v を 2 回と同じ
+  const expanded = optionalCommitValues(args, ['--merged', '--no-merged', '--contains', '--no-contains']).flatMap((arg) => (arg === '-vv' ? ['-v', '-v'] : [arg]))
+  const verbose = expanded.filter((arg) => arg === '-v' || arg === '--verbose').length
+  const parsed = parseArgs(
+    expanded.filter((arg) => arg !== '-v' && arg !== '--verbose'),
+    {
+      flags: ['-d', '-D', '-m', '-a', '-r', '--list'],
+      values: ['-u', ...REF_FILTERS],
+      aliases: { '--delete': '-d', '--move': '-m', '--all': '-a', '--remotes': '-r', '--set-upstream-to': '-u', '-l': '--list' },
+    },
+  )
   const [first, second] = parsed.positional
   const upstream = parsed.values.get('-u')
   if (upstream !== undefined) {
@@ -439,8 +491,20 @@ function runBranch(repo: Repo, args: readonly string[]): OperationResult {
     }
     return renameBranch(repo, first, second)
   }
-  if (first === undefined || parsed.flags.has('--list')) {
-    return { repo, output: listBranches(repo, { remotes: parsed.flags.has('-a') || parsed.flags.has('-r') }) }
+  // 絞り込み・-a・-r・-v があれば一覧 (位置引数は名前のパターン)
+  const filter = refFilterOf(parsed)
+  const listing = first === undefined || parsed.flags.has('--list') || hasFilter(filter) || parsed.flags.has('-a') || parsed.flags.has('-r') || verbose > 0
+  if (listing) {
+    const named = globMatcher(parsed.positional)
+    return {
+      repo,
+      output: listBranches(repo, {
+        which: parsed.flags.has('-a') ? 'all' : parsed.flags.has('-r') ? 'remotes' : 'local',
+        verbose,
+        filter: refMatcher(repo, filter),
+        ...(named === undefined ? {} : { named }),
+      }),
+    }
   }
   atMost(parsed, 2, 'git branch <名前> [<起点>]')
   return createBranch(repo, first, second)
@@ -623,16 +687,25 @@ function runBisect(repo: Repo, args: readonly string[], raw: string): OperationR
 }
 
 function runTag(repo: Repo, args: readonly string[]): OperationResult {
-  const parsed = parseArgs(args, {
-    flags: ['-a', '-d', '-f', '-l'],
-    values: ['-m'],
-    aliases: { '--annotate': '-a', '--delete': '-d', '--force': '-f', '--list': '-l', '--message': '-m' },
-  })
+  // -n<数> は注釈の行数 (-n だけなら 1 行)
+  const expanded = optionalCommitValues(args, ['--merged', '--no-merged', '--contains', '--no-contains']).map((arg) => (arg === '-n' ? '-n1' : arg))
+  const lines = expanded.find((arg) => /^-n\d+$/.test(arg))
+  const parsed = parseArgs(
+    expanded.filter((arg) => !/^-n\d+$/.test(arg)),
+    {
+      flags: ['-a', '-d', '-f', '-l'],
+      values: ['-m', ...REF_FILTERS],
+      aliases: { '--annotate': '-a', '--delete': '-d', '--force': '-f', '--list': '-l', '--message': '-m' },
+    },
+  )
   if (parsed.flags.has('-d')) return deleteTags(repo, parsed.positional)
   const [name, target, ...rest] = parsed.positional
-  if (name === undefined || parsed.flags.has('-l')) {
-    atMost(parsed, 1, 'git tag -l [<パターン>]')
-    return listTags(repo, name)
+  const filter = refFilterOf(parsed)
+  if (name === undefined || parsed.flags.has('-l') || hasFilter(filter) || lines !== undefined) {
+    return listTags(repo, parsed.positional, {
+      filter: refMatcher(repo, filter),
+      ...(lines === undefined ? {} : { lines: Number(lines.slice(2)) }),
+    })
   }
   if (rest.length > 0) usage('git tag [-a] [-m "メッセージ"] [-f] <タグ> [<コミット>]')
   const message = parsed.values.get('-m')
@@ -650,10 +723,17 @@ function runStash(repo: Repo, args: readonly string[]): OperationResult {
     case 'push':
     case 'save': {
       const parsed = parseArgs(rest, {
-        flags: ['-u', '-k', '-a'],
+        flags: ['-u', '-k', '-a', '-p'],
         values: ['-m'],
-        aliases: { '--include-untracked': '-u', '--keep-index': '-k', '--message': '-m', '--all': '-a' },
+        aliases: { '--include-untracked': '-u', '--keep-index': '-k', '--message': '-m', '--all': '-a', '--patch': '-p' },
       })
+      // -p: 退避する変更をハンクごとに選ぶ
+      if (parsed.flags.has('-p')) {
+        if (parsed.flags.has('-u') || parsed.flags.has('-a')) throw new GitError("fatal: options '--patch' and '--include-untracked' cannot be used together")
+        const message = parsed.values.get('-m')
+        const paths = [...(sub === 'push' ? parsed.positional : []), ...(parsed.paths ?? [])]
+        return startPatch(repo, 'stash', 'git stash -p', paths, { kind: 'stash', ...(message === undefined ? {} : { message }) })
+      }
       if (parsed.paths !== null || (sub === 'push' && parsed.positional.length > 0)) {
         throw new GitError('ファイルを指定した git stash push はこのアプリでは未対応です')
       }
@@ -926,15 +1006,18 @@ function runNotes(repo: Repo, args: readonly string[]): OperationResult {
 
 function runLog(repo: Repo, args: readonly string[]): OperationResult {
   // -3 は -n 3 と同じ。--pretty だけなら medium
-  const expanded = args.flatMap((arg) => (/^-\d+$/.test(arg) ? ['-n', arg.slice(1)] : arg === '--pretty' ? ['--pretty=medium'] : [arg]))
+  // -Sfoo / -Gfoo は -S foo / -G foo と同じ
+  const expanded = args.flatMap((arg) =>
+    /^-\d+$/.test(arg) ? ['-n', arg.slice(1)] : arg === '--pretty' ? ['--pretty=medium'] : /^-[SG]./.test(arg) ? [arg.slice(0, 2), arg.slice(2)] : [arg],
+  )
   const parsed = parseArgs(expanded, {
     flags: [
       '--oneline', '--all', '--branches', '--tags', '--remotes', '--graph', '--reverse', '--first-parent',
       '--merges', '--no-merges', '--decorate', '--no-decorate', '-p', '--stat', '--name-only', '--invert-grep',
-      '--topo-order', '--date-order', '--abbrev-commit', '--no-notes', '--notes',
+      '--topo-order', '--date-order', '--abbrev-commit', '--no-notes', '--notes', '-i', '--pickaxe-regex', '--pickaxe-all',
     ],
-    values: ['-n', '--format', '--pretty', '--grep', '--author'],
-    aliases: { '--max-count': '-n', '--patch': '-p', '-u': '-p' },
+    values: ['-n', '--format', '--pretty', '--grep', '--author', '-S', '-G'],
+    aliases: { '--max-count': '-n', '--patch': '-p', '-u': '-p', '--regexp-ignore-case': '-i' },
   })
   const count = parsed.values.get('-n')
   if (count !== undefined && !/^\d+$/.test(count)) throw new GitError(`fatal: '${count}' は数ではありません`)
@@ -960,6 +1043,11 @@ function runLog(repo: Repo, args: readonly string[]): OperationResult {
     ...(parsed.flags.has('--merges') ? { merges: true } : parsed.flags.has('--no-merges') ? { merges: false } : {}),
     ...(grep === undefined ? {} : { grep }),
     ...(parsed.values.has('--author') ? { author: parsed.values.get('--author') as string } : {}),
+    ...(parsed.values.has('-S') ? { pickaxe: parsed.values.get('-S') as string } : {}),
+    ...(parsed.values.has('-G') ? { pickaxeGrep: parsed.values.get('-G') as string } : {}),
+    ignoreCase: parsed.flags.has('-i'),
+    pickaxeRegex: parsed.flags.has('--pickaxe-regex'),
+    pickaxeAll: parsed.flags.has('--pickaxe-all'),
     invertGrep: parsed.flags.has('--invert-grep'),
     paths,
     patch: parsed.flags.has('-p'),
@@ -2416,22 +2504,38 @@ function runRedirected(repo: Repo, input: string, tokens: readonly Token[], redi
   }
 }
 
-function executeOnce(repo: Repo, input: string): CommandResult {
-  // git add -p などの質問に答えている間は、入力をすべて答えとして読む
-  if (repo.prompt !== null) {
-    try {
-      return { ...answerPatch(repo, input), ok: true }
-    } catch (error) {
-      if (error instanceof GitError) return { repo, output: error.message, ok: false }
-      throw error
-    }
+/** commit -p の質問に答え終わったら、選んだ変更でコミットする (メッセージがなければエディタが開く)。 */
+function continueAfterPrompt(before: Repo, result: CommandResult): CommandResult {
+  const then = before.prompt?.then
+  if (then?.kind !== 'commit' || result.repo.prompt !== null || result.repo.editor !== null || !result.ok) return result
+  try {
+    const committed = runGit(result.repo, 'commit', then.args, `git commit ${then.args.join(' ')}`)
+    return { repo: committed.repo, output: [result.output, committed.output].filter(Boolean).join('\n'), ok: true }
+  } catch (error) {
+    if (error instanceof GitError) return { repo: result.repo, output: [result.output, error.message].filter(Boolean).join('\n'), ok: false }
+    throw error
   }
-  if (input.startsWith(EDITOR_SAVE)) return runEditorSave(repo, input)
+}
+
+function executeOnce(repo: Repo, input: string): CommandResult {
+  // エディタ (add -p の e で開いたものも) が開いていれば、保存して閉じるまで待つ
+  if (input.startsWith(EDITOR_SAVE) && (repo.editor !== null || repo.prompt === null)) {
+    return continueAfterPrompt(repo, runEditorSave(repo, input))
+  }
   if (repo.editor && input.trim() !== '') {
     return {
       repo,
       output: `エディタで ${repo.editor.file} を開いています。先に「保存して閉じる」を押してください`,
       ok: false,
+    }
+  }
+  // git add -p などの質問に答えている間は、入力をすべて答えとして読む
+  if (repo.prompt !== null) {
+    try {
+      return continueAfterPrompt(repo, { ...answerPatch(repo, input), ok: true })
+    } catch (error) {
+      if (error instanceof GitError) return { repo, output: error.message, ok: false }
+      throw error
     }
   }
   const tokens = lex(input)

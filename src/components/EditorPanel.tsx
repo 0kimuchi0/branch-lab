@@ -12,6 +12,8 @@ const HINTS: Readonly<Record<Editor['file'], string>> = {
   MERGE_MSG: 'マージコミットのメッセージです。そのまま閉じれば既定のメッセージになります。',
   TAG_EDITMSG: '注釈付きタグのメッセージを書きます。# で始まる行は無視されます。',
   NOTES_EDITMSG: 'コミットに付けるメモを書きます。# で始まる行は無視され、空にするとメモを削除します。',
+  'ADD_EDIT.patch':
+    'git add -p の e で開いたハンクです。- の行を残すなら先頭を空白に、+ の行を足さないならその行を消します。保存して閉じると、直した内容をステージします。',
   'git-rebase-todo':
     '各行の pick を reword / edit / squash / fixup / drop に書き換えたり、行を並べ替えたりできます。上から順に実行されます。',
 }

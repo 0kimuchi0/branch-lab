@@ -2,6 +2,7 @@
  * 履歴を組み替える操作 (merge・cherry-pick・revert・rebase・rebase -i) と、
  * コンフリクトで止まったときの --continue / --abort / --skip、エディタを閉じたあとの続き。
  */
+import { finishHunkEdit } from './hunks'
 import {
   EDITOR_WAITING,
   GitError,
@@ -1208,6 +1209,7 @@ export function saveEditor(repo: Repo, text?: string): OperationResult {
     return finishTag({ ...repo, editor: null }, after.name, after.target, content)
   }
   if (after.kind === 'note') return finishNote({ ...repo, editor: null }, after.target, content)
+  if (after.kind === 'hunk') return finishHunkEdit({ ...repo, editor: null }, content)
 
   if (after.kind === 'todo') {
     const items = parseTodo(repo, content)

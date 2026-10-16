@@ -33,7 +33,7 @@ React + TypeScript + Vite、テストは Vitest。UI の文言は日本語。
 - `src/git/bundle.ts`: bundle。バンドルは作業ディレクトリのファイルで、clone・fetch・pull の元にできる。
   `git switch --orphan` のあとの「まだコミットのないブランチ」は、HEAD がまだないブランチを指す状態で表す (`headCommitIdOrNull`)。
 - `src/git/inspect.ts`: diff / show / blame。`src/git/bisect.ts`: bisect (状態は `Repo.bisect`)。`src/git/stash.ts`: stash (コミットにはせず `Repo.stash` に持つ)。
-  `src/git/tag.ts`: tag。
+  `src/git/tag.ts`: tag。`src/git/refFilter.ts`: branch / tag の一覧の --merged / --contains / --points-at。
 - reflog: HEAD やブランチを動かす処理は `logRefs(before, after, メッセージ)` で `Repo.reflogs` に記録する
   (コミットは `createCommit` が `PendingCommit.reflogAction` を使って記録する)。メッセージは本物の Git と同じ形にする。
 - rebase -i の exec は、`history.ts` では todo に残したまま止まり、`commands.ts` の `runPendingExec` が実行して続ける。
@@ -57,8 +57,10 @@ React + TypeScript + Vite、テストは Vitest。UI の文言は日本語。
   (`withReplacements`) でコマンドを実行し、結果のコミットを元に戻す (`restoreOriginals`)。gc・push などの `RAW_COMMANDS` は元のまま。
 - `src/git/filterBranch.ts`: filter-branch。フィルタは `commands.ts` の `runFilter` で実行し、`--msg-filter` などの標準入力は
   `stdinText` で cat・sed・grep に渡す。元の参照は `Repo.originalRefs` (`refs/original/...`)。`src/git/refs.ts`: update-ref / for-each-ref / show-ref。
-- `src/git/hunks.ts`: add -p / restore -p / reset -p / checkout -p。質問の状態は `Repo.prompt` (`PatchPrompt`) で、
+- `src/git/hunks.ts`: add -p / commit -p / stash -p / restore -p / reset -p / checkout -p。質問の状態は `Repo.prompt` (`PatchPrompt`) で、
   開いている間は `executeOnce` が入力をすべて答えとして `answerPatch` に渡す (エディタと同じく、ログと共有 URL で再現できる)。
+  `e` はエディタ (`ADD_EDIT.patch`、閉じたあとは `finishHunkEdit`) で直したハンクを `PatchFile.edits` に持つ。
+  commit -p は選び終えたら `PatchPrompt.then` のコミットを `continueAfterPrompt` が実行する。
 - `src/git/ignore.ts`: .gitignore (`isIgnored`)。status・add・stash・clean・画面のファイル一覧が使う。
   `src/git/clean.ts`: clean / mv / check-ignore。`src/git/describe.ts`: describe / shortlog / git grep。
 - コミットの作者は `Commit.author` (`git config user.name`、なければ `DEFAULT_AUTHOR`)。コピー (`source` のあるコミット) と --amend は元の作者のまま (`createCommit`)。
@@ -99,6 +101,6 @@ main に push すると https://branch-lab-dun.vercel.app にデプロイされ�
 
 ## 今後の予定
 
-- `commit -p` / `stash -p` と、`-p` の質問の `e` (ハンクを手で直す)
-- `log -S` / `-G` (変更の中身でコミットを探す)
-- `branch --merged` / `--contains` と `tag --contains`
+- `rebase --update-refs` / `--autostash` (`pull --autostash` も)
+- `merge.conflictStyle = diff3` / `zdiff3` と `checkout --conflict=diff3`
+- `log -L` (行の範囲の履歴) と `diff --word-diff`

@@ -312,7 +312,7 @@ export default function App() {
               onSelect={selectPuzzle}
             />
           )}
-          {active.prompt && <PromptPanel prompt={active.prompt} onAnswer={run} />}
+          {active.prompt && !active.editor && <PromptPanel prompt={active.prompt} onAnswer={run} />}
           {active.editor && (
             <EditorPanel
               key={`${nextLogId}:${active.editor.text}`}

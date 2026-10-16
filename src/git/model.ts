@@ -228,6 +228,8 @@ export type AfterEdit =
     }
   /** git notes add / edit でメッセージを書いた場合。 */
   | { readonly kind: 'note'; readonly target: CommitId }
+  /** git add -p の e: 直したハンクを読んで、質問の続きに戻る。 */
+  | { readonly kind: 'hunk' }
   /** rebase -i の todo を読んで rebase を始める。 */
   | {
       readonly kind: 'todo'
@@ -241,14 +243,14 @@ export type AfterEdit =
 /** 開いているエディタ。Git がエディタを開いて、閉じられるのを待っている状態。 */
 export interface Editor {
   /** 編集しているファイルの名前 (表示用)。 */
-  readonly file: 'COMMIT_EDITMSG' | 'MERGE_MSG' | 'TAG_EDITMSG' | 'NOTES_EDITMSG' | 'git-rebase-todo'
+  readonly file: 'COMMIT_EDITMSG' | 'MERGE_MSG' | 'TAG_EDITMSG' | 'NOTES_EDITMSG' | 'git-rebase-todo' | 'ADD_EDIT.patch'
   /** エディタを開いたときの内容。 */
   readonly text: string
   readonly after: AfterEdit
 }
 
 /** git add -p などで、何をするか (ステージする・ステージを取り消す・作業ディレクトリの変更を捨てる)。 */
-export type PatchMode = 'stage' | 'unstage' | 'discard'
+export type PatchMode = 'stage' | 'unstage' | 'discard' | 'stash'
 
 /** git add -p などで扱う 1 つのファイル。from → to の変更をハンクに分けて尋ねる。 */
 export interface PatchFile {
@@ -261,6 +263,8 @@ export interface PatchFile {
   readonly hunks: ReadonlyArray<readonly number[]>
   /** ブロックごとの答え (true なら「する」)。 */
   readonly answers: Readonly<Record<number, boolean>>
+  /** e で手で直したハンク: 差分 (from と to の編集手順) の start〜end の範囲を、lines の内容にする。 */
+  readonly edits?: ReadonlyArray<{ readonly start: number; readonly end: number; readonly lines: readonly string[] }>
 }
 
 /** git add -p / restore -p / reset -p / checkout -p で、ハンクごとの答えを待っている状態。 */
@@ -272,6 +276,8 @@ export interface PatchPrompt {
   /** 今尋ねているファイルとハンクの位置。 */
   readonly file: number
   readonly hunk: number
+  /** 答え終わったあとに続けること (commit -p のコミット、stash -p のメッセージ)。 */
+  readonly then?: { readonly kind: 'commit'; readonly args: readonly string[] } | { readonly kind: 'stash'; readonly message?: string }
 }
 
 /** git stash で退避した変更。 */
@@ -1517,21 +1523,64 @@ export function createBranch(repo: Repo, name: string, startPoint = 'HEAD'): Ope
   }
 }
 
-export function listBranches(repo: Repo, options: { readonly remotes?: boolean } = {}): string {
+export interface ListBranchesOptions {
+  /** all: ローカルとリモート追跡ブランチ (-a)、remotes: リモート追跡ブランチだけ (-r)。 */
+  readonly which?: 'local' | 'all' | 'remotes'
+  /** -v なら 1、-vv なら 2 (upstream と、進んでいる・遅れている数も出す)。 */
+  readonly verbose?: number
+  /** --merged / --contains などの絞り込み。 */
+  readonly filter?: (id: CommitId) => boolean
+  /** --list <パターン>...: 名前で絞り込む。 */
+  readonly named?: (name: string) => boolean
+}
+
+/** git branch [-a | -r] [-v | -vv] [--list <パターン>...] の一覧。 */
+export function listBranches(repo: Repo, options: ListBranchesOptions = {}): string {
+  const which = options.which ?? 'local'
+  const filter = options.filter ?? (() => true)
+  const named = options.named ?? (() => true)
   const current = currentBranch(repo)
-  const lines: string[] = []
-  if (repo.head.type === 'detached') lines.push(`* (HEAD detached at ${repo.head.id})`)
-  for (const name of Object.keys(repo.branches).sort()) {
-    // ほかの worktree でチェックアウトしているブランチには + を付ける (Git と同じ)
-    const mark = name === current ? '*' : branchWorktree(repo, name) !== null ? '+' : ' '
-    lines.push(`${mark} ${name}`)
+  const entries: Array<{ mark: string; name: string; id: CommitId; upstream?: string }> = []
+  if (which !== 'remotes' && repo.head.type === 'detached' && filter(repo.head.id) && options.named === undefined) {
+    entries.push({ mark: '*', name: `(HEAD detached at ${repo.head.id})`, id: repo.head.id })
   }
-  if (options.remotes) {
-    for (const name of Object.keys(repo.remoteBranches).sort()) {
-      lines.push(`  remotes/${name}`)
+  if (which !== 'remotes') {
+    for (const name of Object.keys(repo.branches).sort()) {
+      const id = repo.branches[name] as CommitId
+      if (!filter(id) || !named(name)) continue
+      // ほかの worktree でチェックアウトしているブランチには + を付ける (Git と同じ)
+      const mark = name === current ? '*' : branchWorktree(repo, name) !== null ? '+' : ' '
+      const upstream = repo.upstreams[name]
+      entries.push({ mark, name, id, ...(upstream === undefined ? {} : { upstream }) })
     }
   }
-  return lines.join('\n')
+  if (which !== 'local') {
+    for (const name of Object.keys(repo.remoteBranches).sort()) {
+      const id = repo.remoteBranches[name] as CommitId
+      if (!filter(id) || !named(name)) continue
+      entries.push({ mark: ' ', name: which === 'all' ? `remotes/${name}` : name, id })
+    }
+  }
+  const verbose = options.verbose ?? 0
+  if (verbose === 0) return entries.map(({ mark, name }) => `${mark} ${name}`).join('\n')
+  const width = Math.max(0, ...entries.map(({ name }) => name.length))
+  return entries
+    .map(({ mark, name, id, upstream }) => {
+      let tracking = ''
+      if (verbose >= 2 && upstream !== undefined) {
+        const remoteId = repo.remoteBranches[upstream]
+        if (remoteId === undefined) tracking = `[${upstream}: gone] `
+        else {
+          const counts = [
+            ...(countOnly(repo, id, remoteId) > 0 ? [`ahead ${countOnly(repo, id, remoteId)}`] : []),
+            ...(countOnly(repo, remoteId, id) > 0 ? [`behind ${countOnly(repo, remoteId, id)}`] : []),
+          ]
+          tracking = `[${upstream}${counts.length > 0 ? `: ${counts.join(', ')}` : ''}] `
+        }
+      }
+      return `${mark} ${name.padEnd(width)} ${id} ${tracking}${subject(getCommit(repo, id).message)}`
+    })
+    .join('\n')
 }
 
 export function deleteBranch(repo: Repo, name: string, force = false): OperationResult {

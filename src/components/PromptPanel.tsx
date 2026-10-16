@@ -1,3 +1,4 @@
+import { canEdit } from '../git/hunks'
 import type { PatchPrompt } from '../git/model'
 
 interface PromptPanelProps {
@@ -10,6 +11,7 @@ const MODE_TEXT: Readonly<Record<PatchPrompt['mode'], string>> = {
   stage: 'ステージする',
   unstage: 'ステージを取り消す',
   discard: '作業ディレクトリから捨てる',
+  stash: 'stash に退避する',
 }
 
 /** git add -p などの質問。ターミナルに答えを入力するか、ボタンで答える。 */
@@ -23,6 +25,7 @@ export function PromptPanel({ prompt, onAnswer }: PromptPanelProps) {
     ['a', 'このファイルの残りはすべて「はい」'],
     ['d', 'このファイルの残りはすべて「いいえ」'],
     ...((file.hunks[prompt.hunk]?.length ?? 0) > 1 ? [['s', '小さなハンクに分ける'] as const] : []),
+    ...(canEdit(prompt) ? [['e', '手で直す'] as const] : []),
     ['q', '終わる'],
     ['?', 'ヘルプ'],
   ]
