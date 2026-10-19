@@ -123,7 +123,7 @@ const MBOX_FROM = /^From (\S+) Mon Sep 17 00:00:00 2001$/
 /** unified 形式の差分 (diff --git から) を読む。 */
 export function parseDiff(text: string): FilePatch[] {
   const files: FilePatch[] = []
-  let file: { path: string; newFile: boolean; deleted: boolean; hunks: Hunk[] } | null = null
+  let file: { path: string; newFile: boolean; deleted: boolean; gitlink: boolean; hunks: Hunk[] } | null = null
   let hunk: { oldStart: number; oldCount: number; newStart: number; newCount: number; lines: Hunk['lines'][number][] } | null = null
   const finish = () => {
     if (file) files.push({ ...file })
@@ -132,7 +132,7 @@ export function parseDiff(text: string): FilePatch[] {
     const header = /^diff --git a\/(.+) b\/(.+)$/.exec(line)
     if (header) {
       finish()
-      file = { path: header[2] as string, newFile: false, deleted: false, hunks: [] }
+      file = { path: header[2] as string, newFile: false, deleted: false, gitlink: false, hunks: [] }
       hunk = null
       continue
     }
@@ -142,8 +142,11 @@ export function parseDiff(text: string): FilePatch[] {
       hunk = null
       continue
     }
-    if (line.startsWith('new file mode')) file.newFile = true
-    else if (line.startsWith('deleted file mode')) file.deleted = true
+    if (line.startsWith('new file mode')) {
+      file.newFile = true
+      file.gitlink = line.endsWith(' 160000')
+    } else if (line.startsWith('deleted file mode')) file.deleted = true
+    else if (/^index \S+ 160000$/.test(line)) file.gitlink = true
     else if (line.startsWith('--- ') || line.startsWith('+++ ')) continue
     else if (line.startsWith('@@')) {
       const match = /^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@/.exec(line)
@@ -254,7 +257,8 @@ function applyFile(old: string | undefined, file: FilePatch): { text: string | u
   const text = out.join('')
   // サブモジュール (gitlink) の差分は "Subproject commit <ID>" の 1 行として当てる
   const sub = /^Subproject commit (\S+)\n$/.exec(text)
-  return { text: sub && old !== undefined && displayContent(old) !== old ? gitlink(sub[1] as string) : text }
+  const wasGitlink = old !== undefined && displayContent(old) !== old
+  return { text: sub && (wasGitlink || file.gitlink) ? gitlink(sub[1] as string) : text }
 }
 
 /** tree にパッチを当てる。当てられなければ、Git と同じ形のエラーの行を返す。 */
