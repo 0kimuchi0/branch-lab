@@ -3,6 +3,7 @@ import {
   EDITOR_WAITING,
   GitError,
   cleanupMessage,
+  getCommit,
   openEditor,
   requireNoEditor,
   resolveRef,
@@ -89,13 +90,30 @@ function globToRegExp(pattern: string): RegExp {
   return new RegExp(`^${escaped}$`)
 }
 
-/** git tag / git tag -l [<パターン>]: タグの一覧を名前順に表示する。 */
-export function listTags(repo: Repo, pattern?: string): OperationResult {
-  const matcher = pattern === undefined ? null : globToRegExp(pattern)
+export interface ListTagsOptions {
+  /** --contains / --merged などの絞り込み (タグの指すコミットで判定する)。 */
+  readonly filter?: (id: CommitId) => boolean
+  /** -n<数>: 注釈 (軽量タグならコミットメッセージ) を何行出すか。 */
+  readonly lines?: number
+}
+
+/** git tag -l [<パターン>...] [-n<数>]: タグの一覧を名前順に表示する。 */
+export function listTags(repo: Repo, patterns: readonly string[] = [], options: ListTagsOptions = {}): OperationResult {
+  const matchers = patterns.map((pattern) => globToRegExp(pattern))
   const names = Object.keys(repo.tags)
-    .filter((name) => !matcher || matcher.test(name))
+    .filter((name) => matchers.length === 0 || matchers.some((matcher) => matcher.test(name)))
+    .filter((name) => !options.filter || options.filter((repo.tags[name] as Tag).target))
     .sort((a, b) => a.localeCompare(b, 'en', { numeric: true }))
-  return { repo, output: names.join('\n') }
+  if (options.lines === undefined) return { repo, output: names.join('\n') }
+  const count = options.lines
+  const output = names.map((name) => {
+    const tag = repo.tags[name] as Tag
+    const text = (tag.message ?? getCommit(repo, tag.target).message).split('\n').filter((line) => line !== '')
+    const shown = count === 0 ? [] : text.slice(0, count)
+    const [head = '', ...more] = shown
+    return [`${name.padEnd(15)} ${head}`.replace(/\s+$/, ''), ...more.map((line) => `    ${line}`)].join('\n')
+  })
+  return { repo, output: output.join('\n') }
 }
 
 /** git show <注釈付きタグ> の先頭に出す、タグの情報。 */

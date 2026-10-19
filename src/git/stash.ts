@@ -55,6 +55,13 @@ export interface StashPushOptions {
   readonly keepIndex?: boolean
 }
 
+/** stash list に出す説明 (WIP on main: C3 … や On main: <メッセージ>)。 */
+export function stashDescription(repo: Repo, message?: string): string {
+  const branch = currentBranch(repo) ?? '(no branch)'
+  const headId = headCommitId(repo)
+  return message?.trim() ? `On ${branch}: ${message.trim()}` : `WIP on ${branch}: ${headId} ${subject(getCommit(repo, headId).message)}`
+}
+
 /** git stash / git stash push: 変更を退避して、作業ディレクトリとステージを HEAD に戻す。 */
 export function stashPush(repo: Repo, options: StashPushOptions = {}): OperationResult {
   requireNoEditor(repo)
@@ -74,10 +81,7 @@ export function stashPush(repo: Repo, options: StashPushOptions = {}): Operation
   if (treesEqual(head, repo.index) && treesEqual(repo.index, workdir) && Object.keys(untracked).length === 0) {
     throw new GitError('No local changes to save')
   }
-  const branch = currentBranch(repo) ?? '(no branch)'
-  const description = options.message?.trim()
-    ? `On ${branch}: ${options.message.trim()}`
-    : `WIP on ${branch}: ${headId} ${subject(getCommit(repo, headId).message)}`
+  const description = stashDescription(repo, options.message)
   const entry: StashEntry = { base: headId, message: description, index: repo.index, workdir, untracked }
 
   const nextIndex = options.keepIndex ? repo.index : head

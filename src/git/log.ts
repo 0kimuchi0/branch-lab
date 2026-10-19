@@ -1,8 +1,8 @@
 /**
  * git log。リビジョンの範囲 (A..B / A...B / ^A)、並べ方 (--graph のときは topo-order)、
- * 絞り込み (-n / --first-parent / --merges / --grep / パス) と、表示の形 (--oneline / --format / --graph / -p / --stat)。
+ * 絞り込み (-n / --first-parent / --merges / --grep / -S / -G / パス) と、表示の形 (--oneline / --format / --graph / -p / --stat)。
  */
-import { diffTrees } from './diff'
+import { diffTrees, editScript } from './diff'
 import {
   GitError,
   ancestors,
@@ -37,6 +37,16 @@ export interface LogOptions {
   readonly invertGrep?: boolean
   /** --author=<パターン>: 作者で絞り込む。 */
   readonly author?: string
+  /** -i: --grep・--author・-S・-G で大文字と小文字を区別しない。 */
+  readonly ignoreCase?: boolean
+  /** -S<文字列>: その文字列の出てくる数が変わったコミットだけ。 */
+  readonly pickaxe?: string
+  /** --pickaxe-regex: -S を正規表現として扱う。 */
+  readonly pickaxeRegex?: boolean
+  /** -G<正規表現>: 足した行か消した行が一致するコミットだけ。 */
+  readonly pickaxeGrep?: string
+  /** --pickaxe-all: -S / -G で -p のとき、一致しないファイルの差分も出す。 */
+  readonly pickaxeAll?: boolean
   readonly paths?: readonly string[]
   readonly patch?: boolean
   readonly stat?: boolean
@@ -119,12 +129,60 @@ function changesPath(repo: Repo, commit: Commit, specs: readonly string[]): bool
   return commit.parents.every((parent) => touched(getCommit(repo, parent).tree))
 }
 
-function matchesGrep(message: string, pattern: string): boolean {
+function matchesGrep(message: string, pattern: string, ignoreCase = false): boolean {
   try {
-    return new RegExp(pattern).test(message)
+    return new RegExp(pattern, ignoreCase ? 'i' : '').test(message)
   } catch {
-    return message.includes(pattern)
+    return ignoreCase ? message.toLowerCase().includes(pattern.toLowerCase()) : message.includes(pattern)
   }
+}
+
+function pickaxeRegExp(pattern: string, flags: string): RegExp {
+  try {
+    return new RegExp(pattern, flags)
+  } catch {
+    throw new GitError(`fatal: invalid regex: ${pattern}`)
+  }
+}
+
+function matchesPath(path: string, specs: readonly string[] | undefined): boolean {
+  return !specs || specs.length === 0 || specs.some((spec) => spec === '.' || path === spec || path.startsWith(`${spec.replace(/\/$/, '')}/`))
+}
+
+/**
+ * -S / -G に一致するファイル。マージコミットは (本物の log と同じく差分を出さないので) どれも一致しない。
+ * -S は文字列の出てくる数が変わったファイル、-G は足した行か消した行が正規表現に一致するファイル。
+ */
+function pickaxePaths(repo: Repo, commit: Commit, options: LogOptions): Set<string> {
+  const matched = new Set<string>()
+  if (commit.parents.length > 1) return matched
+  const before = commit.parents[0] === undefined ? {} : getCommit(repo, commit.parents[0]).tree
+  const flags = options.ignoreCase ? 'gi' : 'g'
+  const count = (text: string | undefined): number => {
+    if (text === undefined || options.pickaxe === undefined || options.pickaxe === '') return 0
+    if (options.pickaxeRegex) return [...text.matchAll(pickaxeRegExp(options.pickaxe, flags))].length
+    const [haystack, needle] = options.ignoreCase ? [text.toLowerCase(), options.pickaxe.toLowerCase()] : [text, options.pickaxe]
+    return haystack.split(needle).length - 1
+  }
+  const grep = options.pickaxeGrep === undefined ? null : pickaxeRegExp(options.pickaxeGrep, options.ignoreCase ? 'i' : '')
+  for (const path of Object.keys({ ...before, ...commit.tree })) {
+    const [a, b] = [before[path], commit.tree[path]]
+    if (a === b || !matchesPath(path, options.paths)) continue
+    if (options.pickaxe !== undefined && count(a) !== count(b)) matched.add(path)
+    if (grep !== null) {
+      const lines = (text: string | undefined) => (text === undefined || text === '' ? [] : text.replace(/\n$/, '').split('\n'))
+      if (editScript(lines(a), lines(b)).some((op) => op.type !== ' ' && grep.test(op.line))) matched.add(path)
+    }
+  }
+  return matched
+}
+
+function hasPickaxe(options: LogOptions): boolean {
+  return options.pickaxe !== undefined || options.pickaxeGrep !== undefined
+}
+
+function only(tree: Readonly<Record<string, string>>, paths: ReadonlySet<string>): Record<string, string> {
+  return Object.fromEntries(Object.entries(tree).filter(([path]) => paths.has(path)))
 }
 
 /** --graph のときの並べ方 (Git の --topo-order と同じく、子をすべて出してから親を出し、ブランチごとにまとめる)。 */
@@ -205,11 +263,18 @@ function entryLines(repo: Repo, commit: Commit, options: LogOptions, format: str
     }
   }
   if ((options.patch || options.stat || options.nameOnly) && commit.parents.length <= 1) {
-    const parentTree = commit.parents[0] === undefined ? {} : getCommit(repo, commit.parents[0]).tree
+    let parentTree = commit.parents[0] === undefined ? {} : getCommit(repo, commit.parents[0]).tree
+    let tree = commit.tree
+    // -S / -G では、--pickaxe-all がなければ一致したファイルの差分だけを出す
+    if (hasPickaxe(options) && !options.pickaxeAll) {
+      const paths = pickaxePaths(repo, commit, options)
+      parentTree = only(parentTree, paths)
+      tree = only(tree, paths)
+    }
     const diffs: string[] = []
-    if (options.stat) diffs.push(diffTrees(parentTree, commit.tree, { stat: true }))
-    if (options.nameOnly) diffs.push(diffTrees(parentTree, commit.tree, { nameOnly: true }))
-    if (options.patch) diffs.push(diffTrees(parentTree, commit.tree))
+    if (options.stat) diffs.push(diffTrees(parentTree, tree, { stat: true }))
+    if (options.nameOnly) diffs.push(diffTrees(parentTree, tree, { nameOnly: true }))
+    if (options.patch) diffs.push(diffTrees(parentTree, tree))
     const text = diffs.filter((diff) => diff !== '').join('\n\n')
     if (text !== '') lines.push(...(format === 'oneline' ? [] : ['']), ...text.split('\n'))
   }
@@ -227,8 +292,9 @@ export function log(repo: Repo, options: LogOptions = {}): OperationResult {
       const commit = getCommit(repo, id)
       if (options.merges === true && commit.parents.length < 2) return false
       if (options.merges === false && commit.parents.length > 1) return false
-      if (options.grep !== undefined && matchesGrep(commit.message, options.grep) === Boolean(options.invertGrep)) return false
-      if (options.author !== undefined && !matchesGrep(authorOf(commit), options.author)) return false
+      if (options.grep !== undefined && matchesGrep(commit.message, options.grep, options.ignoreCase) === Boolean(options.invertGrep)) return false
+      if (options.author !== undefined && !matchesGrep(authorOf(commit), options.author, options.ignoreCase)) return false
+      if (hasPickaxe(options) && pickaxePaths(repo, commit, options).size === 0) return false
       if (options.paths && options.paths.length > 0 && !changesPath(repo, commit, options.paths)) return false
       return true
     }),

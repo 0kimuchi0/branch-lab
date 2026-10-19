@@ -124,3 +124,38 @@ describe('git notes', () => {
     expect(cleared.notes['C1']).toBeUndefined()
   })
 })
+
+describe('git log -S / -G', () => {
+  /** C1: foo を足す、C2: 別の行を足す、C3: foo を bar に変える、C4: foo のある行を動かさず書き換え。 */
+  function history(): Repo {
+    return run([
+      'echo "call foo()" > a.txt', 'git add .', 'git commit -m add-foo',
+      'echo other >> a.txt', 'git commit -am other',
+      "sed -i 's/foo/bar/' a.txt", 'echo Foo > b.txt', 'git add .', 'git commit -m rename',
+      "sed -i 's/call bar()/call  bar()/' a.txt", 'git commit -am spacing',
+    ])
+  }
+
+  it('-S は文字列の出てくる数が変わったコミットだけを出す', () => {
+    expect(out(history(), 'git log --format=%s -Sfoo')).toBe('rename\nadd-foo')
+    expect(out(history(), 'git log --format=%s -S bar')).toBe('rename')
+    expect(out(history(), 'git log --format=%s -S foo -i')).toBe('rename\nadd-foo')
+    expect(out(history(), 'git log --format=%s -S "b.r" --pickaxe-regex')).toBe('rename')
+  })
+
+  it('-G は、足した行か消した行が正規表現に一致するコミットを出す (数が変わらなくても)', () => {
+    expect(out(history(), 'git log --format=%s -G "ba[r]"')).toBe('spacing\nrename')
+    expect(out(history(), 'git log --format=%s -G other')).toBe('other')
+  })
+
+  it('-p では一致したファイルの差分だけを出し、--pickaxe-all ならすべて出す', () => {
+    const shown = out(history(), 'git log -p --format=%s -S bar')
+    expect(shown).toContain('a.txt')
+    expect(shown).not.toContain('b.txt')
+    expect(out(history(), 'git log -p --format=%s -S bar --pickaxe-all')).toContain('b.txt')
+  })
+
+  it('マージコミットは一致しない', () => {
+    expect(out(merged(), 'git log --format=%s -S f2')).toBe('f2')
+  })
+})
