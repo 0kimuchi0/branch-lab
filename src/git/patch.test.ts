@@ -72,6 +72,14 @@ describe('git am', () => {
     expect(result.repo.reflogs['HEAD']?.[0]?.message).toBe('am: README を直す')
   })
 
+  it('サブモジュール (gitlink) の変更は、モード 160000 のまま書き出して取り込む', () => {
+    const repo = run(['git submodule add https://example.com/lib.git', 'git commit -m "add lib"', 'git format-patch -1', 'git reset --hard HEAD~1'])
+    expect(executeCommand(repo, 'cat 0001-add-lib.patch').output).toContain('diff --git a/lib b/lib\nnew file mode 160000')
+    const applied = run(['git am 0001-add-lib.patch'], repo)
+    expect(applied.commits[headCommitId(applied)]?.tree['lib']).toBe(repo.commits['C1']?.tree['lib'])
+    expect(executeCommand(applied, 'git status').output).not.toContain('new commits')
+  })
+
   it('--stdout > で 1 つにまとめたファイルからも取り込める', () => {
     const repo = run(['git format-patch main --stdout > all.patch', 'git switch main', 'git am all.patch'], topic())
     expect(Object.keys(repo.commits[headCommitId(repo)]?.tree ?? {}).sort()).toEqual(['README.md', 'a.txt'])

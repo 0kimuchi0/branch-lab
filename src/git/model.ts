@@ -136,6 +136,8 @@ export interface FilePatch {
   readonly path: string
   readonly newFile: boolean
   readonly deleted: boolean
+  /** モードが 160000 (サブモジュールの gitlink)。 */
+  readonly gitlink?: boolean
   readonly hunks: readonly Hunk[]
 }
 
@@ -1212,8 +1214,10 @@ export function restore(
         : repo.index
   const target = options.staged ? repo.index : repo.workdir
   let next = target
+  // 作業ディレクトリを戻すときも、追跡していないファイルには触らない (本物と同じ)
+  const candidates = new Set([...Object.keys(sourceTree), ...Object.keys(repo.index), ...(options.staged ? Object.keys(headTree(repo)) : [])])
   for (const spec of specs) {
-    const matched = matchPaths(new Set([...Object.keys(sourceTree), ...Object.keys(target)]), spec)
+    const matched = matchPaths(candidates, spec)
     if (matched.length === 0) {
       throw new GitError(`error: pathspec '${spec}' に一致するファイルはありません`)
     }
@@ -1783,6 +1787,15 @@ export function detachHead(repo: Repo, ref: string): OperationResult {
 export type ResetMode = 'soft' | 'mixed' | 'hard'
 
 /**
+ * 作業ディレクトリを tree の内容にするときの、新しい作業ディレクトリ。
+ * 追跡していないファイル (ステージにないファイル) は残す (reset --hard や --abort と同じ)。
+ */
+export function keepUntracked(repo: Repo, tree: Tree): Tree {
+  const untracked = Object.fromEntries(Object.entries(repo.workdir).filter(([path]) => !(path in repo.index)))
+  return { ...untracked, ...tree }
+}
+
+/**
  * 現在のブランチ (detached HEAD なら HEAD) を target に移動する。
  * --soft はステージと作業ディレクトリをそのまま、--mixed はステージを、
  * --hard はステージと作業ディレクトリも target の内容にする。
@@ -1810,7 +1823,7 @@ export function reset(
   const next: Repo =
     mode === 'soft' ? cleared
     : mode === 'mixed' ? { ...cleared, index: tree }
-    : { ...cleared, index: tree, workdir: tree }
+    : { ...cleared, index: tree, workdir: keepUntracked(repo, tree) }
 
   if (mode === 'hard') {
     return {

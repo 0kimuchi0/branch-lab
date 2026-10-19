@@ -2,7 +2,7 @@
  * git diff と同じ unified 形式の差分を作る。
  * 行の対応は tree.ts の最長共通部分列で求め、前後 3 行を文脈として付ける。
  */
-import { changedPaths, displayContent, lcsPairs, splitLines, type Tree } from './tree'
+import { changedPaths, displayContent, lcsPairs, parseGitlink, splitLines, type Tree } from './tree'
 
 export const CONTEXT = 3
 
@@ -71,8 +71,10 @@ export function diffHunks(oldText: string, newText: string): string[] {
 /** 1 つのファイルの差分。old / new が undefined ならそのファイルは存在しない。 */
 export function fileDiff(path: string, oldText: string | undefined, newText: string | undefined): string[] {
   const lines = [`diff --git a/${path} b/${path}`]
-  if (oldText === undefined) lines.push('new file mode 100644')
-  if (newText === undefined) lines.push('deleted file mode 100644')
+  // サブモジュール (gitlink) のモードは 160000
+  const mode = (text: string | undefined) => (text !== undefined && parseGitlink(text) !== null ? '160000' : '100644')
+  if (oldText === undefined) lines.push(`new file mode ${mode(newText)}`)
+  if (newText === undefined) lines.push(`deleted file mode ${mode(oldText)}`)
   // サブモジュールは "Subproject commit <ID>" の 1 行として比べる (本物の Git と同じ)
   const hunks = diffHunks(oldText === undefined ? '' : displayContent(oldText), newText === undefined ? '' : displayContent(newText))
   if (hunks.length > 0) {

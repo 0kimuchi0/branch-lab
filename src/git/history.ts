@@ -6,6 +6,7 @@ import { finishHunkEdit } from './hunks'
 import {
   EDITOR_WAITING,
   GitError,
+  keepUntracked,
   ancestors,
   carryChanges,
   cleanupMessage,
@@ -1309,7 +1310,7 @@ export function abortOperation(repo: Repo, type: HistoryOperationType): Operatio
   if (op.type === 'merge') {
     const tree = headTree(repo)
     return {
-      repo: { ...rerereClear(repo), operation: null, conflicts: [], index: tree, workdir: tree },
+      repo: { ...rerereClear(repo), operation: null, conflicts: [], index: tree, workdir: keepUntracked(repo, tree) },
       output: 'マージを中止しました',
     }
   }
@@ -1326,7 +1327,7 @@ export function abortOperation(repo: Repo, type: HistoryOperationType): Operatio
   return {
     repo: logRefs(
       repo,
-      { ...rerereClear(restored), operation: null, conflicts: [], index: tree, workdir: tree },
+      { ...rerereClear(restored), operation: null, conflicts: [], index: tree, workdir: keepUntracked(repo, tree) },
       `${type} (abort): returning to ${where}`,
       { forceHead: true },
     ),

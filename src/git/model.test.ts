@@ -255,3 +255,25 @@ describe('status', () => {
     expect(executeCommand(createRepo(), 'git status').output).toContain('作業ツリーはクリーンです')
   })
 })
+
+describe('追跡していないファイルは残す', () => {
+  /** main と f が a.txt を別々に変えた状態。 */
+  const diverged = () =>
+    run(['echo a > a.txt', 'git add .', 'git commit -m a', 'git switch -c f', 'echo f > a.txt', 'git commit -am f', 'git switch main', 'echo m > a.txt', 'git commit -am m'])
+
+  it('reset --hard と restore . / checkout -- . は、追跡していないファイルを消さない', () => {
+    for (const command of ['git reset --hard HEAD~1', 'git restore .', 'git checkout -- .']) {
+      const repo = run(['echo u > u.txt', 'echo x > a.txt', command], diverged())
+      expect(repo.workdir['u.txt'], command).toBe('u\n')
+    }
+    expect(executeCommand(run(['echo u > u.txt'], diverged()), 'git restore u.txt').ok).toBe(false)
+  })
+
+  it('merge / cherry-pick / rebase の --abort は、追跡していないファイルを消さない', () => {
+    for (const type of ['merge', 'cherry-pick', 'rebase']) {
+      const repo = run([`git ${type} f`, 'echo u > u.txt', `git ${type} --abort`], diverged())
+      expect(repo.workdir['u.txt'], type).toBe('u\n')
+      expect(repo.workdir['a.txt'], type).toBe('m\n')
+    }
+  })
+})
