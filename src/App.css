@@ -190,8 +190,9 @@
 }
 
 .puzzle-nav select {
-  flex: 1;
-  min-width: 0;
+  flex: 1 1 10em;
+  /* 狭い画面でも題名が読める幅を残す (足りなければ前後のボタンが折り返す) */
+  min-width: 9em;
   max-width: 320px;
   padding: 5px 8px;
   border: 1px solid var(--border);
@@ -703,6 +704,16 @@ button.link {
 }
 
 @media (max-width: 560px) {
+  /* ヘルプの検索欄は、題名と閉じるボタンの下に全幅で置く */
+  .help-header h2 {
+    margin-right: auto;
+  }
+
+  .help-header input {
+    order: 3;
+    flex-basis: 100%;
+  }
+
   .file-areas {
     grid-template-columns: minmax(0, 1fr);
   }
@@ -978,6 +989,11 @@ button.link {
   fill: var(--text-muted);
   font-size: 11px;
   pointer-events: none;
+  /* 線の上でも読めるように、背景色の縁取りを付ける */
+  paint-order: stroke;
+  stroke: var(--graph-bg);
+  stroke-width: 3px;
+  stroke-linejoin: round;
 }
 
 .label {
