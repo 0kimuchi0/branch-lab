@@ -4,6 +4,7 @@ import { EditorPanel } from './components/EditorPanel'
 import { HelpDialog } from './components/HelpDialog'
 import { PromptPanel } from './components/PromptPanel'
 import { PuzzlePanel } from './components/PuzzlePanel'
+import { ThemeToggle } from './components/ThemeToggle'
 import { TutorialPanel } from './components/TutorialPanel'
 import { ShareButton } from './components/ShareButton'
 import { Terminal, type LogEntry } from './components/Terminal'
@@ -288,6 +289,7 @@ export default function App() {
               ヘルプ
             </button>
             <ShareButton getUrl={() => shareUrl(hash || encodeShare(shared))} />
+            <ThemeToggle />
           </span>
         </div>
         {shareNotice && (
