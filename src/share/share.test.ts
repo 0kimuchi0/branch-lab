@@ -75,6 +75,24 @@ describe('チュートリアルの共有', () => {
     expect(restoreShare({ ...state, lessonId: 'nothing' }, puzzles)).toBeNull()
   })
 
+  it('途中のステップから始めたときは、そのステップの始めの状態から実行し直す', () => {
+    const state = { mode: 'tutorial' as const, lessonId: 'merge', step: 3, base: 3, commands: ['git merge --no-edit docs'] }
+    const decoded = decodeShare(encodeShare(state))
+    expect(decoded).toEqual(state)
+    const restored = restoreShare(decoded as NonNullable<typeof decoded>, puzzles)
+    expect(restored?.base).toBe(3)
+    expect(restored?.log.every((entry) => entry.ok)).toBe(true)
+    const main = restored?.repo.branches['main']
+    expect(main && restored?.repo.commits[main]?.parents).toHaveLength(2)
+  })
+
+  it('前の形式 (v2) のチュートリアルのリンクは、レッスンの始めから実行し直す', () => {
+    const v2 = `#s=${btoa(JSON.stringify({ v: 2, m: 'tutorial', l: 'branch', i: 1, c: ['git branch'] }))}`
+    const decoded = decodeShare(v2)
+    expect(decoded).toEqual({ mode: 'tutorial', lessonId: 'branch', step: 1, commands: ['git branch'] })
+    expect(restoreShare(decoded as NonNullable<typeof decoded>, puzzles)?.base).toBe(0)
+  })
+
   it('前の形式 (v1) のリンクも読める', () => {
     const v1 = `#s=${btoa(JSON.stringify({ v: 1, m: 'free', c: ['git status'] }))}`
     expect(decodeShare(v1)).toEqual({ mode: 'free', commands: ['git status'] })

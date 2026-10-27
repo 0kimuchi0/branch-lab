@@ -76,9 +76,11 @@ React + TypeScript + Vite、テストは Vitest。UI の文言は日本語。
   お題を足したら、解答例で正解になり初期状態では正解にならないことを `puzzles.test.ts` が確かめる。
 - `src/tutorial/lessons.ts`: チュートリアルのレッスン。各ステップは説明と、課題 (`commands`) と達成の判定 (`check`) を持つ。
   レッスンを足したら、各ステップが始めたときは未達成で例のコマンドで達成できることを `lessons.test.ts` が確かめる。
+  番号で移る・とばす・戻るときは、そのステップの始めの状態 (`stepStartRepo`: setup と前のステップの例のコマンド) から始め、
+  共有リンクにはその基準のステップ (`base`) を入れる。
 - `src/help/commands.ts`: コマンドのヘルプ (`COMMAND_HELP`)。ターミナルの `help` / `git help` / `-h` と、画面の `HelpDialog` の両方が使う。
   コマンドやオプションを足したら、ここも更新する (`commands.test.ts` が、例のコマンドが使えるオプションだけかを確かめる)。
-- `src/share/share.ts`: URL 共有。ハッシュには状態ではなくモード・お題 ID (またはレッスン ID とステップ)・コマンド列を入れ、開いた側で再実行して復元する。
+- `src/share/share.ts`: URL 共有。ハッシュには状態ではなくモード・お題 ID (またはレッスン ID・ステップ・基準のステップ)・コマンド列を入れ、開いた側で再実行して復元する。
   形式を変えるときは `VERSION` を上げる。コマンドから `Repo` が決定的に作られることが前提なので、
   モデルに乱数や時刻を持ち込まない。
 - `src/components/`: `GraphView` (SVG 描画とアニメーション)、`FileArea`、`Workspace` (4 領域と stash)、
