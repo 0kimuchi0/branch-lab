@@ -4,7 +4,7 @@
  * 文中の `…` はコードとして表示する。
  */
 import { executeCommand } from '../git/commands'
-import { createRepo, headTree, type Repo } from '../git/model'
+import { createRepo, headTree, isAncestor, type Repo } from '../git/model'
 import { activeRepo } from '../git/submodule'
 
 export interface StepContext {
@@ -247,7 +247,11 @@ export const LESSONS: readonly Lesson[] = [
         check: ({ repo }) => {
           const main = branchTip(repo, 'main')
           const docs = branchTip(repo, 'docs')
-          return main !== undefined && docs !== undefined && main !== docs && 'guide.txt' in (repo.commits[docs]?.tree ?? {}) && !('guide.txt' in (repo.commits[main]?.tree ?? {}))
+          if (main === undefined || docs === undefined) return false
+          // docs でコミットしただけでは未達成。main に戻って main でもコミットし、両方が進んだら達成
+          const diverged = !isAncestor(repo, main, docs) && !isAncestor(repo, docs, main)
+          const onMain = repo.head.type === 'branch' && repo.head.name === 'main'
+          return diverged && onMain && 'guide.txt' in (repo.commits[docs]?.tree ?? {}) && !('guide.txt' in (repo.commits[main]?.tree ?? {}))
         },
       },
       {
