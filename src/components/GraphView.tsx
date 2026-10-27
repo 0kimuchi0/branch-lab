@@ -34,6 +34,8 @@ interface GraphViewProps {
 
 export function GraphView({ layout, label }: GraphViewProps) {
   const scrollRef = useRef<HTMLDivElement>(null)
+  // 線が重なったときに main (レーン 0) が一番上に見えるように、番号の大きいレーンから先に描く
+  const edgesBackToFront = [...layout.edges].sort((a, b) => b.lane - a.lane)
 
   // コミットが増えたとき、最新側 (右端) が見えるようにスクロールする
   useEffect(() => {
@@ -51,7 +53,7 @@ export function GraphView({ layout, label }: GraphViewProps) {
         height={layout.height}
         viewBox={`0 0 ${layout.width} ${layout.height}`}
       >
-        {layout.edges.map((edge) => (
+        {edgesBackToFront.map((edge) => (
           <path
             key={edge.key}
             className={edge.reachable ? 'edge' : 'edge unreachable'}
