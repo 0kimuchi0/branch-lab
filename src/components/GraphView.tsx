@@ -7,6 +7,13 @@ function laneColor(lane: number): string {
   return `var(--lane-${lane % LANE_COLOR_COUNT})`
 }
 
+/** 路線図の線: 同じレーンは直線、ほかのレーンとの接続はなめらかなベジェ曲線で描く。 */
+function edgePath(x1: number, y1: number, x2: number, y2: number): string {
+  if (y1 === y2) return `M${x1} ${y1}H${x2}`
+  const mid = (x1 + x2) / 2
+  return `M${x1} ${y1}C${mid} ${y1},${mid} ${y2},${x2} ${y2}`
+}
+
 /** 幅の目安 (px) に収まるように切り詰める。全角文字は半角のおよそ 2 倍の幅として数える。 */
 function truncate(text: string, maxWidth: number): string {
   let width = 0
@@ -27,6 +34,8 @@ interface GraphViewProps {
 
 export function GraphView({ layout, label }: GraphViewProps) {
   const scrollRef = useRef<HTMLDivElement>(null)
+  // 線が重なったときに main (レーン 0) が一番上に見えるように、番号の大きいレーンから先に描く
+  const edgesBackToFront = [...layout.edges].sort((a, b) => b.lane - a.lane)
 
   // コミットが増えたとき、最新側 (右端) が見えるようにスクロールする
   useEffect(() => {
@@ -44,17 +53,14 @@ export function GraphView({ layout, label }: GraphViewProps) {
         height={layout.height}
         viewBox={`0 0 ${layout.width} ${layout.height}`}
       >
-        {layout.edges.map((edge) => {
-          const mid = (edge.x1 + edge.x2) / 2
-          return (
-            <path
-              key={edge.key}
-              className={edge.reachable ? 'edge' : 'edge unreachable'}
-              d={`M${edge.x1} ${edge.y1} C${mid} ${edge.y1}, ${mid} ${edge.y2}, ${edge.x2} ${edge.y2}`}
-              stroke={laneColor(edge.lane)}
-            />
-          )
-        })}
+        {edgesBackToFront.map((edge) => (
+          <path
+            key={edge.key}
+            className={edge.reachable ? 'edge' : 'edge unreachable'}
+            d={edgePath(edge.x1, edge.y1, edge.x2, edge.y2)}
+            stroke={laneColor(edge.lane)}
+          />
+        ))}
 
         {layout.nodes.map((node) => (
           <g
@@ -68,11 +74,8 @@ export function GraphView({ layout, label }: GraphViewProps) {
                   ? `${node.id}: ${node.message}`
                   : `${node.id}: ${node.message} (どのブランチからもたどれません)`}
               </title>
-              <circle
-                className={node.isMerge ? 'node merge' : 'node'}
-                r={node.isMerge ? 17 : 15}
-                fill={laneColor(node.lane)}
-              />
+              <circle className="node" r={node.isMerge ? 17 : 14} />
+              {node.isMerge && <circle className="node-ring" r={11} />}
               <text className="node-id" textAnchor="middle" dy="0.35em">
                 {node.id}
               </text>
@@ -94,7 +97,8 @@ export function GraphView({ layout, label }: GraphViewProps) {
               y={-11}
               width={label.width}
               height={22}
-              rx={11}
+              rx={4}
+              style={{ stroke: label.kind === 'branch' ? laneColor(label.lane) : undefined }}
             />
             <text textAnchor="middle" dy="0.35em">
               {label.text}
