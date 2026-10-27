@@ -7,12 +7,11 @@ function laneColor(lane: number): string {
   return `var(--lane-${lane % LANE_COLOR_COUNT})`
 }
 
-/** 路線図の線: 水平 → 斜め → 水平。段差があるときだけ、中ほどで斜めに乗り換える。 */
+/** 路線図の線: 同じレーンは直線、ほかのレーンとの接続はなめらかなベジェ曲線で描く。 */
 function edgePath(x1: number, y1: number, x2: number, y2: number): string {
   if (y1 === y2) return `M${x1} ${y1}H${x2}`
   const mid = (x1 + x2) / 2
-  const run = Math.min(Math.abs(y2 - y1), Math.abs(x2 - x1))
-  return `M${x1} ${y1}H${mid - run / 2}L${mid + run / 2} ${y2}H${x2}`
+  return `M${x1} ${y1}C${mid} ${y1},${mid} ${y2},${x2} ${y2}`
 }
 
 /** 幅の目安 (px) に収まるように切り詰める。全角文字は半角のおよそ 2 倍の幅として数える。 */
