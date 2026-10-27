@@ -12,10 +12,10 @@
       .inner { fill: #101820; }
     }
   </style>
-  <!-- 本線 (緑) と支線 (橙) が同じ駅から出て、乗り換え駅 (二重の輪) で合流する。支線の角は線路のような曲線にする -->
-  <path class="branch" d="M5.5 26.5h11a10 10 0 0 0 10-10V5.5" fill="none" stroke-width="3.6" stroke-linejoin="round"/>
+  <!-- 本線 (緑) と支線 (橙) が同じ駅から出て、乗り換え駅 (二重の輪) で合流する。支線は対角線に対称な曲線で、駅はその中央に置く -->
+  <path class="branch" d="M5.5 26.5h7a14 14 0 0 0 14-14v-7" fill="none" stroke-width="3.6" stroke-linecap="round"/>
   <path class="main" d="M5.5 26.5 26.5 5.5" fill="none" stroke-width="3.6" stroke-linecap="round"/>
-  <circle class="station" cx="23.6" cy="23.6" r="2.9" stroke-width="1.6"/>
+  <circle class="station" cx="22.4" cy="22.4" r="2.9" stroke-width="1.6"/>
   <circle class="station" cx="5.5" cy="26.5" r="3.4" stroke-width="1.6"/>
   <circle class="station" cx="26.5" cy="5.5" r="4.1" stroke-width="1.6"/>
   <circle class="inner" cx="26.5" cy="5.5" r="1.6"/>
