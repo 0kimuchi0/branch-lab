@@ -16,11 +16,14 @@ describe('LESSONS', () => {
         if (step.check === undefined) continue
         expect(isStepDone(step, repo, null), `${index + 1}. ${step.title} (始めたとき)`).toBe(false)
         let last: StepContext['last'] = null
-        for (const command of step.solution ?? step.commands ?? []) {
+        const commands = step.solution ?? step.commands ?? []
+        for (const [i, command] of commands.entries()) {
           const result = executeCommand(repo, command)
           expect(result.ok, `${step.title}: ${command}\n${result.output}`).toBe(true)
           repo = result.repo
           last = { command, ok: result.ok }
+          // 例のコマンドを最後まで実行する前に「できました」にならない
+          if (i < commands.length - 1) expect(isStepDone(step, repo, last), `${index + 1}. ${step.title} (${command} のあと)`).toBe(false)
         }
         expect(isStepDone(step, repo, last), `${index + 1}. ${step.title}`).toBe(true)
       }
