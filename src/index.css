@@ -39,9 +39,9 @@
     --surface: #17222d;
     --border: #2b3a49;
     /* 白は真っ白にせず、まぶしさを抑えた灰白にする (地とのコントラストは 7:1 以上を保つ) */
-    --text: #dae0e4;
+    --text: #e0e6e9;
     --text-muted: #97a6b5;
-    --accent: #bfcad2;
+    --accent: #cad4db;
     --accent-text: #101820;
     --focus: #4da3e8;
     --error: #ff8a96;
@@ -64,9 +64,9 @@
   --surface: #17222d;
   --border: #2b3a49;
   /* 白は真っ白にせず、まぶしさを抑えた灰白にする (地とのコントラストは 7:1 以上を保つ) */
-  --text: #dae0e4;
+  --text: #e0e6e9;
   --text-muted: #97a6b5;
-  --accent: #bfcad2;
+  --accent: #cad4db;
   --accent-text: #101820;
   --focus: #4da3e8;
   --error: #ff8a96;
