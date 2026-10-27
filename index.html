@@ -11,6 +11,13 @@
       href="https://fonts.googleapis.com/css2?family=BIZ+UDPGothic:wght@400;700&family=JetBrains+Mono:wght@500;700&display=swap"
     />
     <title>BranchLab - Git の動きを見て学ぶ</title>
+    <script>
+      // 保存したテーマを描画の前に反映して、読み込みの瞬間に別のテーマが見えないようにする (src/theme/theme.ts と同じキー)
+      try {
+        var t = localStorage.getItem('branch-lab:theme');
+        if (t === 'light' || t === 'dark') document.documentElement.setAttribute('data-theme', t);
+      } catch (e) {}
+    </script>
   </head>
   <body>
     <div id="root"></div>

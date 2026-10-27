@@ -27,14 +27,21 @@
   line-height: 1.5;
 }
 
+/*
+ * ダークの配色。CSS だけでは「OS がダーク」と「ダークを明示」を 1 つのセレクタにまとめられないので、
+ * 同じ値を 2 か所に書いている。変数を足したり値を変えたりしたら、両方を同じにすること。
+ */
+
+/* 自動: OS がダークで、ライトが明示されていないときだけダーク */
 @media (prefers-color-scheme: dark) {
-  :root {
+  :root:not([data-theme='light']) {
     --bg: #101820;
     --surface: #17222d;
     --border: #2b3a49;
-    --text: #e6ecef;
+    /* 白は真っ白にせず、まぶしさを抑えた灰白にする (地とのコントラストは 7:1 以上を保つ) */
+    --text: #e0e6e9;
     --text-muted: #97a6b5;
-    --accent: #e6ecef;
+    --accent: #cad4db;
     --accent-text: #101820;
     --focus: #4da3e8;
     --error: #ff8a96;
@@ -46,7 +53,38 @@
     --lane-3: #b58ce0;
     --lane-4: #ff6b7b;
     --lane-5: #5cc3d6;
+
+    color-scheme: dark;
   }
+}
+
+/* ダークを明示 */
+:root[data-theme='dark'] {
+  --bg: #101820;
+  --surface: #17222d;
+  --border: #2b3a49;
+  /* 白は真っ白にせず、まぶしさを抑えた灰白にする (地とのコントラストは 7:1 以上を保つ) */
+  --text: #e0e6e9;
+  --text-muted: #97a6b5;
+  --accent: #cad4db;
+  --accent-text: #101820;
+  --focus: #4da3e8;
+  --error: #ff8a96;
+  --graph-bg: #17222d;
+
+  --lane-0: #2cc79a;
+  --lane-1: #ff9a2e;
+  --lane-2: #4da3e8;
+  --lane-3: #b58ce0;
+  --lane-4: #ff6b7b;
+  --lane-5: #5cc3d6;
+
+  color-scheme: dark;
+}
+
+/* ライトを明示 (値は :root の素の定義を使う) */
+:root[data-theme='light'] {
+  color-scheme: light;
 }
 
 * {

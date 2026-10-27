@@ -88,6 +88,50 @@
   cursor: pointer;
 }
 
+.theme-toggle {
+  display: inline-flex;
+}
+
+.theme-toggle button {
+  padding: 3px 10px;
+  border: 1px solid var(--border);
+  background: var(--surface);
+  color: var(--text);
+  font-family: var(--font-ui);
+  font-size: 0.85rem;
+  cursor: pointer;
+}
+
+/* 隣り合うボタンの枠を重ねて、1 本の線に見せる */
+.theme-toggle button + button {
+  margin-left: -1px;
+}
+
+.theme-toggle button:first-child {
+  border-radius: 4px 0 0 4px;
+}
+
+.theme-toggle button:last-child {
+  border-radius: 0 4px 4px 0;
+}
+
+.theme-toggle button:hover {
+  background: color-mix(in srgb, var(--accent) 10%, var(--surface));
+}
+
+.theme-toggle button[aria-pressed='true'] {
+  position: relative;
+  border-color: var(--accent);
+  background: var(--accent);
+  color: var(--accent-text);
+}
+
+/* フォーカスの枠が隣のボタンの下に隠れないようにする */
+.theme-toggle button:focus-visible {
+  position: relative;
+  z-index: 1;
+}
+
 .share-url {
   width: min(420px, 100%);
   padding: 3px 8px;
