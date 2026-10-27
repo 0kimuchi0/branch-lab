@@ -13,7 +13,7 @@ import { activeRepo } from './git/submodule'
 import { currentDirectory } from './git/worktree'
 import { createRepo, currentBranch, headCommitIdOrNull, type Repo } from './git/model'
 import { PUZZLES, buildPuzzle, isSolved, type BuiltPuzzle } from './puzzles/puzzles'
-import { LESSONS, isStepDone, lessonStart } from './tutorial/lessons'
+import { LESSONS, isStepDone, lessonStart, stepStartRepo } from './tutorial/lessons'
 import {
   decodeShare,
   encodeShare,
@@ -98,6 +98,8 @@ export default function App() {
   const [step, setStep] = useState(restored?.mode === 'tutorial' ? restored.step : 0)
   /** 今のステップに来たときのログの長さ (課題の判定に、そのあとのコマンドだけを使う)。 */
   const [stepStart, setStepStart] = useState(restored?.mode === 'tutorial' ? restored.log.length : 0)
+  /** ログがどのステップの始めの状態から始まっているか (共有リンクで、その状態からコマンドを実行し直す)。 */
+  const [stepBase, setStepBase] = useState(restored?.mode === 'tutorial' ? restored.base : 0)
   const [tutorial, setTutorial] = useState<Session>(() =>
     restored?.mode === 'tutorial'
       ? toSession(restored)
@@ -147,9 +149,10 @@ export default function App() {
 
   const reset = () => {
     if (mode === 'tutorial') {
-      setTutorial({ repo: lessonStart(lesson), log: [] })
-      setStep(0)
+      // 今のステップを始めの状態からやり直す
+      setTutorial({ repo: stepStartRepo(lesson, step), log: [] })
       setStepStart(0)
+      setStepBase(step)
       return
     }
     setSession({ repo: mode === 'free' ? createRepo() : built.start, log: [] })
@@ -162,12 +165,21 @@ export default function App() {
     setTutorial({ repo: lessonStart(target), log: [] })
     setStep(0)
     setStepStart(0)
+    setStepBase(0)
   }
 
   const goStep = (index: number) => {
-    if (index < 0 || index >= lesson.steps.length) return
+    if (index < 0 || index >= lesson.steps.length || index === step) return
     setStep(index)
-    setStepStart(tutorial.log.length)
+    if (index === step + 1 && stepDone) {
+      // 課題を達成して次へ進むときは、自分で作った状態のまま続ける
+      setStepStart(tutorial.log.length)
+    } else {
+      // 飛ばす・戻る・番号で移るときは、そのステップの始めの状態 (前のステップを例のとおりに進めた状態) にする
+      setTutorial({ repo: stepStartRepo(lesson, index), log: [] })
+      setStepStart(0)
+      setStepBase(index)
+    }
     if (index === lesson.steps.length - 1) completeLesson(lesson.id)
   }
 
@@ -193,7 +205,7 @@ export default function App() {
   const shared: SharedState = {
     mode,
     ...(mode === 'puzzle' ? { puzzleId: built.puzzle.id } : {}),
-    ...(mode === 'tutorial' ? { lessonId: lesson.id, step } : {}),
+    ...(mode === 'tutorial' ? { lessonId: lesson.id, step, base: stepBase } : {}),
     commands: session.log.map((entry) => entry.command),
   }
   const hash = mode === 'free' && shared.commands.length === 0 ? '' : encodeShare(shared)
@@ -219,6 +231,7 @@ export default function App() {
         setLessonIndex(loaded.lessonIndex)
         setStep(loaded.step)
         setStepStart(loaded.log.length)
+        setStepBase(loaded.base)
         setTutorial(toSession(loaded))
       } else {
         setPuzzleIndex(loaded.puzzleIndex)
