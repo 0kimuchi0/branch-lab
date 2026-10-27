@@ -23,7 +23,7 @@
   border-radius: 999px;
   background: var(--surface);
   color: var(--text);
-  font-family: ui-monospace, 'SF Mono', Menlo, Consolas, monospace;
+  font-family: var(--font-code);
   font-size: 0.85rem;
 }
 
@@ -95,7 +95,7 @@
   border-radius: 6px;
   background: var(--graph-bg);
   color: var(--text);
-  font-family: ui-monospace, 'SF Mono', Menlo, Consolas, monospace;
+  font-family: var(--font-code);
   font-size: 0.75rem;
 }
 
@@ -698,7 +698,7 @@ button.link {
   gap: 24px;
   padding: 6px 0;
   color: var(--text-muted);
-  font-family: ui-monospace, 'SF Mono', Menlo, Consolas, monospace;
+  font-family: var(--font-code);
   font-size: 0.75rem;
   white-space: nowrap;
 }
@@ -745,7 +745,7 @@ button.link {
   gap: 8px;
   padding: 2px 12px;
   cursor: pointer;
-  font-family: ui-monospace, 'SF Mono', Menlo, Consolas, monospace;
+  font-family: var(--font-code);
   font-size: 0.85rem;
 }
 
@@ -840,7 +840,7 @@ button.link {
   border-radius: 8px;
   background: var(--graph-bg);
   color: var(--text);
-  font-family: ui-monospace, 'SF Mono', Menlo, Consolas, monospace;
+  font-family: var(--font-code);
   font-size: 0.85rem;
   line-height: 1.5;
   resize: vertical;
@@ -913,7 +913,7 @@ button.link {
   display: block;
   margin-left: 16px;
   color: var(--text-muted);
-  font-family: ui-monospace, 'SF Mono', Menlo, Consolas, monospace;
+  font-family: var(--font-code);
   font-size: 0.78rem;
 }
 
@@ -941,8 +941,9 @@ button.link {
 
 .edge {
   fill: none;
-  stroke-width: 3;
+  stroke-width: 9;
   stroke-linecap: round;
+  stroke-linejoin: round;
   animation: edge-in 0.4s ease-out both;
 }
 
@@ -962,12 +963,15 @@ button.link {
   opacity: 0.35;
 }
 
+/* 駅: 白い円に墨藍の縁。マージは二重の輪にして乗り換え駅にする */
 .node {
-  stroke: var(--graph-bg);
-  stroke-width: 3;
+  fill: var(--graph-bg);
+  stroke: var(--text);
+  stroke-width: 3.5;
 }
 
-.node.merge {
+.node-ring {
+  fill: none;
   stroke: var(--text);
   stroke-width: 2;
 }
@@ -979,14 +983,15 @@ button.link {
 }
 
 .node-id {
-  fill: var(--accent-text);
+  fill: var(--text);
+  font-family: var(--font-code);
   font-size: 11px;
   font-weight: 700;
   pointer-events: none;
 }
 
 .node-message {
-  fill: var(--text-muted);
+  fill: var(--text);
   font-size: 11px;
   pointer-events: none;
   /* 線の上でも読めるように、背景色の縁取りを付ける */
@@ -1003,13 +1008,14 @@ button.link {
 .label rect {
   fill: var(--surface);
   stroke: var(--border);
-  stroke-width: 1.5;
+  stroke-width: 2;
 }
 
 .label text {
   fill: var(--text);
+  font-family: var(--font-code);
   font-size: 12px;
-  font-weight: 600;
+  font-weight: 700;
 }
 
 .label-current rect {
@@ -1119,7 +1125,7 @@ button.link {
 }
 
 .log-command {
-  font-family: ui-monospace, 'SF Mono', Menlo, Consolas, monospace;
+  font-family: var(--font-code);
   word-break: break-all;
 }
 
@@ -1171,7 +1177,7 @@ button.link {
   border-radius: 999px;
   background: transparent;
   color: var(--text);
-  font-family: ui-monospace, 'SF Mono', Menlo, Consolas, monospace;
+  font-family: var(--font-code);
   font-size: 0.8rem;
   cursor: pointer;
 }
@@ -1199,7 +1205,7 @@ button.link {
 
 .terminal-form input:focus-visible,
 button:focus-visible {
-  outline: 2px solid var(--accent);
+  outline: 3px solid var(--focus);
   outline-offset: 2px;
 }
 
