@@ -4,7 +4,7 @@
  * 文中の `…` はコードとして表示する。
  */
 import { executeCommand } from '../git/commands'
-import { createRepo, headTree, type Repo } from '../git/model'
+import { createRepo, headTree, isAncestor, type Repo } from '../git/model'
 import { activeRepo } from '../git/submodule'
 
 export interface StepContext {
@@ -247,7 +247,11 @@ export const LESSONS: readonly Lesson[] = [
         check: ({ repo }) => {
           const main = branchTip(repo, 'main')
           const docs = branchTip(repo, 'docs')
-          return main !== undefined && docs !== undefined && main !== docs && 'guide.txt' in (repo.commits[docs]?.tree ?? {}) && !('guide.txt' in (repo.commits[main]?.tree ?? {}))
+          if (main === undefined || docs === undefined) return false
+          // docs でコミットしただけでは未達成。main に戻って main でもコミットし、両方が進んだら達成
+          const diverged = !isAncestor(repo, main, docs) && !isAncestor(repo, docs, main)
+          const onMain = repo.head.type === 'branch' && repo.head.name === 'main'
+          return diverged && onMain && 'guide.txt' in (repo.commits[docs]?.tree ?? {}) && !('guide.txt' in (repo.commits[main]?.tree ?? {}))
         },
       },
       {
@@ -473,11 +477,23 @@ export function isStepDone(step: TutorialStep, root: Repo, last: StepContext['la
   return step.check({ repo: activeRepo(root), last })
 }
 
-/** レッスンの初期状態 (setup を実行した Repo)。 */
-export function lessonStart(lesson: Lesson): Repo {
-  return lesson.setup.reduce((repo, line) => {
+function runAll(start: Repo, commands: readonly string[]): Repo {
+  return commands.reduce((repo, line) => {
     const result = executeCommand(repo, line)
     if (!result.ok) throw new Error(`レッスンのコマンド "${line}" が失敗しました:\n${result.output}`)
     return result.repo
-  }, createRepo())
+  }, start)
+}
+
+/** レッスンの初期状態 (setup を実行した Repo)。 */
+export function lessonStart(lesson: Lesson): Repo {
+  return runAll(createRepo(), lesson.setup)
+}
+
+/**
+ * ステップ index を始めるときの Repo。setup と、それより前のステップの例のコマンドを実行した状態。
+ * 途中のステップに移ったときは、この状態から始めるので、前のステップを飛ばしても課題を達成できる。
+ */
+export function stepStartRepo(lesson: Lesson, index: number): Repo {
+  return runAll(lessonStart(lesson), lesson.steps.slice(0, index).flatMap((step) => step.solution ?? step.commands ?? []))
 }
