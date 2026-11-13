@@ -84,6 +84,7 @@ React + TypeScript + Vite、テストは Vitest。UI の文言は日本語。
   形式を変えるときは `VERSION` を上げる。コマンドから `Repo` が決定的に作られることが前提なので、
   モデルに乱数や時刻を持ち込まない。
 - `src/terminal/suggest.ts`: 入力欄のコマンドの候補 (`suggest`)。最初に試す例と、ヘルプの例 (`COMMAND_HELP` の examples) から探す。
+  説明で探すときは、表記をそろえ (`normalize`)、漢字の骨組み・活用・同じ意味の言葉 (`SYNONYMS`) で言葉の揺れに強くする。
 - `src/theme/theme.ts`: テーマ (自動 / ライト / ダーク)。`<html>` の `data-theme` と `localStorage` (`branch-lab:theme`) を扱い、URL 共有には含めない。
 - `src/components/`: `GraphView` (SVG 描画とアニメーション)、`FileArea`、`Workspace` (4 領域と stash)、
   `EditorPanel`、`PromptPanel` (-p の質問)、`PuzzlePanel`、`TutorialPanel`、`HelpDialog`、`ShareButton`、`Terminal` (入力欄とログ)。
