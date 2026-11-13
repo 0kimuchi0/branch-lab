@@ -346,7 +346,7 @@ export default function App() {
           editorOpen={active.editor !== null}
           promptOpen={active.prompt !== null}
           draft={draft}
-          {...(mode === 'free' ? { emptyHint: 'はじめての方は、上の「チュートリアル」から始めましょう。コマンドを入力するか、下のボタンを押しても試せます。' } : {})}
+          {...(mode === 'free' ? { emptyHint: 'はじめての方は、上の「チュートリアル」から始めましょう。コマンドを入力すると候補が出ます (空の入力欄で ↓ を押すと、最初に試す例が出ます)。' } : {})}
         />
       </main>
       {helpOpen && (

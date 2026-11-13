@@ -83,6 +83,7 @@ React + TypeScript + Vite、テストは Vitest。UI の文言は日本語。
 - `src/share/share.ts`: URL 共有。ハッシュには状態ではなくモード・お題 ID (またはレッスン ID・ステップ・基準のステップ)・コマンド列を入れ、開いた側で再実行して復元する。
   形式を変えるときは `VERSION` を上げる。コマンドから `Repo` が決定的に作られることが前提なので、
   モデルに乱数や時刻を持ち込まない。
+- `src/terminal/suggest.ts`: 入力欄のコマンドの候補 (`suggest`)。最初に試す例と、ヘルプの例 (`COMMAND_HELP` の examples) から探す。
 - `src/theme/theme.ts`: テーマ (自動 / ライト / ダーク)。`<html>` の `data-theme` と `localStorage` (`branch-lab:theme`) を扱い、URL 共有には含めない。
 - `src/components/`: `GraphView` (SVG 描画とアニメーション)、`FileArea`、`Workspace` (4 領域と stash)、
   `EditorPanel`、`PromptPanel` (-p の質問)、`PuzzlePanel`、`TutorialPanel`、`HelpDialog`、`ShareButton`、`Terminal` (入力欄とログ)。
